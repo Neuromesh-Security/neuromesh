@@ -21,3 +21,5 @@ prost = "0.12"
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.11"
+[workspace]
+members = ["ebpf"]

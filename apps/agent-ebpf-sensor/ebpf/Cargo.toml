@@ -1,0 +1,15 @@
+[package]
+name = "agent-ebpf-sensor-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-ebpf = "0.1.0"
+aya-log-ebpf = "0.1.0"
+
+[build-dependencies]
+aya-build = "0.1.0"
+
+[[bin]]
+name = "agent-ebpf-sensor"
+path = "src/main.rs"
