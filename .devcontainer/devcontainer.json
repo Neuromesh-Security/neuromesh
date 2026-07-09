@@ -1,0 +1,16 @@
+{
+  "name": "Neuromesh eBPF Kernel Lab",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bullseye",
+  "privileged": true,
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "ms-vscode.cpptools",
+        "zxh404.vscode-proto3"
+      ]
+    }
+  },
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y clang llvm libelf-dev libpcap-dev gcc-multilib build-essential protobuf-compiler"
+}
