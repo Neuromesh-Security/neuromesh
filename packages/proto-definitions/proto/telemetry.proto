@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package neuromesh.telemetry.v1;
+
+// Optiuni de compilare pentru generarea automata a claselor
+option go_package = "github.com/Neuromesh-Security/neuromesh/packages/proto-definitions/gen/go/telemetry/v1;telemetryv1";
+
+// ---------------------------------------------------------
+// Wrapper-ul principal care va curge prin Kafka spre AI
+// ---------------------------------------------------------
+message TelemetryEvent {
+  string event_id = 1;
+  int64 timestamp_ns = 2; // Precizia la nanosecunda este critica pentru ordonarea evenimentelor
+  string node_name = 3;   // Nodul Kubernetes de pe care provine
+  
+  // 'oneof' garanteaza eficienta in memorie: un eveniment este ORI de proces, ORI de retea
+  oneof payload {
+    ProcessExec process_exec = 4;
+    NetworkFlow network_flow = 5;
+  }
+}
+
+// ---------------------------------------------------------
+// Fast Path: Generat cand eBPF intercepteaza 'sys_execve'
+// ---------------------------------------------------------
+message ProcessExec {
+  uint32 pid = 1;
+  uint32 ppid = 2;
+  string binary_path = 3;
+  repeated string arguments = 4;
+  string spiffe_id = 5; // Identitatea criptografica Zero Trust extrasa in timp real
+}
+
+// ---------------------------------------------------------
+// Fast Path: Generat cand eBPF analizeaza trafic L4/socket
+// ---------------------------------------------------------
+message NetworkFlow {
+  string source_ip = 1;
+  uint32 source_port = 2;
+  string destination_ip = 3;
+  uint32 destination_port = 4;
+  uint64 bytes_transferred = 5;
+  bool is_encrypted = 6; // Semnal critic pentru motorul GNN (detectia exfiltrarii de date in clar)
+}
