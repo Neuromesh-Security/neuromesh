@@ -23,5 +23,26 @@ Neuromesh embraces the open-source community to ensure trust, transparency, and 
 * `/apps` - Autonomous deployable units (eBPF Sensor, AI Detector, ZT Engine).
 * `/packages` - Shared internal libraries (Crypto, Telemetry, UI UI Kit).
 
+* 
+## 🛠️ Prerequisites & Quickstart
+
+Neuromesh operates at Ring 0 and requires a modern environment for eBPF bytecode compilation and kernel injection.
+
+### System Requirements
+* **OS:** Linux Kernel `5.8` or higher (for complete BPF Memory Map and Ring Buffer support).
+* **Toolchain:** Rust Nightly (required for `core` and `compiler_builtins`).
+* **Dependencies:** `bpf-linker`
+
+### Setup & Compilation
+```bash
+# 1. Install the eBPF linker
+cargo install bpf-linker
+
+# 2. Compile the kernel-space eBPF program
+cargo xtask build-ebpf --release
+
+# 3. Run the user-space orchestrator (Root privileges required for bpf() syscall)
+RUST_LOG=info sudo -E cargo run --release
+
 ---
 *Built for environments where milliseconds matter.*
