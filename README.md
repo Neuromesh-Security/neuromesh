@@ -23,7 +23,6 @@ Neuromesh embraces the open-source community to ensure trust, transparency, and 
 * `/apps` - Autonomous deployable units (eBPF Sensor, AI Detector, ZT Engine).
 * `/packages` - Shared internal libraries (Crypto, Telemetry, UI UI Kit).
 
-* 
 ## 🛠️ Prerequisites & Quickstart
 
 Neuromesh operates at Ring 0 and requires a modern environment for eBPF bytecode compilation and kernel injection.
@@ -35,14 +34,20 @@ Neuromesh operates at Ring 0 and requires a modern environment for eBPF bytecode
 
 ### Setup & Compilation
 ```bash
+# 0. Move into the eBPF sensor app
+cd apps/agent-ebpf-sensor
+
 # 1. Install the eBPF linker
 cargo install bpf-linker
 
-# 2. Compile the kernel-space eBPF program
-cargo xtask build-ebpf --release
+# 2. Compile the kernel-space eBPF program for the bpfel target
+cd ebpf && cargo +nightly build --release --target=bpfel-unknown-none -Z build-std=core && cd ..
 
 # 3. Run the user-space orchestrator (Root privileges required for bpf() syscall)
-RUST_LOG=info sudo -E cargo run --release
+# `-E env "PATH=$PATH"` is required because sudo's secure_path ignores a
+# rustup-managed PATH by default, even with -E.
+sudo -E env "PATH=$PATH" RUST_LOG=info cargo run --release
+```
 
 ---
 *Built for environments where milliseconds matter.*
