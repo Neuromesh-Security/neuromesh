@@ -1,8 +1,11 @@
+mod rules;
+
 use aya::maps::{Array, MapData, RingBuf};
 use aya::programs::TracePoint;
 use aya::Ebpf;
 use log::info;
 use neuromesh_common::{SecurityTelemetryEvent, TelemetryHealthStats, TELEMETRY_STATS_INDEX};
+use rules::{RuleEngine, RuleVerdict};
 use std::ptr;
 use std::time::Duration;
 use tokio::io::unix::AsyncFd;
@@ -37,8 +40,9 @@ async fn main() -> Result<(), anyhow::Error> {
             .ok_or_else(|| anyhow::anyhow!("TELEMETRY_RINGBUF map missing from eBPF object"))?,
     )?;
     let mut async_ring = AsyncFd::new(telemetry_map)?;
+    let rule_engine = RuleEngine::new();
 
-    info!("⚡ Async telemetry pipeline armed. Polling RingBuf...");
+    info!("⚡ Detection brain armed. RuleEngine active on RingBuf stream...");
 
     let mut stats_interval = tokio::time::interval(Duration::from_secs(5));
     stats_interval.tick().await;
@@ -53,12 +57,9 @@ async fn main() -> Result<(), anyhow::Error> {
                     let event = unsafe {
                         ptr::read_unaligned(item.as_ptr() as *const SecurityTelemetryEvent)
                     };
-                    let filename = format_filename(&event);
-
-                    info!(
-                        "🚨 Intercepted: pid={} uid={} target={}",
-                        event.pid, event.uid, filename
-                    );
+                    if let Err(error) = process_telemetry_event(&rule_engine, &event) {
+                        log::warn!("telemetry rule evaluation failed: {error}");
+                    }
                 }
                 Ok(())
             }) => {
@@ -66,6 +67,20 @@ async fn main() -> Result<(), anyhow::Error> {
             }
         }
     }
+}
+
+fn process_telemetry_event(
+    rule_engine: &RuleEngine,
+    event: &SecurityTelemetryEvent,
+) -> Result<(), anyhow::Error> {
+    match rule_engine.evaluate(event) {
+        RuleVerdict::Suppressed => {}
+        RuleVerdict::Alert(alert) => {
+            let json = RuleEngine::format_json(&alert)?;
+            println!("{json}");
+        }
+    }
+    Ok(())
 }
 
 fn log_health_metrics(
@@ -81,11 +96,4 @@ fn log_health_metrics(
         stats.events_processed, stats.lost_events_count
     );
     Ok(())
-}
-
-fn format_filename(event: &SecurityTelemetryEvent) -> std::borrow::Cow<'_, str> {
-    match std::ffi::CStr::from_bytes_until_nul(&event.filename) {
-        Ok(cstr) => cstr.to_string_lossy(),
-        Err(_) => std::borrow::Cow::Borrowed("[Invalid Path]"),
-    }
 }
