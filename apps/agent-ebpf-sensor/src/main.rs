@@ -5,6 +5,7 @@ use log::info;
 use neuromesh_common::SecurityTelemetryEvent;
 use std::ptr;
 use tokio::io::unix::AsyncFd;
+use tokio::io::Interest;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -27,26 +28,27 @@ async fn main() -> Result<(), anyhow::Error> {
     program.attach("syscalls", "sys_enter_execve")?;
 
     let telemetry_map = RingBuf::try_from(ebpf.map_mut("TELEMETRY_RINGBUF").unwrap())?;
-    let async_ring = AsyncFd::new(telemetry_map)?;
+    let mut async_ring = AsyncFd::new(telemetry_map)?;
 
     info!("⚡ Async telemetry pipeline armed. Polling RingBuf...");
 
     loop {
-        let mut guard = async_ring.readable().await?;
-        let ring = guard.get_inner_mut();
+        async_ring
+            .async_io_mut(Interest::READABLE, |ring| {
+                while let Some(item) = ring.next() {
+                    let event = unsafe {
+                        ptr::read_unaligned(item.as_ptr() as *const SecurityTelemetryEvent)
+                    };
+                    let filename = format_filename(&event);
 
-        while let Some(item) = ring.next() {
-            let event =
-                unsafe { ptr::read_unaligned(item.as_ptr() as *const SecurityTelemetryEvent) };
-            let filename = format_filename(&event);
-
-            info!(
-                "🚨 Intercepted: pid={} uid={} target={}",
-                event.pid, event.uid, filename
-            );
-        }
-
-        guard.clear_ready();
+                    info!(
+                        "🚨 Intercepted: pid={} uid={} target={}",
+                        event.pid, event.uid, filename
+                    );
+                }
+                Ok(())
+            })
+            .await?;
     }
 }
 

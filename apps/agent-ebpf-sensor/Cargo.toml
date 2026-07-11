@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 aya = "0.14.0"
-neuromesh-common = { path = "../../packages/neuromesh-common", features = ["user"] }
+neuromesh-common = { path = "../../packages/neuromesh-common", default-features = false, features = ["user"] }
 tokio = { version = "1.36", features = [
     "macros",
     "rt-multi-thread",
