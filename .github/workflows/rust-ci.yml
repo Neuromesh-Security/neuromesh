@@ -1,0 +1,47 @@
+name: Rust Enterprise CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  quality-gate:
+    name: Code Quality & Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, fmt
+
+      - name: Cargo Cache Setup
+        uses: swatinem/rust-cache@v2
+
+      - name: Check Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy (Strict Linter)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Security Audit (Dependency Scan)
+        uses: rustsec/audit-check-action@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Execution Gates (Tests)
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      
+      - name: Run Unit & Integration Tests
+        run: cargo test --all-features --release
+        
