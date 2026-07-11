@@ -30,13 +30,14 @@ jobs:
       - name: Install bpf-linker
         run: cargo install bpf-linker
 
-      - name: Cache Cargo Registry
-        uses: Swatinem/rust-cache@v2
-
       - name: Check Formatting
         working-directory: apps/agent-ebpf-sensor
         run: cargo fmt --all -- --check
 
-      - name: Build Full Sensor (Kernel + Orchestrator)
+      - name: 1. Build eBPF Kernel Space
+        working-directory: apps/agent-ebpf-sensor/ebpf
+        run: cargo build --target bpfel-unknown-none -Z build-std=core --release
+
+      - name: 2. Build User Space Orchestrator
         working-directory: apps/agent-ebpf-sensor
         run: cargo build --release
