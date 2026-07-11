@@ -68,7 +68,9 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 }
 
-fn log_health_metrics(stats_map: &Array<MapData, TelemetryHealthStats>) -> Result<(), anyhow::Error> {
+fn log_health_metrics(
+    stats_map: &Array<MapData, TelemetryHealthStats>,
+) -> Result<(), anyhow::Error> {
     let stats = stats_map.get(&TELEMETRY_STATS_INDEX, 0)?;
     println!(
         "📊 Telemetry Health | events_processed={} lost_events_count={}",
