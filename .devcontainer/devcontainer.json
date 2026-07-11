@@ -1,16 +1,31 @@
 {
   "name": "Neuromesh eBPF Kernel Lab",
   "image": "mcr.microsoft.com/devcontainers/rust:1-bullseye",
+  
+  // Permisiuni critice: eBPF are nevoie de 'privileged' pentru a se atasa de sys calls
   "privileged": true,
+  "capAdd": ["SYS_PTRACE", "SYS_ADMIN", "BPF"],
+  "securityOpt": ["seccomp=unconfined"],
+
   "customizations": {
     "vscode": {
+      "settings": {
+        "editor.formatOnSave": true,
+        "rust-analyzer.checkOnSave.command": "clippy",
+        "rust-analyzer.cargo.buildScripts.enable": true
+      },
       "extensions": [
         "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates",
         "vadimcn.vscode-lldb",
         "ms-vscode.cpptools",
-        "zxh404.vscode-proto3"
+        "zxh404.vscode-proto3",
+        "eamodio.gitlens"
       ]
     }
   },
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y clang llvm libelf-dev libpcap-dev gcc-multilib build-essential protobuf-compiler"
+
+  // Instalarea tuturor dependentelor de sistem pentru eBPF si Kafka
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y clang llvm libelf-dev libpcap-dev gcc-multilib build-essential protobuf-compiler cmake zlib1g-dev"
 }

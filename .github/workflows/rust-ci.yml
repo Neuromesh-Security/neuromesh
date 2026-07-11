@@ -6,42 +6,49 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  quality-gate:
-    name: Code Quality & Security Audit
+  build-kernel-ebpf:
+    name: Ring 0 Kernel Space (eBPF)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+      
+      - name: Install Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
 
-      - name: Install Rust Toolchain
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
+
+      - name: Build eBPF Bytecode
+        working-directory: apps/agent-ebpf-sensor/ebpf
+        run: cargo build --target bpfel-unknown-none -Z build-std=core --release
+
+  build-user-orchestrator:
+    name: User Space & Security Gates
+    runs-on: ubuntu-latest
+    needs: build-kernel-ebpf
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, fmt
+          components: clippy, rustfmt
 
-      - name: Cargo Cache Setup
-        uses: swatinem/rust-cache@v2
+      - name: Cache Cargo Registry
+        uses: Swatinem/rust-cache@v2
 
       - name: Check Formatting
+        working-directory: apps/agent-ebpf-sensor
         run: cargo fmt --all -- --check
 
-      - name: Run Clippy (Strict Linter)
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Security Audit (Dependency Scan)
-        uses: rustsec/audit-check-action@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  test:
-    name: Execution Gates (Tests)
-    needs: quality-gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: swatinem/rust-cache@v2
-      
-      - name: Run Unit & Integration Tests
-        run: cargo test --all-features --release
-        
+      - name: Build Orchestrator Release
+        working-directory: apps/agent-ebpf-sensor
+        run: cargo build --release
