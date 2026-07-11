@@ -2,8 +2,15 @@
 #![no_std]
 #![no_main]
 
-use aya_ebpf::{macros::tracepoint, programs::TracePointContext};
+use aya_ebpf::{
+    macros::{map, tracepoint},
+    maps::RingBuf,
+    programs::TracePointContext,
+};
 use aya_log_ebpf::info;
+
+#[map]
+static TELEMETRY_RINGBUF: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 
 #[tracepoint]
 pub fn neuromesh_exec_hook(ctx: TracePointContext) -> u32 {
