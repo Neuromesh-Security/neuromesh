@@ -39,7 +39,7 @@ jobs:
         working-directory: apps/agent-ebpf-sensor/ebpf
         env:
           CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
-        run: cargo +nightly build --target bpfel-unknown-none -Z build-std=core --release
+        run: cargo +nightly build --package agent-ebpf-sensor-ebpf --target bpfel-unknown-none -Z build-std=core --release
 
       - name: Verify eBPF artifact for include_bytes!
         working-directory: apps/agent-ebpf-sensor
