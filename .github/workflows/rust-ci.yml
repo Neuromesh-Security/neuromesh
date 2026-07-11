@@ -39,11 +39,21 @@ jobs:
         working-directory: apps/agent-ebpf-sensor/ebpf
         env:
           CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
-        run: cargo +nightly build --package agent-ebpf-sensor-ebpf --target bpfel-unknown-none -Z build-std=core --release
+        run: |
+          cargo +nightly build --package agent-ebpf-sensor-ebpf --target bpfel-unknown-none -Z build-std=core --release
+          ARTIFACT="target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf"
+          if [ ! -f "$ARTIFACT" ]; then
+            echo "Expected eBPF artifact missing at ebpf/${ARTIFACT}"
+            find target -type f | sort
+            exit 1
+          fi
+          ls -la "$ARTIFACT"
 
       - name: Verify eBPF artifact for include_bytes!
         working-directory: apps/agent-ebpf-sensor
-        run: test -f "$BPF_ARTIFACT"
+        run: |
+          test -f "$BPF_ARTIFACT"
+          ls -la "$BPF_ARTIFACT"
 
       - name: 2. Build User Space Orchestrator
         working-directory: apps/agent-ebpf-sensor
