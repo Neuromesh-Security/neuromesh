@@ -2,24 +2,16 @@
 name = "agent-ebpf-sensor"
 version = "0.1.0"
 edition = "2021"
-authors = ["Flavius Dragan"]
-description = "Neuromesh eBPF Runtime Security Sensor"
 
 [dependencies]
-# eBPF Framework (Curățat de flag-urile vechi)
-aya = "0.14"
-aya-log = "0.3"
-
-# Asynchronous Runtime
-tokio = { version = "1.36", features = ["macros", "rt-multi-thread", "signal"] }
-
-# Kafka & Protobuf
-rdkafka = { version = "0.36.0", features = ["cmake-build"] }
-prost = "0.12"
-
-# Utilitare
+aya = "0.14.0"
+tokio = { version = "1.36", features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "net",
+    "time",
+] }
 anyhow = "1.0"
-log = "0.4"
 env_logger = "0.11"
-[workspace]
-members = ["ebpf"]
+log = "0.4"
