@@ -28,7 +28,10 @@ pub struct SiemAlert {
     pub rule_id: String,
     pub rule_name: String,
     pub pid: u32,
+    pub ppid: u32,
     pub uid: u32,
+    pub euid: u32,
+    pub comm: String,
     pub binary_path: String,
     pub matched_pattern: String,
 }
@@ -57,7 +60,10 @@ impl RuleEngine {
                 rule_id: "NEUROMESH-EXEC-BLACKLIST-PATH".to_string(),
                 rule_name: "Execution from ephemeral malware staging directory".to_string(),
                 pid: event.pid,
+                ppid: event.ppid,
                 uid: event.uid,
+                euid: event.euid,
+                comm: extract_comm(event),
                 binary_path: path.into_owned(),
                 matched_pattern: prefix.to_string(),
             });
@@ -96,10 +102,17 @@ fn extract_filename(event: &SecurityTelemetryEvent) -> Cow<'_, str> {
     }
 }
 
+fn extract_comm(event: &SecurityTelemetryEvent) -> String {
+    match std::ffi::CStr::from_bytes_until_nul(&event.comm) {
+        Ok(cstr) => cstr.to_string_lossy().into_owned(),
+        Err(_) => "[Unknown]".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neuromesh_common::MAX_FILENAME_LEN;
+    use neuromesh_common::{MAX_COMM_LEN, MAX_FILENAME_LEN};
 
     fn event_with_path(path: &str) -> SecurityTelemetryEvent {
         let mut filename = [0u8; MAX_FILENAME_LEN];
@@ -107,7 +120,10 @@ mod tests {
         filename[..bytes.len()].copy_from_slice(bytes);
         SecurityTelemetryEvent {
             pid: 4242,
+            ppid: 1,
             uid: 1000,
+            euid: 1000,
+            comm: [0u8; MAX_COMM_LEN],
             filename,
         }
     }
