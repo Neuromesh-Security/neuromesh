@@ -15,5 +15,19 @@ pub struct SecurityTelemetryEvent {
     pub filename: [u8; MAX_FILENAME_LEN],
 }
 
+/// Kernel/user-space health counters exposed via the `TELEMETRY_STATS` BPF array map.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct TelemetryHealthStats {
+    pub events_processed: u64,
+    pub lost_events_count: u64,
+}
+
+/// Single-slot index for the `TELEMETRY_STATS` array map.
+pub const TELEMETRY_STATS_INDEX: u32 = 0;
+
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for SecurityTelemetryEvent {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for TelemetryHealthStats {}

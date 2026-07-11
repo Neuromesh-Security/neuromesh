@@ -5,14 +5,19 @@
 use aya_ebpf::{
     helpers::{bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_probe_read_user_str_bytes},
     macros::{map, tracepoint},
-    maps::RingBuf,
+    maps::{Array, RingBuf},
     programs::TracePointContext,
 };
 use aya_log_ebpf::info;
-use neuromesh_common::{SecurityTelemetryEvent, MAX_FILENAME_LEN};
+use neuromesh_common::{
+    SecurityTelemetryEvent, TelemetryHealthStats, MAX_FILENAME_LEN, TELEMETRY_STATS_INDEX,
+};
 
 #[map]
 static TELEMETRY_RINGBUF: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
+
+#[map]
+static TELEMETRY_STATS: Array<TelemetryHealthStats> = Array::with_max_entries(1, 0);
 
 #[tracepoint]
 pub fn neuromesh_exec_hook(ctx: TracePointContext) -> u32 {
@@ -41,10 +46,29 @@ fn try_neuromesh_exec_hook(ctx: TracePointContext) -> Result<u32, i64> {
     if let Some(mut entry) = TELEMETRY_RINGBUF.reserve::<SecurityTelemetryEvent>(0) {
         entry.write(event);
         entry.submit(0);
+        record_event_submitted();
+    } else {
+        record_event_lost();
     }
 
     info!(&ctx, "Neuromesh Alert: Process intercepted!");
     Ok(0)
+}
+
+fn record_event_submitted() {
+    if let Some(stats) = TELEMETRY_STATS.get_ptr_mut(TELEMETRY_STATS_INDEX) {
+        unsafe {
+            (*stats).events_processed = (*stats).events_processed.saturating_add(1);
+        }
+    }
+}
+
+fn record_event_lost() {
+    if let Some(stats) = TELEMETRY_STATS.get_ptr_mut(TELEMETRY_STATS_INDEX) {
+        unsafe {
+            (*stats).lost_events_count = (*stats).lost_events_count.saturating_add(1);
+        }
+    }
 }
 
 #[panic_handler]

@@ -1,9 +1,10 @@
-use aya::maps::RingBuf;
+use aya::maps::{Array, MapData, RingBuf};
 use aya::programs::TracePoint;
 use aya::Ebpf;
 use log::info;
-use neuromesh_common::SecurityTelemetryEvent;
+use neuromesh_common::{SecurityTelemetryEvent, TelemetryHealthStats, TELEMETRY_STATS_INDEX};
 use std::ptr;
+use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
 
@@ -27,14 +28,27 @@ async fn main() -> Result<(), anyhow::Error> {
     program.load()?;
     program.attach("syscalls", "sys_enter_execve")?;
 
-    let telemetry_map = RingBuf::try_from(ebpf.map_mut("TELEMETRY_RINGBUF").unwrap())?;
+    let stats_map = Array::try_from(
+        ebpf.take_map("TELEMETRY_STATS")
+            .ok_or_else(|| anyhow::anyhow!("TELEMETRY_STATS map missing from eBPF object"))?,
+    )?;
+    let telemetry_map = RingBuf::try_from(
+        ebpf.take_map("TELEMETRY_RINGBUF")
+            .ok_or_else(|| anyhow::anyhow!("TELEMETRY_RINGBUF map missing from eBPF object"))?,
+    )?;
     let mut async_ring = AsyncFd::new(telemetry_map)?;
 
     info!("⚡ Async telemetry pipeline armed. Polling RingBuf...");
 
+    let mut stats_interval = tokio::time::interval(Duration::from_secs(5));
+    stats_interval.tick().await;
+
     loop {
-        async_ring
-            .async_io_mut(Interest::READABLE, |ring| {
+        tokio::select! {
+            _ = stats_interval.tick() => {
+                log_health_metrics(&stats_map)?;
+            }
+            result = async_ring.async_io_mut(Interest::READABLE, |ring| {
                 while let Some(item) = ring.next() {
                     let event = unsafe {
                         ptr::read_unaligned(item.as_ptr() as *const SecurityTelemetryEvent)
@@ -47,9 +61,24 @@ async fn main() -> Result<(), anyhow::Error> {
                     );
                 }
                 Ok(())
-            })
-            .await?;
+            }) => {
+                result?;
+            }
+        }
     }
+}
+
+fn log_health_metrics(stats_map: &Array<MapData, TelemetryHealthStats>) -> Result<(), anyhow::Error> {
+    let stats = stats_map.get(&TELEMETRY_STATS_INDEX, 0)?;
+    println!(
+        "📊 Telemetry Health | events_processed={} lost_events_count={}",
+        stats.events_processed, stats.lost_events_count
+    );
+    info!(
+        "📊 Telemetry Health | events_processed={} lost_events_count={}",
+        stats.events_processed, stats.lost_events_count
+    );
+    Ok(())
 }
 
 fn format_filename(event: &SecurityTelemetryEvent) -> std::borrow::Cow<'_, str> {
