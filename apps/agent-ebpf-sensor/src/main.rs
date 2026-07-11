@@ -21,11 +21,15 @@ async fn main() -> Result<(), anyhow::Error> {
     #[cfg(debug_assertions)]
     let bpf_data = include_bytes!("../ebpf/target/bpfel-unknown-none/debug/agent-ebpf-sensor-ebpf");
     #[cfg(not(debug_assertions))]
-    let bpf_data = include_bytes!("../ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf");
+    let bpf_data =
+        include_bytes!("../ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf");
 
     let mut ebpf = Ebpf::load(bpf_data)?;
 
-    let program: &mut TracePoint = ebpf.program_mut("neuromesh_exec_hook").unwrap().try_into()?;
+    let program: &mut TracePoint = ebpf
+        .program_mut("neuromesh_exec_hook")
+        .unwrap()
+        .try_into()?;
     program.load()?;
     program.attach("syscalls", "sys_enter_execve")?;
 
@@ -35,8 +39,9 @@ async fn main() -> Result<(), anyhow::Error> {
 
     loop {
         while let Some(item) = telemetry_map.next() {
-            let event = unsafe { ptr::read_unaligned(item.as_ptr() as *const ExecveTelemetryEvent) };
-            
+            let event =
+                unsafe { ptr::read_unaligned(item.as_ptr() as *const ExecveTelemetryEvent) };
+
             let filename = match std::ffi::CStr::from_bytes_until_nul(&event.filename) {
                 Ok(cstr) => cstr.to_string_lossy(),
                 Err(_) => std::borrow::Cow::Borrowed("[Invalid Path]"),
@@ -44,7 +49,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
             info!("🚨 Intercepted: PID {} | Target: {}", event.pid, filename);
         }
-        
+
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
