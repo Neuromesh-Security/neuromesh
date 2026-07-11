@@ -2,16 +2,9 @@ use aya::maps::RingBuf;
 use aya::programs::TracePoint;
 use aya::Ebpf;
 use log::info;
+use neuromesh_common::SecurityTelemetryEvent;
 use std::ptr;
-
-pub const MAX_FILENAME_LEN: usize = 256;
-
-#[repr(C)]
-pub struct ExecveTelemetryEvent {
-    pub pid: u32,
-    pub uid: u32,
-    pub filename: [u8; MAX_FILENAME_LEN],
-}
+use tokio::io::unix::AsyncFd;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -33,23 +26,33 @@ async fn main() -> Result<(), anyhow::Error> {
     program.load()?;
     program.attach("syscalls", "sys_enter_execve")?;
 
-    let mut telemetry_map = RingBuf::try_from(ebpf.map_mut("TELEMETRY_RINGBUF").unwrap())?;
+    let telemetry_map = RingBuf::try_from(ebpf.map_mut("TELEMETRY_RINGBUF").unwrap())?;
+    let async_ring = AsyncFd::new(telemetry_map)?;
 
-    info!("⚡ Pipeline armed. Listening for kernel events...");
+    info!("⚡ Async telemetry pipeline armed. Polling RingBuf...");
 
     loop {
-        while let Some(item) = telemetry_map.next() {
+        let mut guard = async_ring.readable().await?;
+        let ring = guard.get_inner_mut();
+
+        while let Some(item) = ring.next() {
             let event =
-                unsafe { ptr::read_unaligned(item.as_ptr() as *const ExecveTelemetryEvent) };
+                unsafe { ptr::read_unaligned(item.as_ptr() as *const SecurityTelemetryEvent) };
+            let filename = format_filename(&event);
 
-            let filename = match std::ffi::CStr::from_bytes_until_nul(&event.filename) {
-                Ok(cstr) => cstr.to_string_lossy(),
-                Err(_) => std::borrow::Cow::Borrowed("[Invalid Path]"),
-            };
-
-            info!("🚨 Intercepted: PID {} | Target: {}", event.pid, filename);
+            info!(
+                "🚨 Intercepted: pid={} uid={} target={}",
+                event.pid, event.uid, filename
+            );
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        guard.clear_ready();
+    }
+}
+
+fn format_filename(event: &SecurityTelemetryEvent) -> std::borrow::Cow<'_, str> {
+    match std::ffi::CStr::from_bytes_until_nul(&event.filename) {
+        Ok(cstr) => cstr.to_string_lossy(),
+        Err(_) => std::borrow::Cow::Borrowed("[Invalid Path]"),
     }
 }

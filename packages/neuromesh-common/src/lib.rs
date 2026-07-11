@@ -1,19 +1,19 @@
 #![no_std]
 
-// Defines the maximum buffer size for intercepted file paths
+/// Maximum buffer size for intercepted file paths in kernel telemetry events.
 pub const MAX_FILENAME_LEN: usize = 256;
 
-/// Raw telemetry event intercepted directly from the kernel tracepoint.
-/// Explicitly aligned using #[repr(C)] to guarantee identical byte layout
-/// between the eBPF space and the asynchronous user-space orchestrator.
+/// Memory-aligned, C-compatible telemetry record shared between Ring 0 and user space.
+///
+/// Layout is identical in eBPF (`bpfel-unknown-none`) and the async orchestrator so
+/// events can be zero-copied from the RingBuf without deserialization overhead.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct ExecveTelemetryEvent {
+pub struct SecurityTelemetryEvent {
     pub pid: u32,
     pub uid: u32,
     pub filename: [u8; MAX_FILENAME_LEN],
 }
 
-// Implement the Pod (Plain Old Data) trait for zero-copy deserialization in user-space
 #[cfg(feature = "user")]
-unsafe impl aya::Pod for ExecveTelemetryEvent {}
+unsafe impl aya::Pod for SecurityTelemetryEvent {}
