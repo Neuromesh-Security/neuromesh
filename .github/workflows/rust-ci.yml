@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  BPF_ARTIFACT: ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
 
 jobs:
   build-and-verify:
@@ -36,8 +37,14 @@ jobs:
 
       - name: 1. Build eBPF Kernel Space
         working-directory: apps/agent-ebpf-sensor/ebpf
-        run: cargo build --target bpfel-unknown-none -Z build-std=core --release
+        env:
+          CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
+        run: cargo +nightly build --target bpfel-unknown-none -Z build-std=core --release
+
+      - name: Verify eBPF artifact for include_bytes!
+        working-directory: apps/agent-ebpf-sensor
+        run: test -f "$BPF_ARTIFACT"
 
       - name: 2. Build User Space Orchestrator
         working-directory: apps/agent-ebpf-sensor
-        run: cargo build --release
+        run: cargo +stable build --release
