@@ -1,8 +1,8 @@
 mod rules;
 
 use aya::maps::{Array, MapData, RingBuf};
-use aya::programs::TracePoint;
-use aya::Ebpf;
+use aya::programs::{Lsm, TracePoint};
+use aya::{Btf, Ebpf};
 use log::info;
 use neuromesh_common::{SecurityTelemetryEvent, TelemetryHealthStats, TELEMETRY_STATS_INDEX};
 use rules::{RuleEngine, RuleVerdict};
@@ -31,6 +31,14 @@ async fn main() -> Result<(), anyhow::Error> {
     program.load()?;
     program.attach("syscalls", "sys_enter_execve")?;
 
+    let btf = Btf::from_sys_fs()?;
+    let lsm_program: &mut Lsm = ebpf
+        .program_mut("neuromesh_lsm_exec_guard")
+        .unwrap()
+        .try_into()?;
+    lsm_program.load("bprm_check_security", &btf)?;
+    lsm_program.attach()?;
+
     let stats_map = Array::try_from(
         ebpf.take_map("TELEMETRY_STATS")
             .ok_or_else(|| anyhow::anyhow!("TELEMETRY_STATS map missing from eBPF object"))?,
@@ -42,6 +50,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut async_ring = AsyncFd::new(telemetry_map)?;
     let rule_engine = RuleEngine::new();
 
+    info!("🛡️ XDR enforcement armed. LSM bprm_check_security active blocking enabled.");
     info!("⚡ Detection brain armed. RuleEngine active on RingBuf stream...");
 
     let mut stats_interval = tokio::time::interval(Duration::from_secs(5));
