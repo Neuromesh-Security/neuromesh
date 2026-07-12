@@ -20,10 +20,16 @@ Neuromesh embraces the open-source community to ensure trust, transparency, and 
 *   **Enterprise Edition:** Advanced GNN models, Post-Quantum Cryptography (PQC) implementations, OIDC/SAML integrations, and strictly audited RBAC dashboards.
 
 ## 📂 Repository Structure
-* `/apps` - Autonomous deployable units (eBPF Sensor, AI Detector, ZT Engine).
-* `/packages` - Shared internal libraries (Crypto, Telemetry, UI UI Kit).
 
-* 
+* `/apps` — Autonomous deployable units (eBPF Sensor, AI Detector, ZT Engine).
+  * `agent-ebpf-sensor` — Dual-path eBPF sensor and user-space orchestrator.
+* `/packages` — Shared internal libraries.
+  * `neuromesh-common` — Kernel/user-space shared types and BPF map contracts.
+  * `telemetry` — Standard `MetricEvent` contract for Kafka and observability pipelines.
+  * `proto-definitions` — Protobuf schemas for cross-service telemetry.
+* `/docs` — Architecture decision records and design documentation.
+* `/scripts` — Red team simulations and operational tooling.
+
 ## 🛠️ Prerequisites & Quickstart
 
 Neuromesh operates at Ring 0 and requires a modern environment for eBPF bytecode compilation and kernel injection.
@@ -43,6 +49,7 @@ cargo xtask build-ebpf --release
 
 # 3. Run the user-space orchestrator (Root privileges required for bpf() syscall)
 RUST_LOG=info sudo -E cargo run --release
+```
 
 ---
 *Built for environments where milliseconds matter.*

@@ -1,0 +1,113 @@
+name: Production CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  BPF_ARTIFACT: ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
+
+jobs:
+  quality-gates:
+    name: Lint, Check & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Rust Nightly (eBPF prerequisite)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
+
+      - name: Build eBPF Kernel Space
+        working-directory: apps/agent-ebpf-sensor/ebpf
+        env:
+          CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
+        run: |
+          cargo +nightly build --package agent-ebpf-sensor-ebpf --target bpfel-unknown-none -Z build-std=core --release
+          test -f target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
+
+      - name: Check Formatting — sensor
+        working-directory: apps/agent-ebpf-sensor
+        run: cargo +stable fmt --all -- --check
+
+      - name: Check Formatting — telemetry
+        working-directory: packages/telemetry
+        run: cargo +stable fmt -- --check
+
+      - name: cargo check — neuromesh-common
+        working-directory: packages/neuromesh-common
+        run: cargo +stable check
+
+      - name: cargo check — telemetry
+        working-directory: packages/telemetry
+        run: cargo +stable check --all-targets
+
+      - name: cargo check — sensor
+        working-directory: apps/agent-ebpf-sensor
+        run: cargo +stable check --all-targets
+
+      - name: cargo clippy — sensor
+        working-directory: apps/agent-ebpf-sensor
+        run: cargo +stable clippy --all-targets -- -D warnings
+
+      - name: cargo clippy — telemetry
+        working-directory: packages/telemetry
+        run: cargo +stable clippy --all-targets -- -D warnings
+
+      - name: cargo test — sensor
+        working-directory: apps/agent-ebpf-sensor
+        run: cargo +stable test
+
+      - name: cargo test — telemetry
+        working-directory: packages/telemetry
+        run: cargo +stable test
+
+      - name: Build User Space Orchestrator
+        working-directory: apps/agent-ebpf-sensor
+        run: |
+          test -f "$BPF_ARTIFACT"
+          cargo +stable build --release
+
+  ebpf-cross-compile:
+    name: eBPF Cross-Compile (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
+
+      - name: Cross-compile eBPF (${{ matrix.arch }})
+        working-directory: apps/agent-ebpf-sensor/ebpf
+        env:
+          CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
+        run: |
+          cargo +nightly build --package agent-ebpf-sensor-ebpf --target bpfel-unknown-none -Z build-std=core --release
+          ls -la target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
