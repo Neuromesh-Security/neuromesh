@@ -64,7 +64,9 @@ async fn main() -> Result<(), anyhow::Error> {
                     let event = unsafe {
                         ptr::read_unaligned(item.as_ptr() as *const SecurityTelemetryEvent)
                     };
-                    emit_pipeline_output(&mut pipeline, &event)?;
+                    if let Err(error) = emit_pipeline_output(&mut pipeline, &event) {
+                        log::warn!("telemetry pipeline failed: {error}");
+                    }
                 }
                 Ok(())
             }) => {
