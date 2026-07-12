@@ -36,3 +36,10 @@ log = "0.4"
 
 [package.metadata.coverage]
 minimum-line-coverage = 70
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "detection_pipeline"
+harness = false

@@ -29,6 +29,7 @@ Neuromesh embraces the open-source community to ensure trust, transparency, and 
   * `proto-definitions` — Protobuf schemas for cross-service telemetry.
 * `/docs` — Architecture decision records and design documentation.
   * `threat-model.md` — MITRE ATT&CK mapping and integration test traceability.
+  * `performance-baseline.md` — Criterion micro-benchmark results and complexity analysis.
 * `/scripts` — Red team simulations and operational tooling.
 * `/tests` — Kernel-independent integration test farm (`neuromesh-integration-tests`).
 

@@ -65,6 +65,9 @@ jobs:
           cargo +stable clippy -p neuromesh-telemetry --all-targets -- -D warnings
           cargo +stable clippy -p neuromesh-integration-tests --all-targets -- -D warnings
 
+      - name: Verify benchmark harness compiles
+        run: cargo +stable bench -p agent-ebpf-sensor --no-run
+
       - name: Install bpf-linker
         run: cargo install bpf-linker
 
