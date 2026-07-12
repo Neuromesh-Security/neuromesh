@@ -121,9 +121,6 @@ jobs:
     name: SBOM & Container Scan (${{ matrix.image }})
     runs-on: ubuntu-latest
     needs: [sast-gosec, sast-cargo-audit, sast-bandit]
-    env:
-      # Enterprise policy: block only fixable HIGH/CRITICAL findings.
-      TRIVY_IGNORE_UNFIXED: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -168,20 +165,33 @@ jobs:
           path: ${{ matrix.image }}-sbom.spdx.json
           retention-days: 30
 
+      - name: Install Trivy CLI
+        run: |
+          set -euo pipefail
+          TRIVY_VERSION="0.57.1"
+          curl -sfL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            | sudo tar -xzf - -C /usr/local/bin trivy
+          trivy --version
+
       - name: Scan image for CVEs (Trivy)
-        uses: aquasecurity/trivy-action@v0.28.0
-        with:
-          scan-type: image
-          image-ref: ${{ matrix.image }}:ci
-          scanners: vuln
-          vuln-type: os,library
-          format: sarif
-          output: trivy-${{ matrix.image }}.sarif
-          severity: CRITICAL,HIGH
-          exit-code: "1"
-          ignore-unfixed: "true"
-          hide-progress: "true"
-          limit-severities-for-sarif: "true"
+        env:
+          IMAGE_REF: ${{ matrix.image }}:ci
+        run: |
+          set -euo pipefail
+          docker image inspect "${IMAGE_REF}"
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 0 \
+            --format sarif \
+            --output "trivy-${{ matrix.image }}.sarif" \
+            "${IMAGE_REF}"
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --format table \
+            "${IMAGE_REF}"
 
       - name: Upload Trivy SARIF
         if: always()
