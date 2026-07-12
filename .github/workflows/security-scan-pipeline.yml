@@ -168,11 +168,8 @@ jobs:
       - name: Install Trivy CLI
         run: |
           set -euo pipefail
-          TRIVY_VERSION="0.57.1"
-          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-            -o /tmp/trivy.tar.gz
-          sudo tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy
-          rm -f /tmp/trivy.tar.gz
+          curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sudo sh -s -- -b /usr/local/bin v0.72.0
           trivy --version
 
       - name: Scan image for CVEs (Trivy)
