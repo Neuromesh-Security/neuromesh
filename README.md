@@ -61,7 +61,8 @@ For regulated industries, SOC teams, and multi-cluster Kubernetes estates requir
 ## 📂 Repository Structure
 
 * `/apps` — Autonomous deployable units (eBPF Sensor, AI Detector, ZT Engine).
-  * `agent-ebpf-sensor` — Dual-path eBPF sensor and user-space orchestrator.
+  * `agent-ebpf-sensor` — Dual-path eBPF sensor and user-space orchestrator (Fast Path).
+  * `ai-threat-detector` — Kafka consumer and GNN Slow Path inference service.
 * `/deploy` — Production deployment manifests.
   * `kubernetes/neuromesh-agent.yaml` — Privileged DaemonSet for per-node eBPF enforcement.
 * `/packages` — Shared internal libraries.
@@ -107,6 +108,11 @@ cargo xtask build-ebpf --release
 
 # 3. Run the user-space orchestrator (Root privileges required for bpf() syscall)
 RUST_LOG=info sudo -E cargo run -p agent-ebpf-sensor --features orchestrator --release
+
+# 3b. Enable Kafka Slow Path export (optional — non-blocking; Fast Path unaffected if broker is down)
+export NEUROMESH_KAFKA_BROKERS=localhost:9092
+export NEUROMESH_KAFKA_TOPIC=neuromesh.telemetry.v1
+export NEUROMESH_NODE_NAME=$(hostname)
 
 # 4. Trigger proof-of-value alerts (separate terminal)
 chmod +x scripts/simulate_attack.sh
