@@ -120,5 +120,35 @@ chmod +x scripts/simulate_attack.sh
 ./scripts/simulate_attack.sh
 ```
 
+## 🐳 E2E Local Stack (Docker Compose)
+
+Spin up the full Dual-Path architecture on a **Linux host** with Docker Engine:
+
+```bash
+docker compose up --build
+```
+
+| Service | Port | Role |
+|---------|------|------|
+| `kafka` | 9092 | KRaft-mode broker (no Zookeeper) |
+| `zt-policy-engine` | 8080 | OPA Zero Trust API (`GET /healthz`, `POST /v1/evaluate`) |
+| `ai-threat-detector` | — | Kafka → GNN Slow Path consumer |
+| `agent-ebpf-sensor` | — | Privileged eBPF Fast Path + Kafka producer |
+
+```bash
+# Verify control plane
+curl -s http://localhost:8080/healthz | jq .
+
+# Tail Slow Path inference
+docker compose logs -f ai-threat-detector
+
+# Trigger Fast Path alerts (host terminal)
+./scripts/simulate_attack.sh
+```
+
+> **Note:** `agent-ebpf-sensor` requires `privileged: true`, `pid: host`, and
+> `/sys/kernel/debug` mounts — it will not attach eBPF programs on macOS/Windows
+> Docker Desktop. Use native Linux or a Linux VM for full E2E validation.
+
 ---
 *Built for environments where milliseconds matter.*

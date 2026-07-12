@@ -1,0 +1,15 @@
+# Build artifacts
+**/target
+**/__pycache__
+**/*.pyc
+.git
+.github
+.devcontainer
+**/.venv
+**/venv
+
+# Local IDE / OS noise
+.idea
+.vscode
+*.md
+!apps/**/README.md

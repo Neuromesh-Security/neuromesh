@@ -1,0 +1,103 @@
+# Neuromesh E2E local development stack
+#
+# Requirements: Linux host with Docker Engine (eBPF sensor needs kernel BPF support).
+# Usage:
+#   docker compose up --build
+#   curl http://localhost:8080/healthz
+#   docker compose logs -f ai-threat-detector agent-ebpf-sensor
+
+name: neuromesh
+
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    hostname: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
+    networks:
+      - neuromesh
+
+  zt-policy-engine:
+    build:
+      context: ./apps/zt-policy-engine
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      ZT_POLICY_ENGINE_PORT: "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - neuromesh
+
+  ai-threat-detector:
+    build:
+      context: ./apps/ai-threat-detector
+      dockerfile: Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      NEUROMESH_KAFKA_BROKERS: kafka:9092
+      NEUROMESH_KAFKA_TOPIC: neuromesh.telemetry.v1
+      NEUROMESH_KAFKA_GROUP_ID: ai-threat-detector
+    networks:
+      - neuromesh
+
+  agent-ebpf-sensor:
+    build:
+      context: .
+      dockerfile: apps/agent-ebpf-sensor/Dockerfile
+    privileged: true
+    pid: "host"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      NEUROMESH_KAFKA_BROKERS: kafka:9092
+      NEUROMESH_KAFKA_TOPIC: neuromesh.telemetry.v1
+      NEUROMESH_NODE_NAME: neuromesh-dev
+    volumes:
+      - /sys/fs/bpf:/sys/fs/bpf
+      - /sys/kernel/debug:/sys/kernel/debug
+      - /sys/kernel/tracing:/sys/kernel/tracing:ro
+    cap_add:
+      - BPF
+      - SYS_ADMIN
+      - SYS_PTRACE
+      - PERFMON
+    networks:
+      - neuromesh
+
+networks:
+  neuromesh:
+    driver: bridge
