@@ -127,10 +127,10 @@ jobs:
         include:
           - image: neuromesh-zt-policy-engine
             context: apps/zt-policy-engine
-            dockerfile: Dockerfile
+            dockerfile: apps/zt-policy-engine/Dockerfile
           - image: neuromesh-ai-threat-detector
             context: apps/ai-threat-detector
-            dockerfile: Dockerfile
+            dockerfile: apps/ai-threat-detector/Dockerfile
           - image: neuromesh-agent-ebpf-sensor
             context: .
             dockerfile: apps/agent-ebpf-sensor/Dockerfile
@@ -169,11 +169,14 @@ jobs:
         run: |
           set -euo pipefail
           TRIVY_VERSION="0.57.1"
-          curl -sfL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-            | sudo tar -xzf - -C /usr/local/bin trivy
+          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            -o /tmp/trivy.tar.gz
+          sudo tar -xzf /tmp/trivy.tar.gz -C /usr/local/bin trivy
+          rm -f /tmp/trivy.tar.gz
           trivy --version
 
       - name: Scan image for CVEs (Trivy)
+        id: trivy-scan
         env:
           IMAGE_REF: ${{ matrix.image }}:ci
         run: |
@@ -194,7 +197,7 @@ jobs:
             "${IMAGE_REF}"
 
       - name: Upload Trivy SARIF
-        if: always()
+        if: ${{ always() && steps.trivy-scan.outcome != 'skipped' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-${{ matrix.image }}.sarif
