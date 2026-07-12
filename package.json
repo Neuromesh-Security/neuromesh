@@ -1,0 +1,17 @@
+{
+  "name": "neuromesh",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:dashboard": "npm run dev --workspace @neuromesh/security-dashboard",
+    "build:dashboard": "npm run build --workspace @neuromesh/security-dashboard",
+    "lint:dashboard": "npm run lint --workspace @neuromesh/security-dashboard",
+    "typecheck:dashboard": "npm run typecheck --workspace @neuromesh/security-dashboard"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #020617;
+  --color-foreground: #e2e8f0;
+  --color-accent: #38bdf8;
+  --color-danger: #ef4444;
+  --font-sans: "Inter", "Segoe UI", sans-serif;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+}
+
+.feature-panel {
+  display: grid;
+  gap: 1rem;
+}
+
+.feature-panel header {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.log-grid-shell {
+  height: 28rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 0.5rem;
+}
+
+.log-grid-row {
+  display: grid;
+  grid-template-columns: 12rem 5rem 6rem 8rem 1fr;
+  gap: 0.75rem;
+  align-items: center;
+  width: 100%;
+  padding: 0 0.75rem;
+  border: 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.log-grid-row:hover {
+  background: rgba(56, 189, 248, 0.08);
+}
+
+.dashboard-shell {
+  display: grid;
+  grid-template-columns: 16rem 1fr;
+  min-height: 100vh;
+}
+
+.dashboard-nav {
+  border-right: 1px solid rgba(148, 163, 184, 0.2);
+  padding: 1.5rem 1rem;
+}
+
+.dashboard-nav a {
+  display: block;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.375rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.dashboard-nav a:hover,
+.dashboard-nav a[data-active="true"] {
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.dashboard-main {
+  padding: 1.5rem;
+}
+
+.compliance-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.compliance-list li {
+  display: flex;
+  justify-content: space-between;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+}
