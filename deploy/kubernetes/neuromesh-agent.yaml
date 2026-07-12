@@ -1,0 +1,129 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh
+    app.kubernetes.io/part-of: neuromesh
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: neuromesh-agent
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-agent
+    app.kubernetes.io/component: ebpf-sensor
+    app.kubernetes.io/part-of: neuromesh
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: neuromesh-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: neuromesh-agent
+        app.kubernetes.io/component: ebpf-sensor
+        app.kubernetes.io/part-of: neuromesh
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/agent: unconfined
+    spec:
+      serviceAccountName: neuromesh-agent
+      hostPID: true
+      hostNetwork: false
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+          effect: NoExecute
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+        - name: agent
+          image: ghcr.io/neuromesh-security/agent-ebpf-sensor:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/agent-ebpf-sensor"]
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: NEUROMESH_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add:
+                - BPF
+                - SYS_ADMIN
+                - SYS_RESOURCE
+                - PERFMON
+                - SYS_PTRACE
+          volumeMounts:
+            - name: sys-fs-bpf
+              mountPath: /sys/fs/bpf
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+              readOnly: true
+            - name: tracefs
+              mountPath: /sys/kernel/tracing
+              readOnly: true
+            - name: host-root
+              mountPath: /host
+              readOnly: true
+              mountPropagation: HostToContainer
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -x agent-ebpf-sensor"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+      volumes:
+        - name: sys-fs-bpf
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+            type: Directory
+        - name: tracefs
+          hostPath:
+            path: /sys/kernel/tracing
+            type: Directory
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: neuromesh-agent
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-agent
+    app.kubernetes.io/part-of: neuromesh
