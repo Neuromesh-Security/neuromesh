@@ -1,5 +1,16 @@
 # syntax=docker/dockerfile:1
 
+FROM python:3.12-slim-bookworm AS builder
+
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends gcc librdkafka-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
 FROM python:3.12-slim-bookworm
 
 RUN apt-get update \
@@ -9,13 +20,8 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc librdkafka-dev \
-    && pip install --no-cache-dir -r requirements.txt \
-    && apt-get purge -y --auto-remove gcc librdkafka-dev \
-    && rm -rf /var/lib/apt/lists/*
-
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 COPY . .
 
 ENV PYTHONUNBUFFERED=1 \

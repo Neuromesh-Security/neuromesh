@@ -33,7 +33,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends libelf1 ca-certificates \
+    && apt-get install -y --no-install-recommends libelf1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=agent-builder \
