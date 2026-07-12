@@ -13,16 +13,57 @@ Neuromesh operates strictly on a philosophy where performance is non-negotiable.
 *   **The Fast Path (Synchronous):** Rust/C-based eBPF sensors and Wasm execution environments that block deterministic threats (e.g., unauthorized syscalls) instantly, directly in the kernel, with sub-millisecond latency.
 *   **The Slow Path (Asynchronous):** Out-of-band telemetry flows via Kafka to our Python/Mojo AI engine. Here, Graph Neural Networks (GNN) analyze complex lateral movement and generate mitigation signals without ever throttling your production traffic.
 
-## 🏢 Open Core Strategy
+## 🏢 Open Core Model
 
-Neuromesh embraces the open-source community to ensure trust, transparency, and frictionless adoption. 
-*   **Open Source (Apache 2.0):** The core eBPF sensor, fundamental telemetry hubs, and raw mutating webhooks.
-*   **Enterprise Edition:** Advanced GNN models, Post-Quantum Cryptography (PQC) implementations, OIDC/SAML integrations, and strictly audited RBAC dashboards.
+Neuromesh follows an **Open Core** commercial strategy: the runtime sensor and deterministic detection logic are open source under Apache 2.0, while AI-driven anomaly detection, enterprise integrations, and fleet operations are offered as a commercial subscription.
+
+### Community Edition (Open Source)
+
+Free forever. Ideal for security engineers, homelabs, and teams validating eBPF runtime protection.
+
+| Capability | Included |
+|------------|----------|
+| eBPF Dual-Path sensor (LSM blocking + tracepoint telemetry) | ✅ |
+| User-space `RuleEngine` (whitelist + blacklist path rules) | ✅ |
+| `DataNormalizer` behavioral burst detection | ✅ |
+| Local JSON alert logging (stdout / container logs) | ✅ |
+| Integration test farm + Criterion performance baseline | ✅ |
+| Kubernetes DaemonSet manifest (`deploy/kubernetes/`) | ✅ |
+| MITRE ATT&CK threat model + attack simulation scripts | ✅ |
+
+**License:** Apache 2.0 · **Support:** Community (GitHub Issues)
+
+### Enterprise Edition (Commercial)
+
+For regulated industries, SOC teams, and multi-cluster Kubernetes estates requiring AI-assisted detection and centralized operations.
+
+| Capability | Included |
+|------------|----------|
+| AI / GNN Anomaly Engine (Kafka Slow Path, lateral movement) | ✅ |
+| SIEM integrations (Splunk HEC, Datadog, Elastic, Sentinel) | ✅ |
+| Post-Quantum Cryptography (PQC) signed telemetry envelopes | ✅ |
+| Fleet Management (multi-cluster policy sync, RBAC console) | ✅ |
+| OIDC / SAML SSO, audited admin dashboards | ✅ |
+| 24×7 SLA, dedicated TAM, custom MITRE detection packs | ✅ |
+
+**Pricing:** Contact [sales@neuromesh.security](mailto:sales@neuromesh.security) · **Deployment:** Helm + SaaS control plane
+
+### Why Open Core?
+
+| Stakeholder | Value |
+|-------------|-------|
+| **Security community** | Inspect Ring 0 code, reproduce detections, contribute rules |
+| **Procurement** | Prove nanosecond overhead (`docs/performance-baseline.md`) before license commitment |
+| **Enterprise buyers** | Upgrade path from proven open-source sensor to AI + SIEM without rip-and-replace |
+
+> The Community Edition is production-capable for single-cluster deployments with JSON logging. The Enterprise Edition adds the Slow Path AI pipeline and operational scale required for global SOCs.
 
 ## 📂 Repository Structure
 
 * `/apps` — Autonomous deployable units (eBPF Sensor, AI Detector, ZT Engine).
   * `agent-ebpf-sensor` — Dual-path eBPF sensor and user-space orchestrator.
+* `/deploy` — Production deployment manifests.
+  * `kubernetes/neuromesh-agent.yaml` — Privileged DaemonSet for per-node eBPF enforcement.
 * `/packages` — Shared internal libraries.
   * `neuromesh-common` — Kernel/user-space shared types and BPF map contracts.
   * `telemetry` — Standard `MetricEvent` contract for Kafka and observability pipelines.
@@ -31,7 +72,17 @@ Neuromesh embraces the open-source community to ensure trust, transparency, and 
   * `threat-model.md` — MITRE ATT&CK mapping and integration test traceability.
   * `performance-baseline.md` — Criterion micro-benchmark results and complexity analysis.
 * `/scripts` — Red team simulations and operational tooling.
+  * `simulate_attack.sh` — MITRE T1059/T1204 proof-of-value attack simulation.
 * `/tests` — Kernel-independent integration test farm (`neuromesh-integration-tests`).
+
+## ☸️ Kubernetes Deployment
+
+```bash
+kubectl apply -f deploy/kubernetes/neuromesh-agent.yaml
+kubectl logs -n neuromesh-system -l app.kubernetes.io/name=neuromesh-agent -f
+```
+
+The DaemonSet mounts `/sys/fs/bpf`, `/sys/kernel/debug`, and host `/` (read-only) with `CAP_BPF`, `CAP_SYS_ADMIN`, and `CAP_PERFMON` for eBPF program attachment.
 
 ## 🛠️ Prerequisites & Quickstart
 
@@ -56,6 +107,10 @@ cargo xtask build-ebpf --release
 
 # 3. Run the user-space orchestrator (Root privileges required for bpf() syscall)
 RUST_LOG=info sudo -E cargo run -p agent-ebpf-sensor --features orchestrator --release
+
+# 4. Trigger proof-of-value alerts (separate terminal)
+chmod +x scripts/simulate_attack.sh
+./scripts/simulate_attack.sh
 ```
 
 ---
