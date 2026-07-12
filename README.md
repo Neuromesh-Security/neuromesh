@@ -63,6 +63,7 @@ For regulated industries, SOC teams, and multi-cluster Kubernetes estates requir
 * `/apps` — Autonomous deployable units (eBPF Sensor, AI Detector, ZT Engine).
   * `agent-ebpf-sensor` — Dual-path eBPF sensor and user-space orchestrator (Fast Path).
   * `ai-threat-detector` — Kafka consumer and GNN Slow Path inference service.
+  * `zt-policy-engine` — Go control plane: OPA policy evaluation + SPIFFE identity.
 * `/deploy` — Production deployment manifests.
   * `kubernetes/neuromesh-agent.yaml` — Privileged DaemonSet for per-node eBPF enforcement.
 * `/packages` — Shared internal libraries.
