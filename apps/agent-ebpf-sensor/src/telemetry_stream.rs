@@ -57,8 +57,8 @@ impl TelemetryStreamConfig {
             return None;
         }
 
-        let topic = std::env::var("NEUROMESH_KAFKA_TOPIC")
-            .unwrap_or_else(|_| DEFAULT_TOPIC.to_string());
+        let topic =
+            std::env::var("NEUROMESH_KAFKA_TOPIC").unwrap_or_else(|_| DEFAULT_TOPIC.to_string());
 
         let node_name = std::env::var("NEUROMESH_NODE_NAME")
             .or_else(|_| std::env::var("HOSTNAME"))
@@ -195,7 +195,10 @@ async fn kafka_publisher_loop(
             key: Some(message.event_id.into_bytes()),
             value: Some(payload),
             headers: BTreeMap::from([
-                ("schema_version".to_owned(), SCHEMA_VERSION.as_bytes().to_vec()),
+                (
+                    "schema_version".to_owned(),
+                    SCHEMA_VERSION.as_bytes().to_vec(),
+                ),
                 (
                     "alert_type".to_owned(),
                     message.alert_type.as_bytes().to_vec(),
@@ -223,16 +226,10 @@ async fn connect_partition_client(
     use rskafka::client::partition::UnknownTopicHandling;
     use rskafka::client::ClientBuilder;
 
-    let client = ClientBuilder::new(config.brokers.clone())
-        .build()
-        .await?;
+    let client = ClientBuilder::new(config.brokers.clone()).build().await?;
 
     let partition_client = client
-        .partition_client(
-            config.topic.clone(),
-            0,
-            UnknownTopicHandling::Retry,
-        )
+        .partition_client(config.topic.clone(), 0, UnknownTopicHandling::Retry)
         .await?;
 
     Ok(partition_client)
@@ -243,9 +240,10 @@ pub async fn spawn_noop() -> TelemetryStreamHandle {
     let (tx, mut rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
     let stats = Arc::new(TelemetryStreamStats::default());
 
+    let worker_stats = Arc::clone(&stats);
     tokio::spawn(async move {
         while rx.recv().await.is_some() {
-            stats.published.fetch_add(1, Ordering::Relaxed);
+            worker_stats.published.fetch_add(1, Ordering::Relaxed);
         }
     });
 
