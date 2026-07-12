@@ -15,7 +15,7 @@ permissions:
   security-events: write
 
 env:
-  GO_VERSION: "1.23"
+  GO_VERSION: "1.25"
   PYTHON_VERSION: "3.12"
 
 jobs:
@@ -169,7 +169,7 @@ jobs:
           retention-days: 30
 
       - name: Scan image for CVEs (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           scan-type: image
           image-ref: ${{ matrix.image }}:ci
