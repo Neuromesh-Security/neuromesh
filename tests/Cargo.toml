@@ -1,0 +1,13 @@
+[package]
+name = "neuromesh-integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+agent-ebpf-sensor = { path = "../apps/agent-ebpf-sensor" }
+neuromesh-common = { path = "../packages/neuromesh-common", features = ["user"] }
+serde_json = "1.0"

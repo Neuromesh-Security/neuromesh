@@ -23,7 +23,7 @@ pub struct SecurityTelemetryEvent {
 
 /// Kernel/user-space health counters exposed via the `TELEMETRY_STATS` BPF array map.
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct TelemetryHealthStats {
     pub events_processed: u64,
     pub lost_events_count: u64,

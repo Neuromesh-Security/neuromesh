@@ -1,19 +1,15 @@
-mod normalizer;
-mod rules;
-mod wasm_policy;
-
+use agent_ebpf_sensor::pipeline::TelemetryPipeline;
+use agent_ebpf_sensor::rules::RuleEngine;
+use agent_ebpf_sensor::wasm_policy::WasmPolicyEngine;
 use aya::maps::{Array, MapData, RingBuf};
 use aya::programs::{Lsm, TracePoint};
 use aya::{Btf, Ebpf};
 use log::info;
 use neuromesh_common::{SecurityTelemetryEvent, TelemetryHealthStats, TELEMETRY_STATS_INDEX};
-use normalizer::DataNormalizer;
-use rules::{RuleEngine, RuleVerdict};
 use std::ptr;
 use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
-use wasm_policy::WasmPolicyEngine;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -49,8 +45,7 @@ async fn main() -> Result<(), anyhow::Error> {
             .ok_or_else(|| anyhow::anyhow!("TELEMETRY_RINGBUF map missing from eBPF object"))?,
     )?;
     let mut async_ring = AsyncFd::new(telemetry_map)?;
-    let rule_engine = RuleEngine::new();
-    let mut data_normalizer = DataNormalizer::new();
+    let mut pipeline = TelemetryPipeline::new();
     let _wasm_policy = WasmPolicyEngine::new();
 
     info!("🛡️ XDR enforcement armed. LSM bprm_check_security active blocking enabled.");
@@ -69,10 +64,8 @@ async fn main() -> Result<(), anyhow::Error> {
                     let event = unsafe {
                         ptr::read_unaligned(item.as_ptr() as *const SecurityTelemetryEvent)
                     };
-                    if let Err(error) =
-                        process_telemetry_event(&rule_engine, &mut data_normalizer, &event)
-                    {
-                        log::warn!("telemetry rule evaluation failed: {error}");
+                    if let Err(error) = emit_pipeline_output(&mut pipeline, &event) {
+                        log::warn!("telemetry pipeline failed: {error}");
                     }
                 }
                 Ok(())
@@ -83,23 +76,20 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 }
 
-fn process_telemetry_event(
-    rule_engine: &RuleEngine,
-    data_normalizer: &mut DataNormalizer,
+fn emit_pipeline_output(
+    pipeline: &mut TelemetryPipeline,
     event: &SecurityTelemetryEvent,
 ) -> Result<(), anyhow::Error> {
-    if let Some(behavior_alert) = data_normalizer.ingest(event) {
-        let json = serde_json::to_string(&behavior_alert)?;
-        println!("{json}");
+    let output = pipeline.process(event);
+
+    for alert in output.behavior_alerts {
+        println!("{}", serde_json::to_string(&alert)?);
     }
 
-    match rule_engine.evaluate(event) {
-        RuleVerdict::Suppressed => {}
-        RuleVerdict::Alert(alert) => {
-            let json = RuleEngine::format_json(&alert)?;
-            println!("{json}");
-        }
+    for alert in output.siem_alerts {
+        println!("{}", RuleEngine::format_json(&alert)?);
     }
+
     Ok(())
 }
 
