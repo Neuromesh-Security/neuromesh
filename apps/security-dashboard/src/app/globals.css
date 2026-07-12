@@ -30,6 +30,35 @@ body {
   gap: 0.25rem;
 }
 
+.feature-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.feature-panel-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: center;
+  font-size: 0.875rem;
+  color: rgba(226, 232, 240, 0.8);
+}
+
+.feature-panel-meta button {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 0.375rem;
+  background: rgba(15, 23, 42, 0.8);
+  color: inherit;
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+}
+
+.feature-panel-meta button:hover {
+  border-color: rgba(56, 189, 248, 0.6);
+}
+
 .log-grid-shell {
   height: 28rem;
   border: 1px solid rgba(148, 163, 184, 0.2);

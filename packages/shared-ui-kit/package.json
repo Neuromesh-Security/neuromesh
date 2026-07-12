@@ -16,7 +16,8 @@
     "react-dom": "^19.0.0"
   },
   "dependencies": {
-    "@tanstack/react-virtual": "^3.13.12"
+    "@tanstack/react-virtual": "^3.13.12",
+    "react-force-graph-2d": "^1.27.4"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

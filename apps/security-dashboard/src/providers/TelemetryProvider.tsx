@@ -13,6 +13,7 @@ import {
 import {
   FastPathSubscriber,
   type FastPathBlockEvent,
+  type FastPathConnectionEvent,
   type FastPathSubscriberStatus,
 } from "@/api/fast-path";
 import {
@@ -23,6 +24,7 @@ import {
 interface TelemetryContextValue {
   fastPathStatus: FastPathSubscriberStatus;
   fastPathEvents: FastPathBlockEvent[];
+  fastPathConnectionEvents: FastPathConnectionEvent[];
   slowPathInsights: LateralMovementInsight[];
   refreshSlowPath: () => Promise<void>;
 }
@@ -47,6 +49,9 @@ export function TelemetryProvider({
   const [fastPathStatus, setFastPathStatus] =
     useState<FastPathSubscriberStatus>("idle");
   const [fastPathEvents, setFastPathEvents] = useState<FastPathBlockEvent[]>([]);
+  const [fastPathConnectionEvents, setFastPathConnectionEvents] = useState<
+    FastPathConnectionEvent[]
+  >([]);
   const [slowPathInsights, setSlowPathInsights] = useState<LateralMovementInsight[]>(
     [],
   );
@@ -62,6 +67,9 @@ export function TelemetryProvider({
       grpcWebBaseUrl,
       onBlock: (event) => {
         setFastPathEvents((current) => [event, ...current].slice(0, 5_000));
+      },
+      onConnectionChange: (event) => {
+        setFastPathConnectionEvents((current) => [event, ...current].slice(0, 10_000));
       },
       onStatusChange: setFastPathStatus,
     });
@@ -92,6 +100,7 @@ export function TelemetryProvider({
   const value: TelemetryContextValue = {
     fastPathStatus,
     fastPathEvents,
+    fastPathConnectionEvents,
     slowPathInsights,
     refreshSlowPath,
   };

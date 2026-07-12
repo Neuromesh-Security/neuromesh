@@ -18,10 +18,24 @@ export type FastPathSubscriberStatus =
   | "disconnected"
   | "error";
 
+import {
+  sanitizeIdentifier,
+  sanitizeSpiffeId,
+  sanitizeTelemetryString,
+} from "@/lib/security/sanitize";
+
+import {
+  parseFastPathConnectionMessage,
+  type FastPathConnectionEvent,
+} from "./topology";
+
+export type { FastPathConnectionEvent, FastPathConnectionState } from "./topology";
+
 export interface FastPathSubscriberOptions {
   websocketUrl: string;
   grpcWebBaseUrl: string;
   onBlock: (event: FastPathBlockEvent) => void;
+  onConnectionChange?: (event: FastPathConnectionEvent) => void;
   onStatusChange?: (status: FastPathSubscriberStatus) => void;
   reconnectDelayMs?: number;
 }
@@ -49,6 +63,12 @@ export class FastPathSubscriber {
     });
 
     this.socket.addEventListener("message", (message) => {
+      const connectionEvent = parseFastPathConnectionMessage(message.data);
+      if (connectionEvent) {
+        this.options.onConnectionChange?.(connectionEvent);
+        return;
+      }
+
       const event = parseFastPathMessage(message.data);
       if (event) {
         this.options.onBlock(event);
@@ -114,11 +134,32 @@ function parseFastPathMessage(data: unknown): FastPathBlockEvent | null {
   }
 
   try {
-    const parsed = JSON.parse(data) as FastPathBlockEvent;
-    if (!parsed.eventId || !parsed.syscall) {
+    const parsed = JSON.parse(data) as Record<string, unknown>;
+    const eventId = sanitizeIdentifier(parsed.eventId);
+    const syscall = sanitizeTelemetryString(parsed.syscall, 64);
+    if (!eventId || !syscall) {
       return null;
     }
-    return parsed;
+
+    const timestampNs =
+      typeof parsed.timestampNs === "number" && Number.isFinite(parsed.timestampNs)
+        ? parsed.timestampNs
+        : Date.now() * 1_000_000;
+
+    const verdict = parsed.verdict === "allow" ? "allow" : "block";
+    const spiffeId = parsed.spiffeId ? sanitizeSpiffeId(parsed.spiffeId) : undefined;
+
+    return {
+      eventId,
+      timestampNs,
+      nodeName: sanitizeTelemetryString(parsed.nodeName, 128),
+      syscall,
+      binaryPath: sanitizeTelemetryString(parsed.binaryPath, 256),
+      pid: typeof parsed.pid === "number" ? parsed.pid : 0,
+      ppid: typeof parsed.ppid === "number" ? parsed.ppid : 0,
+      verdict,
+      spiffeId: spiffeId ?? undefined,
+    };
   } catch {
     return null;
   }
