@@ -55,6 +55,12 @@ export function isAuthorizedForPath(
   return isAuthorizedForFeature(principal, feature);
 }
 
+const THREAT_HUNTING_QUERY_ROLES: readonly DashboardRole[] = ["analyst", "admin"];
+
+export function canExecuteThreatHuntingQueries(roles: DashboardRole[]): boolean {
+  return roles.some((role) => THREAT_HUNTING_QUERY_ROLES.includes(role));
+}
+
 export function auditAccessDecision(input: {
   principal: AuthenticatedPrincipal;
   pathname: string;
