@@ -3,6 +3,8 @@ name = "agent-ebpf-sensor-ebpf"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+
 [dependencies]
 aya-ebpf = "0.1.0"
 aya-ebpf-bindings = "0.1.2"
