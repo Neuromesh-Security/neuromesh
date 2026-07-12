@@ -64,6 +64,7 @@ For regulated industries, SOC teams, and multi-cluster Kubernetes estates requir
   * `agent-ebpf-sensor` — Dual-path eBPF sensor and user-space orchestrator (Fast Path).
   * `ai-threat-detector` — Kafka consumer and GNN Slow Path inference service.
   * `zt-policy-engine` — Go control plane: OPA policy evaluation + SPIFFE identity.
+  * `k8s-admission-webhook` — Validating/mutating admission webhook (TLS enforcement).
 * `/deploy` — Production deployment manifests.
   * `kubernetes/neuromesh-agent.yaml` — Privileged DaemonSet for per-node eBPF enforcement.
 * `/packages` — Shared internal libraries.
