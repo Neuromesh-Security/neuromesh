@@ -100,21 +100,22 @@ jobs:
           cache-dependency-path: apps/ai-threat-detector/requirements.txt
 
       - name: Install bandit
-        run: pip install bandit[toml]
+        run: pip install 'bandit[toml]>=1.7.5'
 
       - name: Run bandit
         run: |
           bandit -r src main.py \
-            -f sarif \
-            -o bandit.sarif \
+            -f json \
+            -o bandit.json \
             -ll
 
-      - name: Upload bandit SARIF
+      - name: Upload bandit report
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: apps/ai-threat-detector/bandit.sarif
-          category: bandit-ai-threat-detector
+          name: bandit-ai-threat-detector
+          path: bandit.json
+          retention-days: 30
 
   supply-chain:
     name: SBOM & Container Scan (${{ matrix.image }})

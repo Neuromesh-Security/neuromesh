@@ -57,7 +57,6 @@ class GNNEvaluatorTests(unittest.TestCase):
             score = evaluator.ingest_behavior_alert(envelope)
 
         self.assertIsNotNone(score)
-        assert score is not None
         self.assertGreater(score.score, 0.0)
         self.assertGreaterEqual(evaluator.edge_count, 4)
 
