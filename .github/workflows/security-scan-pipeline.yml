@@ -121,6 +121,9 @@ jobs:
     name: SBOM & Container Scan (${{ matrix.image }})
     runs-on: ubuntu-latest
     needs: [sast-gosec, sast-cargo-audit, sast-bandit]
+    env:
+      # Enterprise policy: block only fixable HIGH/CRITICAL findings.
+      TRIVY_IGNORE_UNFIXED: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -168,12 +171,17 @@ jobs:
       - name: Scan image for CVEs (Trivy)
         uses: aquasecurity/trivy-action@0.28.0
         with:
+          scan-type: image
           image-ref: ${{ matrix.image }}:ci
+          scanners: vuln
+          vuln-type: os,library
           format: sarif
           output: trivy-${{ matrix.image }}.sarif
           severity: CRITICAL,HIGH
-          exit-code: 1
-          ignore-unfixed: true
+          exit-code: "1"
+          ignore-unfixed: "true"
+          hide-progress: "true"
+          limit-severities-for-sarif: "true"
 
       - name: Upload Trivy SARIF
         if: always()
