@@ -3,15 +3,22 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"neuromesh/zt-policy-engine/internal/evaluator"
 	"neuromesh/zt-policy-engine/internal/identity"
+)
+
+const (
+	defaultListenPort = 8080
+	maxRequestBody    = 1 << 20 // 1 MiB
 )
 
 type evaluateRequest struct {
@@ -38,25 +45,26 @@ func main() {
 	spiffe := identity.NewSPIFFEValidator(identity.DefaultConfig())
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok","service":"zt-policy-engine"}`))
-	})
+	mux.HandleFunc("GET /healthz", healthHandler)
 	mux.HandleFunc("POST /v1/evaluate", evaluateHandler(opa, spiffe))
 
-	port := os.Getenv("ZT_POLICY_ENGINE_PORT")
-	if port == "" {
-		port = "8080"
+	port, err := parseListenPort(os.Getenv("ZT_POLICY_ENGINE_PORT"))
+	if err != nil {
+		log.Fatalf("invalid listen port configuration: %v", err)
 	}
 
 	srv := &http.Server{
-		Addr:              ":" + port,
+		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	go func() {
-		log.Printf("zt-policy-engine listening on :%s", port)
+		log.Println("zt-policy-engine HTTP server started")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
@@ -73,13 +81,41 @@ func main() {
 	}
 }
 
+func parseListenPort(raw string) (int, error) {
+	if raw == "" {
+		return defaultListenPort, nil
+	}
+
+	port, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("port must be numeric: %w", err)
+	}
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("port out of range: %d", port)
+	}
+
+	return port, nil
+}
+
+func healthHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := w.Write([]byte(`{"status":"ok","service":"zt-policy-engine"}`)); err != nil {
+		log.Printf("health response write failed: %v", err)
+	}
+}
+
 func evaluateHandler(opa *evaluator.OPAEvaluator, spiffe *identity.SPIFFEValidator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+
 		var req evaluateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil {
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
 			return
 		}
+
 		if req.BinaryPath == "" {
 			http.Error(w, "binary_path is required", http.StatusBadRequest)
 			return
@@ -108,10 +144,12 @@ func evaluateHandler(opa *evaluator.OPAEvaluator, spiffe *identity.SPIFFEValidat
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(evaluateResponse{
+		if err := json.NewEncoder(w).Encode(evaluateResponse{
 			Allowed:    decision.Allowed,
 			DenyReason: decision.DenyReason,
 			Identity:   idResult.Identity.String(),
-		})
+		}); err != nil {
+			log.Printf("evaluate response encode failed: %v", err)
+		}
 	}
 }

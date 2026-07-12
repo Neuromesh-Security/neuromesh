@@ -1,0 +1,98 @@
+name: AI Model Promotion
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/ai-threat-detector/src/inference/**
+  pull_request:
+    branches: [main]
+    paths:
+      - apps/ai-threat-detector/src/inference/**
+
+concurrency:
+  group: ai-model-promotion-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  gnn-evaluator-validation:
+    name: GNN Inference Validation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/ai-threat-detector
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: apps/ai-threat-detector/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run inference unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Validate GNN evaluator logic
+        run: |
+          python - <<'PY'
+          import unittest
+
+          from src.inference.gnn_evaluator import GNNEvaluator, DEFAULT_EDGE_GROWTH_THRESHOLD
+          from src.inference.anomaly_pipeline import AnomalyPipeline
+          from src.streaming.kafka_consumer import TelemetryEnvelope, SCHEMA_VERSION, BEHAVIOR_ALERT
+
+          class GNNPromotionGate(unittest.TestCase):
+              def test_evaluator_threshold_is_configured(self) -> None:
+                  evaluator = GNNEvaluator()
+                  self.assertGreater(evaluator.edge_growth_threshold, 0)
+                  self.assertEqual(
+                      evaluator.edge_growth_threshold,
+                      DEFAULT_EDGE_GROWTH_THRESHOLD,
+                  )
+
+              def test_pipeline_routes_behavior_alert(self) -> None:
+                  import asyncio
+
+                  pipeline = AnomalyPipeline(
+                      evaluator=GNNEvaluator(edge_growth_threshold=1, growth_window_secs=60.0)
+                  )
+                  envelope = TelemetryEnvelope(
+                      event_id="promotion-gate-1",
+                      timestamp_ns=1,
+                      node_name="ci-node",
+                      schema_version=SCHEMA_VERSION,
+                      alert_type=BEHAVIOR_ALERT,
+                      payload={
+                          "ppid": 100,
+                          "last_pid": 101,
+                          "last_comm": "bash",
+                          "last_binary_path": "/usr/bin/bash",
+                          "spawn_count": 4,
+                      },
+                  )
+                  asyncio.run(pipeline.handle(envelope))
+                  self.assertEqual(pipeline.stats.behavior_alerts, 1)
+                  self.assertGreaterEqual(pipeline.evaluator.edge_count, 1)
+
+          suite = unittest.defaultTestLoader.loadTestsFromTestCase(GNNPromotionGate)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not result.wasSuccessful():
+              raise SystemExit(1)
+          print("GNN promotion gate passed.")
+          PY
+
+      - name: Promotion gate summary
+        run: |
+          echo "MLOps promotion gate: inference path validated for deployment readiness."

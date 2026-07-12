@@ -164,10 +164,11 @@ class AsyncTelemetryConsumer:
                 await asyncio.to_thread(
                     self._consumer.commit, message=message, asynchronous=False
                 )
-            except Exception:
+            except Exception as error:
                 logger.exception(
-                    "handler failed — offset not committed (offset=%s)",
+                    "handler failed — offset not committed (offset=%s): %s",
                     message.offset(),
+                    error,
                 )
 
     def stop(self) -> None:
