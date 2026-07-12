@@ -7,18 +7,14 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=1 go build -ldflags="-s -w" -o /zt-policy-engine ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /zt-policy-engine ./cmd/server
 
-FROM debian:bookworm-slim
+FROM gcr.io/distroless/static-debian12:nonroot
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates wget \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /zt-policy-engine /usr/local/bin/zt-policy-engine
+COPY --from=builder /zt-policy-engine /zt-policy-engine
 
 ENV ZT_POLICY_ENGINE_PORT=8080
 EXPOSE 8080
 
-USER nobody:nogroup
-ENTRYPOINT ["/usr/local/bin/zt-policy-engine"]
+USER nonroot:nonroot
+ENTRYPOINT ["/zt-policy-engine"]
