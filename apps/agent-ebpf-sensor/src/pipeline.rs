@@ -44,10 +44,8 @@ impl TelemetryPipeline {
         let mut combined = PipelineOutput::default();
         for event in events {
             let partial = self.process(event);
-            combined
-                .behavior_alerts
-                .extend(partial.behavior_alerts.into_iter());
-            combined.siem_alerts.extend(partial.siem_alerts.into_iter());
+            combined.behavior_alerts.extend(partial.behavior_alerts);
+            combined.siem_alerts.extend(partial.siem_alerts);
         }
         combined
     }

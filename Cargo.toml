@@ -6,6 +6,9 @@ members = [
     "packages/telemetry",
     "tests",
 ]
+exclude = [
+    "apps/agent-ebpf-sensor/ebpf",
+]
 
 [workspace.package]
 edition = "2021"
