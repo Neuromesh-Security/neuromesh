@@ -40,7 +40,6 @@ impl DataNormalizer {
     }
 
     /// Deterministic configuration for integration and property tests.
-    #[cfg(any(test, feature = "test-support"))]
     pub fn with_config(window: Duration, burst_threshold: usize, batch_limit: usize) -> Self {
         Self {
             window,
