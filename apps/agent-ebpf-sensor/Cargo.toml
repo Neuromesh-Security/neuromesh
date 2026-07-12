@@ -14,7 +14,8 @@ required-features = ["orchestrator"]
 
 [features]
 default = []
-orchestrator = []
+orchestrator = ["kafka-stream"]
+kafka-stream = ["dep:rskafka"]
 
 [dependencies]
 neuromesh-common = { path = "../../packages/neuromesh-common", default-features = false, features = ["user"] }
@@ -29,10 +30,12 @@ tokio = { version = "1.36", features = [
     "net",
     "time",
     "io-util",
+    "sync",
 ] }
 anyhow = "1.0"
 env_logger = "0.11"
 log = "0.4"
+rskafka = { version = "0.6", optional = true }
 
 [package.metadata.coverage]
 minimum-line-coverage = 70

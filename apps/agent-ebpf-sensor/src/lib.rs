@@ -4,6 +4,7 @@ pub mod mocks;
 pub mod normalizer;
 pub mod pipeline;
 pub mod rules;
+pub mod telemetry_stream;
 pub mod wasm_policy;
 
 pub use normalizer::{BehaviorAlert, DataNormalizer, SEVERITY_BEHAVIOR_ALERT};

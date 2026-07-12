@@ -1,5 +1,6 @@
 use agent_ebpf_sensor::pipeline::TelemetryPipeline;
 use agent_ebpf_sensor::rules::RuleEngine;
+use agent_ebpf_sensor::telemetry_stream::{self, TelemetryStreamHandle};
 use agent_ebpf_sensor::wasm_policy::WasmPolicyEngine;
 use aya::maps::{Array, MapData, RingBuf};
 use aya::programs::{Lsm, TracePoint};
@@ -46,10 +47,16 @@ async fn main() -> Result<(), anyhow::Error> {
     )?;
     let mut async_ring = AsyncFd::new(telemetry_map)?;
     let mut pipeline = TelemetryPipeline::new();
+    let telemetry_stream = telemetry_stream::spawn_from_env().await;
     let _wasm_policy = WasmPolicyEngine::new();
 
     info!("🛡️ XDR enforcement armed. LSM bprm_check_security active blocking enabled.");
     info!("⚡ Detection brain armed. RuleEngine + DataNormalizer active on RingBuf stream...");
+    if std::env::var("NEUROMESH_KAFKA_BROKERS").is_ok() {
+        info!("📡 Kafka Slow Path armed (topic: neuromesh.telemetry.v1)");
+    } else {
+        info!("📡 Kafka Slow Path disabled (set NEUROMESH_KAFKA_BROKERS to enable)");
+    }
 
     let mut stats_interval = tokio::time::interval(Duration::from_secs(5));
     stats_interval.tick().await;
@@ -64,7 +71,9 @@ async fn main() -> Result<(), anyhow::Error> {
                     let event = unsafe {
                         ptr::read_unaligned(item.as_ptr() as *const SecurityTelemetryEvent)
                     };
-                    if let Err(error) = emit_pipeline_output(&mut pipeline, &event) {
+                    if let Err(error) =
+                        emit_pipeline_output(&mut pipeline, &telemetry_stream, &event)
+                    {
                         log::warn!("telemetry pipeline failed: {error}");
                     }
                 }
@@ -78,16 +87,19 @@ async fn main() -> Result<(), anyhow::Error> {
 
 fn emit_pipeline_output(
     pipeline: &mut TelemetryPipeline,
+    telemetry_stream: &TelemetryStreamHandle,
     event: &SecurityTelemetryEvent,
 ) -> Result<(), anyhow::Error> {
     let output = pipeline.process(event);
 
     for alert in output.behavior_alerts {
         println!("{}", serde_json::to_string(&alert)?);
+        telemetry_stream.try_enqueue_behavior(alert);
     }
 
     for alert in output.siem_alerts {
         println!("{}", RuleEngine::format_json(&alert)?);
+        telemetry_stream.try_enqueue_critical(alert);
     }
 
     Ok(())
