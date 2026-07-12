@@ -1,19 +1,21 @@
 """Streaming adapters for the Slow Path (Kafka → GNN)."""
 
 from .kafka_consumer import (
+    BEHAVIOR_ALERT,
+    CRITICAL_ALERT,
     DEFAULT_TOPIC,
     SCHEMA_VERSION,
-    build_consumer,
-    consume_loop,
+    AsyncTelemetryConsumer,
+    TelemetryEnvelope,
     parse_telemetry_message,
-    route_to_gnn,
 )
 
 __all__ = [
+    "BEHAVIOR_ALERT",
+    "CRITICAL_ALERT",
     "DEFAULT_TOPIC",
     "SCHEMA_VERSION",
-    "build_consumer",
-    "consume_loop",
+    "AsyncTelemetryConsumer",
+    "TelemetryEnvelope",
     "parse_telemetry_message",
-    "route_to_gnn",
 ]
