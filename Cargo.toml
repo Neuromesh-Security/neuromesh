@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/agent-ebpf-sensor",
+    "packages/neuromesh-common",
+    "packages/telemetry",
+    "tests",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"

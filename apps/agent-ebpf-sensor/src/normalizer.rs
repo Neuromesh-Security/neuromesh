@@ -36,12 +36,18 @@ pub struct BehaviorAlert {
 
 impl DataNormalizer {
     pub fn new() -> Self {
+        Self::with_config(Duration::from_secs(2), 8, 64)
+    }
+
+    /// Deterministic configuration for integration and property tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_config(window: Duration, burst_threshold: usize, batch_limit: usize) -> Self {
         Self {
-            window: Duration::from_secs(2),
-            burst_threshold: 8,
+            window,
+            burst_threshold,
             parent_spawns: HashMap::new(),
-            batch: Vec::with_capacity(64),
-            batch_limit: 64,
+            batch: Vec::with_capacity(batch_limit),
+            batch_limit,
         }
     }
 

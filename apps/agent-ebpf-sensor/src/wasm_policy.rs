@@ -67,3 +67,44 @@ impl WasmPolicyEngine {
         self.loaded_policies.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_starts_without_loaded_policies() {
+        assert_eq!(WasmPolicyEngine::new().loaded_count(), 0);
+    }
+
+    #[test]
+    fn evaluate_defaults_to_allow() {
+        use neuromesh_common::SecurityTelemetryEvent;
+        assert_eq!(
+            WasmPolicyEngine::new().evaluate(&SecurityTelemetryEvent {
+                pid: 0,
+                ppid: 0,
+                uid: 0,
+                euid: 0,
+                comm: [0; 16],
+                filename: [0; 256],
+            }),
+            PolicyVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn load_policy_reports_not_implemented() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("neuromesh-wasm-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("policy.wasm");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"\0asm").unwrap();
+
+        let mut engine = WasmPolicyEngine::new();
+        let result = engine.load_policy_from_path(&path);
+        assert_eq!(result, Err(PolicyError::NotImplemented));
+    }
+}

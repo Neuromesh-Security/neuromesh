@@ -28,7 +28,9 @@ Neuromesh embraces the open-source community to ensure trust, transparency, and 
   * `telemetry` — Standard `MetricEvent` contract for Kafka and observability pipelines.
   * `proto-definitions` — Protobuf schemas for cross-service telemetry.
 * `/docs` — Architecture decision records and design documentation.
+  * `threat-model.md` — MITRE ATT&CK mapping and integration test traceability.
 * `/scripts` — Red team simulations and operational tooling.
+* `/tests` — Kernel-independent integration test farm (`neuromesh-integration-tests`).
 
 ## 🛠️ Prerequisites & Quickstart
 
@@ -41,6 +43,10 @@ Neuromesh operates at Ring 0 and requires a modern environment for eBPF bytecode
 
 ### Setup & Compilation
 ```bash
+# 0. Run logic tests locally (no eBPF kernel required)
+cargo test -p neuromesh-integration-tests
+cargo test -p agent-ebpf-sensor --lib
+
 # 1. Install the eBPF linker
 cargo install bpf-linker
 
@@ -48,7 +54,7 @@ cargo install bpf-linker
 cargo xtask build-ebpf --release
 
 # 3. Run the user-space orchestrator (Root privileges required for bpf() syscall)
-RUST_LOG=info sudo -E cargo run --release
+RUST_LOG=info sudo -E cargo run -p agent-ebpf-sensor --features orchestrator --release
 ```
 
 ---

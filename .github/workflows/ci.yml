@@ -21,12 +21,49 @@ jobs:
       - name: Install Rust Stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
 
       - name: Install Rust Nightly (eBPF prerequisite)
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov
+
+      - name: Check Formatting (workspace)
+        run: cargo +stable fmt --all -- --check
+
+      - name: cargo check — workspace libraries
+        run: |
+          cargo +stable check -p neuromesh-common
+          cargo +stable check -p neuromesh-telemetry --all-targets
+          cargo +stable check -p agent-ebpf-sensor --lib --all-targets
+          cargo +stable check -p neuromesh-integration-tests --all-targets
+
+      - name: Integration tests (kernel-independent)
+        run: cargo +stable test -p neuromesh-integration-tests
+
+      - name: Unit tests — sensor library
+        run: cargo +stable test -p agent-ebpf-sensor --lib
+
+      - name: Unit tests — telemetry
+        run: cargo +stable test -p neuromesh-telemetry
+
+      - name: Coverage gate (≥70% line coverage)
+        run: |
+          cargo llvm-cov \
+            --package agent-ebpf-sensor \
+            --package neuromesh-common \
+            --package neuromesh-telemetry \
+            --lib \
+            --fail-under-lines 70
+
+      - name: cargo clippy — workspace
+        run: |
+          cargo +stable clippy -p agent-ebpf-sensor --lib -- -D warnings
+          cargo +stable clippy -p neuromesh-telemetry --all-targets -- -D warnings
+          cargo +stable clippy -p neuromesh-integration-tests --all-targets -- -D warnings
 
       - name: Install bpf-linker
         run: cargo install bpf-linker
@@ -39,47 +76,11 @@ jobs:
           cargo +nightly build --package agent-ebpf-sensor-ebpf --target bpfel-unknown-none -Z build-std=core --release
           test -f target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
 
-      - name: Check Formatting — sensor
-        working-directory: apps/agent-ebpf-sensor
-        run: cargo +stable fmt --all -- --check
-
-      - name: Check Formatting — telemetry
-        working-directory: packages/telemetry
-        run: cargo +stable fmt -- --check
-
-      - name: cargo check — neuromesh-common
-        working-directory: packages/neuromesh-common
-        run: cargo +stable check
-
-      - name: cargo check — telemetry
-        working-directory: packages/telemetry
-        run: cargo +stable check --all-targets
-
-      - name: cargo check — sensor
-        working-directory: apps/agent-ebpf-sensor
-        run: cargo +stable check --all-targets
-
-      - name: cargo clippy — sensor
-        working-directory: apps/agent-ebpf-sensor
-        run: cargo +stable clippy --all-targets -- -D warnings
-
-      - name: cargo clippy — telemetry
-        working-directory: packages/telemetry
-        run: cargo +stable clippy --all-targets -- -D warnings
-
-      - name: cargo test — sensor
-        working-directory: apps/agent-ebpf-sensor
-        run: cargo +stable test
-
-      - name: cargo test — telemetry
-        working-directory: packages/telemetry
-        run: cargo +stable test
-
       - name: Build User Space Orchestrator
         working-directory: apps/agent-ebpf-sensor
         run: |
           test -f "$BPF_ARTIFACT"
-          cargo +stable build --release
+          cargo +stable build --features orchestrator --release
 
   ebpf-cross-compile:
     name: eBPF Cross-Compile (${{ matrix.arch }})
