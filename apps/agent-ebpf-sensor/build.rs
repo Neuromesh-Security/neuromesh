@@ -13,10 +13,10 @@ fn main() {
 
     let mut command = Command::new("clang");
     command.args([
-        "-g",
         "-O2",
         "-target",
         "bpf",
+        "-D__TARGET_ARCH_x86",
         "-I",
         "src/bpf",
         "-c",

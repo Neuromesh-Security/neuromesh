@@ -204,7 +204,7 @@ jobs:
         working-directory: apps/agent-ebpf-sensor
         run: |
           mkdir -p target/bpf
-          clang -g -O2 -target bpf -I src/bpf -c src/bpf/sys_exec.bpf.c -o target/bpf/sys_exec.bpf.o
+          clang -O2 -target bpf -D__TARGET_ARCH_x86 -I src/bpf -c src/bpf/sys_exec.bpf.c -o target/bpf/sys_exec.bpf.o
 
       - name: Verify Rust enforcement bytecode
         run: bash scripts/ci/verify_ebpf_bytecode.sh "${{ env.BPF_ARTIFACT_PATH }}"
