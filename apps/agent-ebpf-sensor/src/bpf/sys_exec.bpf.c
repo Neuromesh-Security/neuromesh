@@ -62,7 +62,7 @@ static __always_inline void record_drop(void)
 static __always_inline __u32 read_ppid_best_effort(void)
 {
 	void *task = (void *)bpf_get_current_task();
-	void *parent = NULL;
+	void *parent = 0;
 	__u32 ppid = 0;
 
 	if (!task)
