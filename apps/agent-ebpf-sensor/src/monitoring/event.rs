@@ -77,7 +77,7 @@ impl ProcessEventHandler {
         );
 
         self.seen = self.seen.wrapping_add(1);
-        if self.seen % Self::INFO_SAMPLE_INTERVAL == 0 {
+        if self.seen.is_multiple_of(Self::INFO_SAMPLE_INTERVAL) {
             tracing::info!(
                 target: "neuromesh::process_monitor",
                 seen = self.seen,
