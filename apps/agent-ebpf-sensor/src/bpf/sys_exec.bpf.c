@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 // Neuromesh process visibility — tracepoint syscalls/sys_enter_execve.
 //
-// CO-RE / BTF maps (SEC ".maps"). Ringbuf records are fully zeroed before
-// population; user filename is read via bounded bpf_probe_read_user_str.
+// Ringbuf records are fully zeroed before population. Filename is read via
+// bounded bpf_probe_read_user_str from tracepoint args[0] (no BTF helpers).
 
 #include "bpf_helpers.h"
 
@@ -11,10 +11,6 @@ char __license[] SEC("license") = "GPL";
 #define COMM_LEN 16
 #define FILENAME_LEN 128
 #define DROPPED_KEY 0
-
-/* task_struct offsets (x86_64, kernel 6.x — best-effort, matches Rust eBPF hook). */
-#define TASK_REAL_PARENT_OFFSET 1216
-#define TASK_TGID_OFFSET 104
 
 struct process_event_t {
 	__u32 pid;
@@ -59,40 +55,14 @@ static __always_inline void record_drop(void)
 	bpf_map_update_elem(&DROPPED_EVENTS, &key, &next, BPF_ANY);
 }
 
-static __always_inline __u32 read_ppid_best_effort(void)
-{
-	void *task = (void *)bpf_get_current_task();
-	void *parent = 0;
-	__u32 ppid = 0;
-
-	if (!task)
-		return 0;
-
-	if (bpf_probe_read_kernel(&parent, sizeof(parent),
-				  (const void *)task + TASK_REAL_PARENT_OFFSET))
-		return 0;
-	if (!parent)
-		return 0;
-	if (bpf_probe_read_kernel(&ppid, sizeof(ppid),
-				  (const void *)parent + TASK_TGID_OFFSET))
-		return 0;
-	return ppid;
-}
-
 SEC("tracepoint/syscalls/sys_enter_execve")
 int neuromesh_process_events(struct trace_event_raw_sys_enter *ctx)
 {
 	struct process_event_t *event;
-	unsigned long filename_ptr = 0;
 	__u64 pid_tgid;
 	__u64 uid_gid;
 
-	if (!ctx)
-		return 0;
-
-	if (bpf_probe_read_kernel(&filename_ptr, sizeof(filename_ptr), &ctx->args[0]))
-		return 0;
-	if (!filename_ptr)
+	if (!ctx || !ctx->args[0])
 		return 0;
 
 	event = bpf_ringbuf_reserve(&PROCESS_EVENTS, sizeof(*event), 0);
@@ -107,11 +77,11 @@ int neuromesh_process_events(struct trace_event_raw_sys_enter *ctx)
 	event->pid = (__u32)(pid_tgid >> 32);
 	uid_gid = bpf_get_current_uid_gid();
 	event->uid = (__u32)uid_gid;
-	event->ppid = read_ppid_best_effort();
+	event->ppid = 0;
 
 	bpf_get_current_comm(event->comm, sizeof(event->comm));
 	bpf_probe_read_user_str(event->filename, sizeof(event->filename),
-				(const void *)filename_ptr);
+				(const void *)ctx->args[0]);
 	event->ts = bpf_ktime_get_ns();
 
 	bpf_ringbuf_submit(event, 0);
