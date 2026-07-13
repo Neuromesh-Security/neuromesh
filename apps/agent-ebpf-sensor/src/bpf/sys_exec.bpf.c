@@ -1,22 +1,28 @@
 // SPDX-License-Identifier: GPL-2.0
 // Neuromesh process visibility — tracepoint syscalls/sys_enter_execve.
 //
-// CO-RE / BTF maps (SEC ".maps"). User strings are read into a stack buffer via
-// bounded bpf_probe_read_user, then copied into the ringbuf record.
+// CO-RE / BTF maps (SEC ".maps"). User filename is read into a stack buffer via
+// bpf_probe_read_user_str, then copied into the ringbuf record.
 
 #include "bpf_helpers.h"
 
-char LICENSE[] SEC("license") = "GPL";
+char __license[] SEC("license") = "GPL";
 
-#define ARGV0_LEN 128
-#define CWD_LEN 256
+#define COMM_LEN 16
+#define FILENAME_LEN 128
 #define DROPPED_KEY 0
+
+/* task_struct offsets (x86_64, kernel 6.x — best-effort, matches Rust eBPF hook). */
+#define TASK_REAL_PARENT_OFFSET 1216
+#define TASK_TGID_OFFSET 104
 
 struct process_event_t {
 	__u32 pid;
 	__u32 uid;
-	char argv0[ARGV0_LEN];
-	char cwd[CWD_LEN];
+	__u32 ppid;
+	char comm[COMM_LEN];
+	char filename[FILENAME_LEN];
+	__u64 ts;
 };
 
 struct trace_event_raw_sys_enter {
@@ -53,23 +59,30 @@ static __always_inline void record_drop(void)
 	bpf_map_update_elem(&DROPPED_EVENTS, &key, &next, BPF_ANY);
 }
 
-static __always_inline void read_user_cstr(char *dst, __u32 dst_len, unsigned long addr)
+static __always_inline __u32 read_ppid_best_effort(void)
 {
-	if (!dst || dst_len < 2 || !addr) {
-		if (dst && dst_len)
-			dst[0] = '\0';
-		return;
-	}
+	void *task = (void *)bpf_get_current_task();
+	void *parent = NULL;
+	__u32 ppid = 0;
 
-	__builtin_memset(dst, 0, dst_len);
-	bpf_probe_read_user(dst, dst_len - 1, (const void *)addr);
-	dst[dst_len - 1] = '\0';
+	if (!task)
+		return 0;
+
+	if (bpf_probe_read_kernel(&parent, sizeof(parent),
+				  (const void *)task + TASK_REAL_PARENT_OFFSET))
+		return 0;
+	if (!parent)
+		return 0;
+	if (bpf_probe_read_kernel(&ppid, sizeof(ppid),
+				  (const void *)parent + TASK_TGID_OFFSET))
+		return 0;
+	return ppid;
 }
 
 SEC("tracepoint/syscalls/sys_enter_execve")
 int neuromesh_process_events(struct trace_event_raw_sys_enter *ctx)
 {
-	char stack_buf[ARGV0_LEN];
+	char filename_buf[FILENAME_LEN];
 	struct process_event_t *event;
 	__u64 pid_tgid;
 	__u64 uid_gid;
@@ -77,7 +90,9 @@ int neuromesh_process_events(struct trace_event_raw_sys_enter *ctx)
 	if (!ctx || !ctx->args[0])
 		return 0;
 
-	read_user_cstr(stack_buf, sizeof(stack_buf), ctx->args[0]);
+	__builtin_memset(filename_buf, 0, sizeof(filename_buf));
+	bpf_probe_read_user_str(filename_buf, sizeof(filename_buf),
+				(const void *)ctx->args[0]);
 
 	event = bpf_ringbuf_reserve(&PROCESS_EVENTS, sizeof(*event), 0);
 	if (!event) {
@@ -89,9 +104,13 @@ int neuromesh_process_events(struct trace_event_raw_sys_enter *ctx)
 	event->pid = (__u32)(pid_tgid >> 32);
 	uid_gid = bpf_get_current_uid_gid();
 	event->uid = (__u32)uid_gid;
+	event->ppid = read_ppid_best_effort();
 
-	__builtin_memcpy(event->argv0, stack_buf, sizeof(event->argv0));
-	__builtin_memset(event->cwd, 0, sizeof(event->cwd));
+	__builtin_memset(event->comm, 0, sizeof(event->comm));
+	bpf_get_current_comm(event->comm, sizeof(event->comm));
+
+	__builtin_memcpy(event->filename, filename_buf, sizeof(event->filename));
+	event->ts = bpf_ktime_get_ns();
 
 	bpf_ringbuf_submit(event, 0);
 	return 0;

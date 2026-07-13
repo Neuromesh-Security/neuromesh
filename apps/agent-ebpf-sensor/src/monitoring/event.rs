@@ -5,20 +5,24 @@ use std::ptr;
 
 /// Kernel/userspace shared layout for `sys_enter_execve` visibility events.
 ///
-/// Memory layout (`#[repr(C)]`, 392 bytes):
+/// Memory layout (`#[repr(C)]`, 168 bytes):
 /// ```text
-/// +0x00  pid     u32
-/// +0x04  uid     u32
-/// +0x08  argv0   [u8; 128]
-/// +0x88  cwd     [u8; 256]
+/// +0x00  pid       u32
+/// +0x04  uid       u32
+/// +0x08  ppid      u32
+/// +0x0C  comm      [u8; 16]
+/// +0x1C  filename  [u8; 128]
+/// +0xA0  ts        u64
 /// ```
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessEvent {
     pub pid: u32,
     pub uid: u32,
-    pub argv0: [u8; 128],
-    pub cwd: [u8; 256],
+    pub ppid: u32,
+    pub comm: [u8; 16],
+    pub filename: [u8; 128],
+    pub ts: u64,
 }
 
 unsafe impl aya::Pod for ProcessEvent {}
@@ -71,10 +75,13 @@ impl ProcessEventHandler {
     pub fn observe(&mut self, event: &ProcessEvent) {
         let pid = event.pid;
         let uid = event.uid;
+        let ppid = event.ppid;
         tracing::debug!(
             target: "neuromesh::process_monitor",
             pid,
             uid,
+            ppid,
+            ts = event.ts,
             "execve event"
         );
 
@@ -85,6 +92,7 @@ impl ProcessEventHandler {
                 seen = self.seen,
                 sample_pid = pid,
                 sample_uid = uid,
+                sample_ppid = ppid,
                 "process visibility throughput sample"
             );
         }
@@ -109,9 +117,10 @@ mod tests {
 
     #[test]
     fn process_event_layout_matches_bpf_struct() {
-        assert_eq!(size_of::<ProcessEvent>(), 392);
-        assert_eq!(offset_of!(ProcessEvent, argv0), 8);
-        assert_eq!(offset_of!(ProcessEvent, cwd), 136);
+        assert_eq!(size_of::<ProcessEvent>(), 168);
+        assert_eq!(offset_of!(ProcessEvent, comm), 12);
+        assert_eq!(offset_of!(ProcessEvent, filename), 28);
+        assert_eq!(offset_of!(ProcessEvent, ts), 160);
     }
 
     fn bytes_with_prefix<const N: usize>(prefix: &[u8]) -> [u8; N] {
@@ -129,8 +138,10 @@ mod tests {
         let event = ProcessEvent {
             pid: 4242,
             uid: 1000,
-            argv0: bytes_with_prefix::<128>(b"/bin/ls"),
-            cwd: bytes_with_prefix::<256>(b"/tmp"),
+            ppid: 1,
+            comm: bytes_with_prefix::<16>(b"ls"),
+            filename: bytes_with_prefix::<128>(b"/bin/ls"),
+            ts: 1_234_567_890,
         };
         stream.push(event);
 
@@ -144,8 +155,10 @@ mod tests {
         let event = ProcessEvent {
             pid: 99,
             uid: 1,
-            argv0: [0; 128],
-            cwd: [0; 256],
+            ppid: 42,
+            comm: [0; 16],
+            filename: [0; 128],
+            ts: 99,
         };
         let bytes = unsafe {
             core::slice::from_raw_parts(
