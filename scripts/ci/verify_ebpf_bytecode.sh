@@ -5,7 +5,6 @@ set -euo pipefail
 
 readonly BPF_OBJECT="${1:?usage: verify_ebpf_bytecode.sh <path-to-bytecode>}"
 readonly PIN_ROOT="${2:-/sys/fs/bpf/neuromesh-ci-verify}"
-readonly VERIFIER_LOG="${3:-/tmp/neuromesh-ebpf-verifier.log}"
 
 log() {
   printf '[ebpf-verifier] %s\n' "$*"
@@ -16,10 +15,22 @@ if [[ ! -f "${BPF_OBJECT}" ]]; then
   exit 1
 fi
 
-if ! command -v bpftool >/dev/null 2>&1; then
+ensure_bpftool() {
+  if command -v bpftool >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local linux_tools_dir="/usr/lib/linux-tools/$(uname -r)"
+  if [[ -x "${linux_tools_dir}/bpftool" ]]; then
+    sudo ln -sf "${linux_tools_dir}/bpftool" /usr/local/bin/bpftool
+    return 0
+  fi
+
   log "ERROR: bpftool not found in PATH"
   exit 1
-fi
+}
+
+ensure_bpftool
 
 log "Runner kernel: $(uname -r)"
 log "Bytecode: ${BPF_OBJECT}"
@@ -32,19 +43,13 @@ fi
 
 sudo rm -rf "${PIN_ROOT}"
 sudo mkdir -p "${PIN_ROOT}"
-: >"${VERIFIER_LOG}"
 
 set +e
-LOAD_OUTPUT="$(sudo bpftool prog loadall "${BPF_OBJECT}" "${PIN_ROOT}" verifier-log "${VERIFIER_LOG}" 2>&1)"
+LOAD_OUTPUT="$(sudo bpftool prog loadall "${BPF_OBJECT}" "${PIN_ROOT}" 2>&1)"
 LOAD_STATUS=$?
 set -e
 
 printf '%s\n' "${LOAD_OUTPUT}"
-
-if [[ -s "${VERIFIER_LOG}" ]]; then
-  log "Verifier log (${VERIFIER_LOG}):"
-  cat "${VERIFIER_LOG}"
-fi
 
 if [[ ${LOAD_STATUS} -ne 0 ]]; then
   log "ERROR: kernel verifier rejected eBPF bytecode (exit ${LOAD_STATUS})"

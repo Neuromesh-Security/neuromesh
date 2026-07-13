@@ -35,11 +35,12 @@ if not match:
     raise SystemExit("unable to locate rule_engine/evaluate_10k_benign_paths throughput")
 
 parts = match.group(1).split()
-if len(parts) < 4:
+if len(parts) < 4 or len(parts) % 2 != 0:
     raise SystemExit(f"unexpected thrpt format: {match.group(1)!r}")
 
-median_value = float(parts[1])
-median_unit = parts[2]
+# Criterion emits min/median/max as alternating value + unit pairs.
+median_value = float(parts[2])
+median_unit = parts[3]
 
 multipliers = {
     "elem/s": 1.0,
