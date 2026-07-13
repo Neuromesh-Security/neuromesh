@@ -12,6 +12,10 @@ name = "agent-ebpf-sensor"
 path = "src/main.rs"
 required-features = ["orchestrator"]
 
+[[bin]]
+name = "verify-ebpf"
+path = "src/bin/verify_ebpf.rs"
+
 [features]
 default = []
 orchestrator = ["kafka-stream"]

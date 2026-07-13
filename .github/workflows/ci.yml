@@ -184,20 +184,15 @@ jobs:
           name: ebpf-bytecode-${{ matrix.kernel }}
           path: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release
 
-      - name: Install bpftool
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)" \
-            "linux-cloud-tools-$(uname -r)" linux-tools-generic linux-cloud-tools-generic || true
-          LINUX_TOOLS_DIR="/usr/lib/linux-tools/$(uname -r)"
-          if [[ -x "${LINUX_TOOLS_DIR}/bpftool" ]]; then
-            sudo ln -sf "${LINUX_TOOLS_DIR}/bpftool" /usr/local/bin/bpftool
-          fi
-          if ! command -v bpftool >/dev/null 2>&1; then
-            echo "::error::bpftool is required for verifier checks"
-            exit 1
-          fi
-          bpftool version
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/agent-ebpf-sensor
 
       - name: Verify bytecode with kernel verifier
         run: bash scripts/ci/verify_ebpf_bytecode.sh "${{ env.BPF_ARTIFACT_PATH }}"

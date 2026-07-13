@@ -14,6 +14,8 @@ import (
 
 	"neuromesh/zt-policy-engine/internal/evaluator"
 	"neuromesh/zt-policy-engine/internal/identity"
+	"neuromesh/zt-policy-engine/internal/middleware"
+	"neuromesh/zt-policy-engine/internal/query"
 )
 
 const (
@@ -47,6 +49,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthHandler)
 	mux.HandleFunc("POST /v1/evaluate", evaluateHandler(opa, spiffe))
+	query.RegisterRoutes(mux)
 
 	port, err := parseListenPort(os.Getenv("ZT_POLICY_ENGINE_PORT"))
 	if err != nil {
@@ -55,7 +58,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
-		Handler:           mux,
+		Handler:           middleware.CORS(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
