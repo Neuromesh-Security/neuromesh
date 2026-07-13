@@ -47,8 +47,12 @@ fn main() {
 
 /// Aya expects `.BTF` map metadata but rejects malformed `.BTF.ext` from clang.
 fn strip_btf_ext(object: &Path) {
-    for tool in ["llvm-objcopy", "llvm-objcopy-18", "llvm-objcopy-17", "llvm-objcopy-16"]
-    {
+    for tool in [
+        "llvm-objcopy",
+        "llvm-objcopy-18",
+        "llvm-objcopy-17",
+        "llvm-objcopy-16",
+    ] {
         match Command::new(tool)
             .args([
                 "--remove-section=.BTF.ext",
