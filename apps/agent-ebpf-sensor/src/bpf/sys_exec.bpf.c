@@ -92,6 +92,8 @@ int neuromesh_sys_enter_execve(struct trace_event_raw_sys_enter *ctx)
 {
 	struct process_event_t *event;
 	const char *filename_ptr;
+	char argv0_tmp[ARGV0_LEN];
+	char cwd_tmp[CWD_LEN];
 	__u64 pid_tgid;
 	__u64 uid_gid;
 
@@ -111,10 +113,14 @@ int neuromesh_sys_enter_execve(struct trace_event_raw_sys_enter *ctx)
 	__builtin_memset(event->cwd, 0, sizeof(event->cwd));
 
 	filename_ptr = (const char *)ctx->args[0];
+	__builtin_memset(argv0_tmp, 0, sizeof(argv0_tmp));
 	if (filename_ptr)
-		bpf_probe_read_user_str(event->argv0, sizeof(event->argv0), filename_ptr);
+		bpf_probe_read_user_str(argv0_tmp, sizeof(argv0_tmp), filename_ptr);
+	__builtin_memcpy(event->argv0, argv0_tmp, sizeof(event->argv0));
 
-	read_cwd_best_effort(event->cwd, sizeof(event->cwd));
+	__builtin_memset(cwd_tmp, 0, sizeof(cwd_tmp));
+	read_cwd_best_effort(cwd_tmp, sizeof(cwd_tmp));
+	__builtin_memcpy(event->cwd, cwd_tmp, sizeof(event->cwd));
 
 	bpf_ringbuf_submit(event, 0);
 	return 0;
