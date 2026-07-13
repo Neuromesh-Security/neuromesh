@@ -1,4 +1,4 @@
-use agent_ebpf_sensor::monitoring::process_monitor::start_process_monitor;
+use agent_ebpf_sensor::monitoring::start_process_monitor;
 use agent_ebpf_sensor::pipeline::TelemetryPipeline;
 use agent_ebpf_sensor::rules::RuleEngine;
 use agent_ebpf_sensor::telemetry_stream::{self, TelemetryStreamHandle};

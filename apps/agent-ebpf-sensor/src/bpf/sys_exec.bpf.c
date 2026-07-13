@@ -1,24 +1,26 @@
 // SPDX-License-Identifier: GPL-2.0
 // Neuromesh process visibility — sys_enter_execve tracepoint (Ring 0).
+//
+// Constraints: no envp extraction, bounded user probes, drop-on-full ringbuf.
 
 #include "bpf_helpers.h"
 
-/* GPL license required for GPL-only tracepoint helpers on modern kernels. */
 char LICENSE[] SEC("license") = "GPL";
 
-#define TASK_COMM_LEN 16
-#define MAX_FILENAME_LEN 128
+#define ARGV0_LEN 128
+#define CWD_LEN 256
+#define DROPPED_KEY 0
 
-/* x86_64 kernel 6.x best-effort offsets (matches Rust ebpf lineage reader). */
-#define TASK_REAL_PARENT_OFFSET 1216
-#define TASK_TGID_OFFSET 104
+/* x86_64 kernel 6.x best-effort: task_struct->fs->pwd.path.dentry */
+#define TASK_FS_OFFSET 1760
+#define FS_PWD_DENTRY_OFFSET 16
+#define DENTRY_D_INAME_OFFSET 52
 
 struct process_event_t {
 	__u32 pid;
 	__u32 uid;
-	__u32 ppid;
-	char comm[TASK_COMM_LEN];
-	char filename[MAX_FILENAME_LEN];
+	char argv0[ARGV0_LEN];
+	char cwd[CWD_LEN];
 };
 
 struct trace_event_raw_sys_enter {
@@ -35,52 +37,82 @@ struct {
 	__uint(max_entries, 256 * 1024);
 } PROCESS_EVENTS SEC(".maps");
 
-static __always_inline __u32 read_ppid_best_effort(void)
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(values, __u64);
+} DROPPED_EVENTS SEC(".maps");
+
+static __always_inline void record_drop(void)
 {
-	void *task = (void *)(long)bpf_get_current_task();
-	void *parent = 0;
-	__u32 tgid = 0;
+	__u32 key = DROPPED_KEY;
+	__u64 *counter = bpf_map_lookup_elem(&DROPPED_EVENTS, &key);
+	__u64 next;
 
+	if (!counter)
+		return;
+
+	next = *counter + 1;
+	bpf_map_update_elem(&DROPPED_EVENTS, &key, &next, BPF_ANY);
+}
+
+static __always_inline void read_cwd_best_effort(char *cwd, __u32 cwd_len)
+{
+	void *task;
+	void *fs;
+	void *dentry;
+
+	if (!cwd || cwd_len < 2)
+		return;
+
+	task = (void *)(long)bpf_get_current_task();
 	if (!task)
-		return 0;
+		return;
 
-	if (bpf_probe_read_kernel(&parent, sizeof(parent),
-				  (const void *)((const char *)task + TASK_REAL_PARENT_OFFSET)))
-		return 0;
-	if (!parent)
-		return 0;
+	if (bpf_probe_read_kernel(&fs, sizeof(fs),
+				  (const void *)((const char *)task + TASK_FS_OFFSET)))
+		return;
+	if (!fs)
+		return;
 
-	if (bpf_probe_read_kernel(&tgid, sizeof(tgid),
-				  (const void *)((const char *)parent + TASK_TGID_OFFSET)))
-		return 0;
+	if (bpf_probe_read_kernel(&dentry, sizeof(dentry),
+				  (const void *)((const char *)fs + FS_PWD_DENTRY_OFFSET)))
+		return;
+	if (!dentry)
+		return;
 
-	return tgid;
+	bpf_probe_read_kernel_str(cwd, cwd_len,
+				  (const void *)((const char *)dentry + DENTRY_D_INAME_OFFSET));
 }
 
 SEC("tracepoint/syscalls/sys_enter_execve")
 int neuromesh_sys_enter_execve(struct trace_event_raw_sys_enter *ctx)
 {
 	struct process_event_t *event;
-	const char *filename_ptr = (const char *)ctx->args[0];
+	const char *filename_ptr;
 	__u64 pid_tgid;
 	__u64 uid_gid;
 
 	event = bpf_ringbuf_reserve(&PROCESS_EVENTS, sizeof(*event), 0);
-	if (!event)
+	if (!event) {
+		record_drop();
 		return 0;
+	}
 
 	pid_tgid = bpf_get_current_pid_tgid();
 	event->pid = (__u32)(pid_tgid >> 32);
-	event->ppid = read_ppid_best_effort();
 
 	uid_gid = bpf_get_current_uid_gid();
 	event->uid = (__u32)uid_gid;
 
-	__builtin_memset(event->comm, 0, sizeof(event->comm));
-	__builtin_memset(event->filename, 0, sizeof(event->filename));
+	__builtin_memset(event->argv0, 0, sizeof(event->argv0));
+	__builtin_memset(event->cwd, 0, sizeof(event->cwd));
 
-	bpf_get_current_comm(event->comm, sizeof(event->comm));
-	bpf_probe_read_user_str(event->filename, sizeof(event->filename), filename_ptr);
+	filename_ptr = (const char *)ctx->args[0];
+	if (filename_ptr)
+		bpf_probe_read_user_str(event->argv0, sizeof(event->argv0), filename_ptr);
+
+	read_cwd_best_effort(event->cwd, sizeof(event->cwd));
 
 	bpf_ringbuf_submit(event, 0);
 	return 0;
