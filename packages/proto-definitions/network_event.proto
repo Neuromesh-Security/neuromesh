@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package neuromesh.telemetry.v1;
+
+// Immutable, versioned contract for correlated L4 network visibility events.
+// Schema revision is carried in `schema_version`; bump only via a new message type.
+message EnrichedNetworkEvent {
+  uint32 schema_version = 1; // Always 1 for this message revision.
+  string event_id = 2;
+  int64 timestamp_ns = 3;
+  string node_name = 4;
+  uint32 pid = 5;
+  uint32 uid = 6;
+  fixed32 dest_ip = 7; // IPv4, network byte order (zero-copy friendly on decode).
+  uint32 dest_port = 8; // Network byte order.
+  string process_name = 9;
+}

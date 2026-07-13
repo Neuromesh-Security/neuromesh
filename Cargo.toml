@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "apps/agent-ebpf-sensor",
     "packages/neuromesh-common",
+    "packages/proto-definitions",
     "packages/telemetry",
     "tests",
 ]

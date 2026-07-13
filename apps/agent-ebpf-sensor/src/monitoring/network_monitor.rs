@@ -1,5 +1,6 @@
 //! Async RingBuf consumer for C `tcp_connect` network visibility events.
 
+use crate::ingestion::CorrelationIngestionHandle;
 use crate::monitoring::correlation::CorrelationEngine;
 use crate::monitoring::network_event::{NetworkEvent, NetworkEventHandler};
 use anyhow::{Context, Result};
@@ -19,6 +20,7 @@ pub const TCP_CONNECT_PROGRAM: &str = "neuromesh_tcp_connect";
 pub async fn start_network_monitor(
     bpf: &mut Ebpf,
     correlation: Arc<CorrelationEngine>,
+    ingestion: CorrelationIngestionHandle,
 ) -> Result<()> {
     let program: &mut KProbe = bpf
         .program_mut(TCP_CONNECT_PROGRAM)
@@ -48,7 +50,7 @@ pub async fn start_network_monitor(
                         let event =
                             unsafe { ptr::read_unaligned(item.as_ptr() as *const NetworkEvent) };
                         if let Some(enriched) = correlation.correlate(event) {
-                            enriched.log_correlated();
+                            ingestion.try_enqueue(enriched);
                         }
                         handler.observe(event);
                     }
