@@ -2,6 +2,7 @@
 // Neuromesh process visibility — sys_enter_execve tracepoint (Ring 0).
 //
 // Constraints: no envp extraction, bounded user probes, drop-on-full ringbuf.
+// Maps use legacy bpf_map_def (maps section) so Aya can load without clang BTF.
 
 #include "bpf_helpers.h"
 
@@ -10,6 +11,9 @@ char LICENSE[] SEC("license") = "GPL";
 #define ARGV0_LEN 128
 #define CWD_LEN 256
 #define DROPPED_KEY 0
+
+/* trace_event_raw_sys_enter: args[0] at byte offset 16 on x86_64 */
+#define SYS_ENTER_EXECVE_FILENAME_OFF 16
 
 /* x86_64 kernel 6.x best-effort: task_struct->fs->pwd.path.dentry */
 #define TASK_FS_OFFSET 1760
@@ -23,25 +27,21 @@ struct process_event_t {
 	char cwd[CWD_LEN];
 };
 
-struct trace_event_raw_sys_enter {
-	__u16 common_type;
-	__u8 common_flags;
-	__u8 common_preempt_count;
-	__s64 common_pid;
-	__s64 id;
-	unsigned long args[6];
+struct bpf_map_def SEC("maps") PROCESS_EVENTS = {
+	.type = BPF_MAP_TYPE_RINGBUF,
+	.key_size = 0,
+	.value_size = 0,
+	.max_entries = 256 * 1024,
+	.map_flags = 0,
 };
 
-struct {
-	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 256 * 1024);
-} PROCESS_EVENTS SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(values, __u64);
-} DROPPED_EVENTS SEC(".maps");
+struct bpf_map_def SEC("maps") DROPPED_EVENTS = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(__u64),
+	.max_entries = 1,
+	.map_flags = 0,
+};
 
 static __always_inline void record_drop(void)
 {
@@ -86,10 +86,10 @@ static __always_inline void read_cwd_best_effort(char *cwd, __u32 cwd_len)
 }
 
 SEC("tracepoint/syscalls/sys_enter_execve")
-int neuromesh_sys_enter_execve(struct trace_event_raw_sys_enter *ctx)
+int neuromesh_sys_enter_execve(void *ctx)
 {
 	struct process_event_t *event;
-	const char *filename_ptr;
+	const char *filename_ptr = 0;
 	__u64 pid_tgid;
 	__u64 uid_gid;
 
@@ -108,7 +108,8 @@ int neuromesh_sys_enter_execve(struct trace_event_raw_sys_enter *ctx)
 	__builtin_memset(event->argv0, 0, sizeof(event->argv0));
 	__builtin_memset(event->cwd, 0, sizeof(event->cwd));
 
-	filename_ptr = (const char *)ctx->args[0];
+	bpf_probe_read_kernel(&filename_ptr, sizeof(filename_ptr),
+			      (const void *)((const char *)ctx + SYS_ENTER_EXECVE_FILENAME_OFF));
 	if (filename_ptr)
 		bpf_probe_read_user_str(event->argv0, sizeof(event->argv0), filename_ptr);
 
