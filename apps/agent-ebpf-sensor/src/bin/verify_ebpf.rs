@@ -11,8 +11,7 @@ fn main() -> Result<()> {
     println!("[ebpf-verifier] Runner kernel: {}", kernel_release());
     println!("[ebpf-verifier] Bytecode: {path}");
 
-    let mut ebpf =
-        Ebpf::load_file(&path).context("failed to parse eBPF object file")?;
+    let mut ebpf = Ebpf::load_file(&path).context("failed to parse eBPF object file")?;
 
     let mut verified = 0usize;
 
@@ -26,7 +25,8 @@ fn main() -> Result<()> {
 
     if let Some(program) = ebpf.program_mut("neuromesh_lsm_exec_guard") {
         let program: &mut Lsm = program.try_into()?;
-        let btf = Btf::from_sys_fs().context("failed to load kernel BTF (required for LSM verify)")?;
+        let btf =
+            Btf::from_sys_fs().context("failed to load kernel BTF (required for LSM verify)")?;
         program
             .load("bprm_check_security", &btf)
             .context("kernel verifier rejected LSM program neuromesh_lsm_exec_guard")?;
