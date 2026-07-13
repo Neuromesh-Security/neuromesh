@@ -20,7 +20,6 @@ FROM rust:1-bookworm AS agent-builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends clang llvm \
-    && cargo install bpf-linker --locked \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build

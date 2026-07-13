@@ -43,7 +43,6 @@ fn main() {
     }
 
     strip_btf_ext(&output);
-    relink_with_bpf_linker(&output);
 }
 
 /// Clang emits `.BTF.ext` alongside `.BTF`; Aya requires the former to be removed.
@@ -70,35 +69,4 @@ fn strip_btf_ext(object: &Path) {
         "llvm-objcopy is required to strip .BTF.ext from {}; install llvm and retry",
         object.display()
     );
-}
-
-/// bpf-linker normalizes clang BTF map metadata for Aya's CO-RE loader.
-fn relink_with_bpf_linker(object: &Path) {
-    let linked = object.with_extension("linked.o");
-
-    match Command::new("bpf-linker")
-        .args([
-            "--output",
-            linked.to_str().expect("linked path"),
-            object.to_str().expect("object path"),
-        ])
-        .status()
-    {
-        Ok(status) if status.success() => {
-            std::fs::rename(&linked, object).expect("install bpf-linker output");
-        }
-        Ok(status) => {
-            panic!(
-                "bpf-linker failed to normalize BTF for {} (exit {status}); \
-                 install bpf-linker and retry",
-                object.display()
-            );
-        }
-        Err(error) => {
-            panic!(
-                "failed to invoke bpf-linker for {}: {error}; install bpf-linker and retry",
-                object.display()
-            );
-        }
-    }
 }
