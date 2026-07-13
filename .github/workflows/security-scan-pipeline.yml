@@ -25,15 +25,18 @@ jobs:
     name: Trivy — Filesystem
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Run Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.36.0
         with:
-          scan-type: fs
-          scan-ref: .
+          scan-type: "fs"
+          scan-ref: ${{ github.workspace }}
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: 1
@@ -41,11 +44,20 @@ jobs:
           output: trivy-fs.sarif
 
       - name: Upload Trivy filesystem SARIF
-        if: always()
+        if: always() && hashFiles('trivy-fs.sarif') != ''
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-filesystem
+
+      - name: Upload Trivy filesystem report artifact
+        if: always() && hashFiles('trivy-fs.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-filesystem-sarif
+          path: trivy-fs.sarif
+          retention-days: 30
 
   semgrep:
     name: Semgrep — Static Analysis
@@ -238,8 +250,9 @@ jobs:
           retention-days: 30
 
       - name: Scan image for CVEs (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.36.0
         with:
+          scan-type: image
           image-ref: ${{ matrix.image }}:ci
           severity: CRITICAL,HIGH
           ignore-unfixed: true
