@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: "fs"
           scan-ref: ${{ github.workspace }}
@@ -250,7 +250,7 @@ jobs:
           retention-days: 30
 
       - name: Scan image for CVEs (Trivy)
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: ${{ matrix.image }}:ci
