@@ -129,6 +129,15 @@ body {
   padding: 0.75rem 1rem;
 }
 
+.threat-hunting-terminal-loading {
+  min-height: 32rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 0.5rem;
+  color: rgba(226, 232, 240, 0.8);
+}
+
 .threat-hunting-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 20rem;
@@ -209,4 +218,80 @@ body {
   color: inherit;
   padding: 0.35rem 0.75rem;
   cursor: pointer;
+}
+
+.threat-history-loading {
+  margin: 0;
+  font-size: 0.875rem;
+  color: rgba(226, 232, 240, 0.75);
+}
+
+.k8s-compliance-panel {
+  gap: 1.25rem;
+}
+
+.k8s-compliance-grid {
+  display: grid;
+  grid-template-columns: minmax(14rem, 18rem) minmax(0, 1fr);
+  gap: 1rem;
+}
+
+.k8s-compliance-card {
+  display: grid;
+  gap: 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+.k8s-compliance-card h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.k8s-compliance-card dl {
+  margin: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.k8s-compliance-card dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.875rem;
+}
+
+.k8s-compliance-card dt {
+  color: rgba(226, 232, 240, 0.75);
+}
+
+.k8s-compliance-card dd {
+  margin: 0;
+  font-family: "JetBrains Mono", Consolas, monospace;
+}
+
+.k8s-compliance-empty {
+  margin: 0;
+  font-size: 0.875rem;
+  color: rgba(226, 232, 240, 0.75);
+}
+
+.k8s-violation-summary {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.k8s-violation-summary p {
+  margin: 0;
+  font-size: 0.875rem;
+  color: rgba(226, 232, 240, 0.85);
+}
+
+.compliance-list li[data-decision="deny"] {
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
+.compliance-list li[data-decision="mutate"] {
+  border-color: rgba(250, 204, 21, 0.45);
 }

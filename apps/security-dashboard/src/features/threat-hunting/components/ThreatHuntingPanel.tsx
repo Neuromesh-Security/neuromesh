@@ -1,10 +1,40 @@
 "use client";
 
-import { QueryHistoryProvider, useQueryHistory } from "../hooks";
+import dynamic from "next/dynamic";
+
 import { ThreatHuntingTerminal } from "./ThreatHuntingTerminal";
+import { useQueryHistory } from "../hooks";
+
+const QueryHistoryProvider = dynamic(
+  () =>
+    import("./QueryHistoryProviderClient").then((module) => ({
+      default: module.QueryHistoryProvider,
+    })),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="threat-hunting-terminal-loading" aria-busy="true">
+        Initializing threat-hunting session…
+      </div>
+    ),
+  },
+);
 
 function QueryHistoryPanel() {
-  const { entries, totalCount, searchTerm, setSearchTerm, clearHistory } = useQueryHistory();
+  const { entries, totalCount, isHydrated, searchTerm, setSearchTerm, clearHistory } =
+    useQueryHistory();
+
+  if (!isHydrated) {
+    return (
+      <aside className="threat-history-panel" aria-busy="true">
+        <header>
+          <h3>Query History</h3>
+          <span>Loading session history…</span>
+        </header>
+        <p className="threat-history-loading">Restoring audit session from browser storage.</p>
+      </aside>
+    );
+  }
 
   return (
     <aside className="threat-history-panel">
@@ -43,24 +73,30 @@ function QueryHistoryPanel() {
   );
 }
 
+function ThreatHuntingPanelContent() {
+  return (
+    <section className="feature-panel threat-hunting-panel">
+      <header className="feature-panel-header">
+        <div>
+          <h2>Threat Hunting</h2>
+          <p>
+            Interactive terminal for analyst queries against aggregated telemetry via
+            zt-policy-engine.
+          </p>
+        </div>
+      </header>
+      <div className="threat-hunting-layout">
+        <ThreatHuntingTerminal className="threat-hunting-terminal" />
+        <QueryHistoryPanel />
+      </div>
+    </section>
+  );
+}
+
 export function ThreatHuntingPanel() {
   return (
     <QueryHistoryProvider>
-      <section className="feature-panel threat-hunting-panel">
-        <header className="feature-panel-header">
-          <div>
-            <h2>Threat Hunting</h2>
-            <p>
-              Interactive terminal for analyst queries against aggregated telemetry via
-              zt-policy-engine.
-            </p>
-          </div>
-        </header>
-        <div className="threat-hunting-layout">
-          <ThreatHuntingTerminal className="threat-hunting-terminal" />
-          <QueryHistoryPanel />
-        </div>
-      </section>
+      <ThreatHuntingPanelContent />
     </QueryHistoryProvider>
   );
 }

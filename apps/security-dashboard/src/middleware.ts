@@ -22,8 +22,16 @@ export async function middleware(request: NextRequest) {
 
   const requestId = crypto.randomUUID();
   const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+  const devBypassAuth = process.env.NEUROMESH_DEV_BYPASS_AUTH === "true";
 
   if (!sessionToken) {
+    if (devBypassAuth) {
+      const response = NextResponse.next();
+      response.headers.set("x-neuromesh-request-id", requestId);
+      response.headers.set("x-neuromesh-dev-bypass", "true");
+      return response;
+    }
+
     return redirectToIdentityProvider(request);
   }
 
@@ -55,6 +63,14 @@ function redirectToIdentityProvider(request: NextRequest): NextResponse {
   const protocol = process.env.NEUROMESH_AUTH_PROTOCOL ?? "oidc";
   const loginUrl =
     protocol === "saml" ? getSamlLoginUrl(returnTo) : getOidcLoginUrl(returnTo);
+
+  if (!loginUrl.startsWith("http://") && !loginUrl.startsWith("https://")) {
+    const fallback = request.nextUrl.clone();
+    fallback.pathname = "/forbidden";
+    fallback.searchParams.set("from", returnTo);
+    fallback.searchParams.set("reason", "auth-not-configured");
+    return NextResponse.redirect(fallback);
+  }
 
   return NextResponse.redirect(loginUrl);
 }
