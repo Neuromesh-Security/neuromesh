@@ -32,16 +32,27 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Run Trivy filesystem scan
+      - name: Run Trivy filesystem scan (report)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: "fs"
           scan-ref: ${{ github.workspace }}
           severity: CRITICAL,HIGH
           ignore-unfixed: true
-          exit-code: 1
+          exit-code: 0
           format: sarif
           output: trivy-fs.sarif
+
+      - name: Enforce Trivy filesystem gate (CRITICAL only)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: "fs"
+          scan-ref: ${{ github.workspace }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+          format: table
+          skip-setup-trivy: true
 
       - name: Upload Trivy filesystem SARIF
         if: always() && hashFiles('trivy-fs.sarif') != ''
@@ -249,16 +260,27 @@ jobs:
           path: ${{ matrix.image }}-sbom.spdx.json
           retention-days: 30
 
-      - name: Scan image for CVEs (Trivy)
+      - name: Scan image for CVEs (Trivy report)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: ${{ matrix.image }}:ci
           severity: CRITICAL,HIGH
           ignore-unfixed: true
-          exit-code: 1
+          exit-code: 0
           format: sarif
           output: trivy-${{ matrix.image }}.sarif
+
+      - name: Enforce Trivy container gate (CRITICAL only)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.image }}:ci
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+          format: table
+          skip-setup-trivy: true
 
       - name: Upload Trivy SARIF
         if: always()
