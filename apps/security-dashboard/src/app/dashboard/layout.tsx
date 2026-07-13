@@ -18,6 +18,7 @@ export default async function DashboardLayout({
 }>) {
   const sessionToken = (await cookies()).get(SESSION_COOKIE_NAME)?.value;
   const principal = sessionToken ? await verifySessionToken(sessionToken) : null;
+  const devBypassAuth = process.env.NEUROMESH_DEV_BYPASS_AUTH === "true";
 
   const authValue = principal
     ? {
@@ -25,11 +26,17 @@ export default async function DashboardLayout({
         email: principal.email,
         roles: principal.roles,
       }
-    : {
-        subject: "anonymous",
-        email: "",
-        roles: [] as DashboardRole[],
-      };
+    : devBypassAuth
+      ? {
+          subject: "dev-analyst",
+          email: "dev-analyst@neuromesh.local",
+          roles: ["analyst"] as DashboardRole[],
+        }
+      : {
+          subject: "anonymous",
+          email: "",
+          roles: [] as DashboardRole[],
+        };
 
   return (
     <AuthProvider principal={authValue}>

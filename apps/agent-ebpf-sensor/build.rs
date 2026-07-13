@@ -1,15 +1,32 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const BPF_SOURCES: &[(&str, &str)] = &[
+    ("src/bpf/sys_exec.bpf.c", "target/bpf/sys_exec.bpf.o"),
+    (
+        "src/bpf/network_filter.bpf.c",
+        "target/bpf/network_filter.bpf.o",
+    ),
+];
+
 fn main() {
     println!("cargo:rerun-if-changed=src/bpf/sys_exec.bpf.c");
+    println!("cargo:rerun-if-changed=src/bpf/network_filter.bpf.c");
     println!("cargo:rerun-if-changed=src/bpf/bpf_helpers.h");
+    println!("cargo:rerun-if-changed=src/bpf/vmlinux.h");
+    println!("cargo:rerun-if-changed=src/bpf/bpf/bpf_tracing.h");
 
     let out_dir = PathBuf::from("target/bpf");
     std::fs::create_dir_all(&out_dir).expect("failed to create target/bpf");
 
-    let output = out_dir.join("sys_exec.bpf.o");
-    let source = PathBuf::from("src/bpf/sys_exec.bpf.c");
+    for (source, output) in BPF_SOURCES {
+        compile_bpf(source, output);
+    }
+}
+
+fn compile_bpf(source: &str, output: &str) {
+    let output_path = PathBuf::from(output);
+    let source_path = PathBuf::from(source);
 
     let mut command = Command::new("clang");
     command.args([
@@ -21,9 +38,9 @@ fn main() {
         "-I",
         "src/bpf",
         "-c",
-        source.to_str().expect("source path"),
+        source_path.to_str().expect("source path"),
         "-o",
-        output.to_str().expect("output path"),
+        output_path.to_str().expect("output path"),
     ]);
 
     if let Ok(include) = std::env::var("BPF_INCLUDE_DIR") {
@@ -34,15 +51,19 @@ fn main() {
         Ok(status) if status.success() => {}
         Ok(status) => {
             panic!(
-                "clang failed to compile sys_exec.bpf.c (exit {status}); install clang and retry"
+                "clang failed to compile {} (exit {status}); install clang and retry",
+                source_path.display()
             );
         }
         Err(error) => {
-            panic!("failed to invoke clang for sys_exec.bpf.c: {error}");
+            panic!(
+                "failed to invoke clang for {}: {error}",
+                source_path.display()
+            );
         }
     }
 
-    strip_btf_ext(&output);
+    strip_btf_ext(&output_path);
 }
 
 /// Clang emits `.BTF.ext` alongside `.BTF`; Aya requires the former to be removed.

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use aya::programs::{Lsm, TracePoint};
+use aya::programs::{KProbe, Lsm, TracePoint};
 use aya::{Btf, Ebpf};
 use std::env;
 
@@ -14,6 +14,14 @@ fn main() -> Result<()> {
     let mut ebpf = Ebpf::load_file(&path).context("failed to parse eBPF object file")?;
 
     let mut verified = 0usize;
+
+    if let Some(program) = ebpf.program_mut("neuromesh_tcp_connect") {
+        let program: &mut KProbe = program.try_into()?;
+        program
+            .load()
+            .context("kernel verifier rejected kprobe program neuromesh_tcp_connect")?;
+        verified += 1;
+    }
 
     if let Some(program) = ebpf.program_mut("neuromesh_process_events") {
         let program: &mut TracePoint = program.try_into()?;

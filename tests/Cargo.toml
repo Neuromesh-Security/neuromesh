@@ -10,4 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 agent-ebpf-sensor = { path = "../apps/agent-ebpf-sensor" }
 neuromesh-common = { path = "../packages/neuromesh-common", features = ["user"] }
+neuromesh-proto = { path = "../packages/proto-definitions" }
+prost = "0.13"
 serde_json = "1.0"
+tokio = { version = "1.36", features = ["macros", "rt-multi-thread", "sync"] }

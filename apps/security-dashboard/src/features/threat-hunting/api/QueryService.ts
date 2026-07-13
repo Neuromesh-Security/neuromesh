@@ -27,6 +27,10 @@ export interface TelemetryQueryEvent {
   verdict?: string;
   sourceIp?: string;
   destinationIp?: string;
+  ruleId?: string;
+  gnnScore?: number;
+  namespace?: string;
+  resourceKind?: string;
 }
 
 export interface TelemetryQueryResponse {
@@ -51,9 +55,9 @@ export class QueryService {
   }
 
   async searchTelemetry(query: ParsedThreatQuery): Promise<TelemetryQueryResponse> {
-    const endpoint = new URL(
-      "/neuromesh.policy.v1.QueryService/SearchTelemetry",
+    const endpoint = resolvePolicyEndpoint(
       this.options.baseUrl,
+      "/neuromesh.policy.v1.QueryService/SearchTelemetry",
     );
 
     const body: GrpcQueryRequest = {
@@ -126,6 +130,10 @@ function sanitizeQueryEvent(event: unknown): TelemetryQueryEvent | null {
 
   const identity = record.identity ? sanitizeSpiffeId(record.identity) : null;
 
+  const gnnScore = parseNumericField(
+    record.gnnScore ?? record.gnn_score ?? record.riskScore ?? record.risk_score,
+  );
+
   return {
     eventId,
     timestampNs,
@@ -137,15 +145,43 @@ function sanitizeQueryEvent(event: unknown): TelemetryQueryEvent | null {
     sourceIp: sanitizeTelemetryString(record.sourceIp ?? record.source_ip, 64) || undefined,
     destinationIp:
       sanitizeTelemetryString(record.destinationIp ?? record.destination_ip, 64) || undefined,
+    ruleId: sanitizeTelemetryString(record.ruleId ?? record.rule_id, 64) || undefined,
+    gnnScore,
+    namespace: sanitizeTelemetryString(record.namespace, 64) || undefined,
+    resourceKind:
+      sanitizeTelemetryString(record.resourceKind ?? record.resource_kind, 32) || undefined,
   };
 }
 
 export function createQueryServiceFromEnv(): QueryService {
   const baseUrl =
-    process.env.NEXT_PUBLIC_NEUROMESH_POLICY_ENGINE_URL ?? "http://localhost:8080";
+    process.env.NEXT_PUBLIC_NEUROMESH_POLICY_ENGINE_URL ?? "/api/policy";
 
   return new QueryService({
     baseUrl,
     apiKey: process.env.NEUROMESH_POLICY_ENGINE_API_KEY,
   });
+}
+
+function resolvePolicyEndpoint(baseUrl: string, path: string): string {
+  if (baseUrl.startsWith("/")) {
+    return `${baseUrl.replace(/\/$/, "")}${path}`;
+  }
+
+  return new URL(path, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`).toString();
+}
+
+function parseNumericField(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return undefined;
 }

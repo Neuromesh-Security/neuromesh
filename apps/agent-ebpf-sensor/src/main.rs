@@ -1,4 +1,7 @@
-use agent_ebpf_sensor::monitoring::start_process_monitor;
+use agent_ebpf_sensor::ingestion;
+use agent_ebpf_sensor::monitoring::{
+    start_network_monitor, start_process_monitor, CorrelationEngine,
+};
 use agent_ebpf_sensor::pipeline::TelemetryPipeline;
 use agent_ebpf_sensor::rules::RuleEngine;
 use agent_ebpf_sensor::telemetry_stream::{self, TelemetryStreamHandle};
@@ -9,11 +12,13 @@ use aya::{Btf, Ebpf};
 use log::info;
 use neuromesh_common::{SecurityTelemetryEvent, TelemetryHealthStats, TELEMETRY_STATS_INDEX};
 use std::ptr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
 
 const SYS_EXEC_BPF: &[u8] = include_bytes!("../target/bpf/sys_exec.bpf.o");
+const NETWORK_FILTER_BPF: &[u8] = include_bytes!("../target/bpf/network_filter.bpf.o");
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -37,8 +42,19 @@ async fn main() -> Result<(), anyhow::Error> {
     lsm_program.load("bprm_check_security", &btf)?;
     lsm_program.attach()?;
 
-    let mut visibility_bpf = Ebpf::load(SYS_EXEC_BPF)?;
-    start_process_monitor(&mut visibility_bpf).await?;
+    let correlation = CorrelationEngine::new();
+    let correlation_ingestion = ingestion::spawn_from_env().await;
+
+    let mut process_bpf = Ebpf::load(SYS_EXEC_BPF)?;
+    start_process_monitor(&mut process_bpf, Arc::clone(&correlation)).await?;
+
+    let mut network_bpf = Ebpf::load(NETWORK_FILTER_BPF)?;
+    start_network_monitor(
+        &mut network_bpf,
+        Arc::clone(&correlation),
+        correlation_ingestion,
+    )
+    .await?;
 
     let stats_map = Array::try_from(
         enforcement_bpf
@@ -56,6 +72,9 @@ async fn main() -> Result<(), anyhow::Error> {
     let _wasm_policy = WasmPolicyEngine::new();
 
     info!("👁️ Process visibility armed via sys_enter_execve tracepoint.");
+    info!("🌐 Network visibility armed via tcp_connect kprobe.");
+    info!("🔗 Lock-free correlation engine armed (DashMap PID → process name).");
+    info!("📨 Correlation Kafka ingestion armed (bounded MPSC → idempotent rdkafka).");
     info!("🛡️ XDR enforcement armed. LSM bprm_check_security active blocking enabled.");
     info!("⚡ Detection brain armed. RuleEngine + DataNormalizer active on LSM RingBuf stream...");
     if std::env::var("NEUROMESH_KAFKA_BROKERS").is_ok() {

@@ -1,13 +1,11 @@
 "use client";
 
-import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
+import type { Terminal } from "@xterm/xterm";
 import { useEffect, useMemo, useRef } from "react";
 
 import { createQueryServiceFromEnv } from "../api";
 import { useThreatHuntingTerminal } from "../hooks";
-
-import "@xterm/xterm/css/xterm.css";
 
 const PROMPT = "neuromesh> ";
 
@@ -44,77 +42,96 @@ export function ThreatHuntingTerminal({ className }: ThreatHuntingTerminalProps)
       return;
     }
 
-    const terminal = new Terminal({
-      cursorBlink: true,
-      fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, monospace',
-      fontSize: 13,
-      theme: {
-        background: "#020617",
-        foreground: "#e2e8f0",
-        cursor: "#38bdf8",
-        selectionBackground: "rgba(56, 189, 248, 0.25)",
-      },
-      scrollback: 10_000,
-      convertEol: true,
-    });
+    let disposed = false;
+    let resizeObserver: ResizeObserver | null = null;
+    let disposable: { dispose: () => void } | null = null;
 
-    const fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
-    terminal.open(container);
-    fitAddon.fit();
+    const initialize = async () => {
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
+        import("@xterm/xterm"),
+        import("@xterm/addon-fit"),
+      ]);
+      await import("@xterm/xterm/css/xterm.css");
 
-    terminalRef.current = terminal;
-    fitAddonRef.current = fitAddon;
-
-    terminal.writeln("Neuromesh Threat Hunting Terminal");
-    terminal.writeln(
-      canQueryRef.current
-        ? "Type 'help' for query syntax. Analyst query access: ENABLED."
-        : "Read-only session. Analyst or admin role required for queries.",
-    );
-    terminal.write(PROMPT);
-
-    const onData = (data: string) => {
-      if (!canQueryRef.current) {
+      if (disposed) {
         return;
       }
 
-      if (data === "\r") {
-        const command = inputBufferRef.current;
-        inputBufferRef.current = "";
-        terminal.write("\r\n");
-        void onCommandRef.current(command);
-        return;
-      }
+      const terminal = new Terminal({
+        cursorBlink: true,
+        fontFamily: '"JetBrains Mono", "Cascadia Code", Consolas, monospace',
+        fontSize: 13,
+        theme: {
+          background: "#020617",
+          foreground: "#e2e8f0",
+          cursor: "#38bdf8",
+          selectionBackground: "rgba(56, 189, 248, 0.25)",
+        },
+        scrollback: 10_000,
+        convertEol: true,
+      });
 
-      if (data === "\u007f") {
-        if (inputBufferRef.current.length === 0) {
+      const fitAddon = new FitAddon();
+      terminal.loadAddon(fitAddon);
+      terminal.open(container);
+      fitAddon.fit();
+
+      terminalRef.current = terminal;
+      fitAddonRef.current = fitAddon;
+
+      terminal.writeln("Neuromesh Threat Hunting Terminal");
+      terminal.writeln(
+        canQueryRef.current
+          ? "Type 'help' for query syntax. Analyst query access: ENABLED."
+          : "Read-only session. Analyst or admin role required for queries.",
+      );
+      terminal.write(PROMPT);
+
+      const onData = (data: string) => {
+        if (!canQueryRef.current) {
           return;
         }
-        inputBufferRef.current = inputBufferRef.current.slice(0, -1);
-        terminal.write("\b \b");
-        return;
-      }
 
-      if (data < " " && data !== "\t") {
-        return;
-      }
+        if (data === "\r") {
+          const command = inputBufferRef.current;
+          inputBufferRef.current = "";
+          terminal.write("\r\n");
+          void onCommandRef.current(command);
+          return;
+        }
 
-      inputBufferRef.current += data;
-      terminal.write(data);
+        if (data === "\u007f") {
+          if (inputBufferRef.current.length === 0) {
+            return;
+          }
+          inputBufferRef.current = inputBufferRef.current.slice(0, -1);
+          terminal.write("\b \b");
+          return;
+        }
+
+        if (data < " " && data !== "\t") {
+          return;
+        }
+
+        inputBufferRef.current += data;
+        terminal.write(data);
+      };
+
+      disposable = terminal.onData(onData);
+
+      resizeObserver = new ResizeObserver(() => {
+        fitAddon.fit();
+      });
+      resizeObserver.observe(container);
     };
 
-    const disposable = terminal.onData(onData);
-
-    const resizeObserver = new ResizeObserver(() => {
-      fitAddon.fit();
-    });
-    resizeObserver.observe(container);
+    void initialize();
 
     return () => {
-      disposable.dispose();
-      resizeObserver.disconnect();
-      terminal.dispose();
+      disposed = true;
+      disposable?.dispose();
+      resizeObserver?.disconnect();
+      terminalRef.current?.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
     };

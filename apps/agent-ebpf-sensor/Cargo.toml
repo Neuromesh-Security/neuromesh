@@ -19,8 +19,9 @@ path = "src/bin/verify_ebpf.rs"
 
 [features]
 default = []
-orchestrator = ["kafka-stream", "dep:tracing-subscriber"]
+orchestrator = ["kafka-stream", "kafka-ingestion", "dep:tracing-subscriber"]
 kafka-stream = ["dep:rskafka"]
+kafka-ingestion = ["dep:rdkafka"]
 
 [dependencies]
 neuromesh-common = { path = "../../packages/neuromesh-common", default-features = false, features = ["user"] }
@@ -39,9 +40,13 @@ tokio = { version = "1.36", features = [
     "io-util",
     "sync",
 ] }
+dashmap = "6.1"
 anyhow = "1.0"
 env_logger = "0.11"
 log = "0.4"
+neuromesh-proto = { path = "../../packages/proto-definitions" }
+prost = "0.13"
+rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
 rskafka = { version = "0.6", optional = true }
 
 [package.metadata.coverage]
