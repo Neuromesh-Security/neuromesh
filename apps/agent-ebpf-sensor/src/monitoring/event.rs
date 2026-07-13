@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::ptr;
 
-/// Kernel/userspace shared layout for `sys_enter_execve` visibility events.
+/// Kernel/userspace shared layout for `kprobe/sys_execve` visibility events.
 ///
 /// Memory layout (`#[repr(C)]`, 392 bytes):
 /// ```text
@@ -12,7 +12,7 @@ use std::ptr;
 /// +0x08  argv0   [u8; 128]
 /// +0x88  cwd     [u8; 256]
 /// ```
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessEvent {
     pub pid: u32,
@@ -69,10 +69,12 @@ impl ProcessEventHandler {
     /// Observe one exec event without heap allocation on the hot path.
     #[inline]
     pub fn observe(&mut self, event: &ProcessEvent) {
+        let pid = event.pid;
+        let uid = event.uid;
         tracing::debug!(
             target: "neuromesh::process_monitor",
-            pid = event.pid,
-            uid = event.uid,
+            pid,
+            uid,
             "execve event"
         );
 
@@ -81,8 +83,8 @@ impl ProcessEventHandler {
             tracing::info!(
                 target: "neuromesh::process_monitor",
                 seen = self.seen,
-                sample_pid = event.pid,
-                sample_uid = event.uid,
+                sample_pid = pid,
+                sample_uid = uid,
                 "process visibility throughput sample"
             );
         }

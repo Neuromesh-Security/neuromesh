@@ -55,7 +55,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let telemetry_stream = telemetry_stream::spawn_from_env().await;
     let _wasm_policy = WasmPolicyEngine::new();
 
-    info!("👁️ Process visibility armed via C sys_enter_execve tracepoint.");
+    info!("👁️ Process visibility armed via C kprobe/sys_execve.");
     info!("🛡️ XDR enforcement armed. LSM bprm_check_security active blocking enabled.");
     info!("⚡ Detection brain armed. RuleEngine + DataNormalizer active on LSM RingBuf stream...");
     if std::env::var("NEUROMESH_KAFKA_BROKERS").is_ok() {

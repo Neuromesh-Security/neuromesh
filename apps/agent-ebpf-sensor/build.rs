@@ -4,6 +4,8 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=src/bpf/sys_exec.bpf.c");
     println!("cargo:rerun-if-changed=src/bpf/bpf_helpers.h");
+    println!("cargo:rerun-if-changed=src/bpf/vmlinux.h");
+    println!("cargo:rerun-if-changed=src/bpf/bpf_tracing.h");
 
     let out_dir = PathBuf::from("target/bpf");
     std::fs::create_dir_all(&out_dir).expect("failed to create target/bpf");
