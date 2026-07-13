@@ -27,9 +27,10 @@ pub async fn start_process_monitor(bpf: &mut Ebpf) -> Result<()> {
         .attach("syscalls", "sys_enter_execve")
         .context("failed to attach sys_enter_execve tracepoint")?;
 
-    let ring_buf = RingBuf::try_from(bpf.take_map(PROCESS_EVENTS_MAP).with_context(|| {
-        format!("BPF map `{PROCESS_EVENTS_MAP}` missing from object file")
-    })?)?;
+    let ring_buf =
+        RingBuf::try_from(bpf.take_map(PROCESS_EVENTS_MAP).with_context(|| {
+            format!("BPF map `{PROCESS_EVENTS_MAP}` missing from object file")
+        })?)?;
 
     let mut async_ring = AsyncFd::new(ring_buf)?;
 
@@ -39,9 +40,8 @@ pub async fn start_process_monitor(bpf: &mut Ebpf) -> Result<()> {
             let poll_result = async_ring
                 .async_io_mut(Interest::READABLE, |ring| {
                     while let Some(item) = ring.next() {
-                        let event = unsafe {
-                            ptr::read_unaligned(item.as_ptr() as *const ProcessEvent)
-                        };
+                        let event =
+                            unsafe { ptr::read_unaligned(item.as_ptr() as *const ProcessEvent) };
                         handler.observe(&event);
                     }
                     Ok(())
