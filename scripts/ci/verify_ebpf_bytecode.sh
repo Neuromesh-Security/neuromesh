@@ -15,5 +15,16 @@ if [[ ! -f "${BPF_OBJECT}" ]]; then
   exit 1
 fi
 
+sudo mkdir -p /sys/fs/bpf
+if ! mountpoint -q /sys/fs/bpf 2>/dev/null; then
+  sudo mount -t bpf bpf /sys/fs/bpf || true
+fi
+
+ulimit -l unlimited 2>/dev/null || true
+
 cd "${ROOT_DIR}"
-cargo run -q -p agent-ebpf-sensor --bin verify-ebpf --release -- "${BPF_OBJECT}"
+sudo -E env \
+  PATH="${PATH}" \
+  CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}" \
+  CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}" \
+  cargo run -q -p agent-ebpf-sensor --bin verify-ebpf --release -- "${BPF_OBJECT}"
