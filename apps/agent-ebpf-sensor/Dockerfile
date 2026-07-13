@@ -1,11 +1,9 @@
 # syntax=docker/dockerfile:1
 
 # ------------------------------------------------------------------------------
-# builder — fast-fail CI validation target
-#   docker build --target builder -f apps/agent-ebpf-sensor/Dockerfile .
-# Proves bookworm/glibc toolchain + libcurl headers required by rdkafka cmake-build.
+# toolchain — common build deps (kept lightweight; no Rust builds)
 # ------------------------------------------------------------------------------
-FROM rust:1-bookworm AS builder
+FROM rust:1-bookworm AS toolchain
 
 ARG RDKAFKA_CRATE_VERSION=0.36
 
@@ -31,6 +29,12 @@ RUN pkg-config --exists libcurl \
     && /tmp/curl-probe \
     && rm /tmp/curl-probe
 
+# ------------------------------------------------------------------------------
+# rdkafka-probe — optional fast-fail validation target (heavy; C++ build)
+#   docker build --target rdkafka-probe -f apps/agent-ebpf-sensor/Dockerfile .
+# Proves bookworm/glibc toolchain + libcurl headers required by rdkafka cmake-build.
+# ------------------------------------------------------------------------------
+FROM toolchain AS rdkafka-probe
 WORKDIR /tmp/rdkafka-probe
 RUN cargo init --name rdkafka-probe --bin \
     && cargo add "rdkafka@${RDKAFKA_CRATE_VERSION}" --features cmake-build \
@@ -58,19 +62,13 @@ RUN cargo +nightly build --package agent-ebpf-sensor-ebpf \
 # ------------------------------------------------------------------------------
 # agent-builder — orchestrator (deps cached via BuildKit; inherits builder toolchain)
 # ------------------------------------------------------------------------------
-FROM builder AS agent-builder
+FROM toolchain AS agent-builder
 
 WORKDIR /build
 
-# Manifest layer: invalidates only when dependency graph changes.
 COPY Cargo.toml Cargo.lock ./
 COPY packages packages
 COPY tests tests
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    cargo fetch --locked
-
 COPY apps/agent-ebpf-sensor apps/agent-ebpf-sensor
 COPY --from=ebpf-builder \
     /build/apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf \
