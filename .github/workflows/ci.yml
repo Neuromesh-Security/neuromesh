@@ -17,6 +17,10 @@ env:
   CARGO_TERM_COLOR: always
   BPF_ARTIFACT: ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
   BPF_ARTIFACT_PATH: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
+  NEUROMESH_PERF_BASELINE_EPS: "100000"
+  NEUROMESH_PERF_REGRESSION_PCT: "5"
+  NEUROMESH_E2E_TIMEOUT_SECS: "30"
+  NEUROMESH_MIN_GNN_SCORE: "0.8"
 
 jobs:
   lint:
@@ -154,6 +158,79 @@ jobs:
           path: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
           retention-days: 14
           if-no-files-found: error
+
+  ebpf-verifier-check:
+    name: eBPF Verifier (${{ matrix.kernel }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    needs: build-ebpf
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel: "5.15"
+            runner: ubuntu-22.04
+          - kernel: "6.1"
+            runner: ubuntu-22.04
+          - kernel: "6.8+"
+            runner: ubuntu-24.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download eBPF bytecode (${{ matrix.kernel }})
+        uses: actions/download-artifact@v4
+        with:
+          name: ebpf-bytecode-${{ matrix.kernel }}
+          path: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release
+
+      - name: Install bpftool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common "linux-tools-$(uname -r)" || \
+            sudo apt-get install -y linux-tools-generic
+          if ! command -v bpftool >/dev/null 2>&1; then
+            echo "::error::bpftool is required for verifier checks"
+            exit 1
+          fi
+          bpftool version
+
+      - name: Verify bytecode with kernel verifier
+        run: bash scripts/ci/verify_ebpf_bytecode.sh "${{ env.BPF_ARTIFACT_PATH }}"
+
+  performance-regression:
+    name: Performance Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: lint
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/agent-ebpf-sensor
+
+      - name: Run events/sec regression gate
+        run: bash scripts/benchmarks/events_per_second.sh
+
+  e2e-detection-test:
+    name: E2E Detection Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: lint
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run attack simulation and GNN insight probe
+        run: bash scripts/e2e/validate_gnn_detection.sh
 
   build-docker:
     name: Build Docker (${{ matrix.image }})
