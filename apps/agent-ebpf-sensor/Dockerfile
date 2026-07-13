@@ -18,6 +18,10 @@ RUN cargo +nightly build --package agent-ebpf-sensor-ebpf \
 
 FROM rust:1-bookworm AS agent-builder
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends clang llvm \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY packages packages

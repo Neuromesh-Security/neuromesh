@@ -7,6 +7,9 @@ pub mod rules;
 pub mod telemetry_stream;
 pub mod wasm_policy;
 
+#[cfg(feature = "orchestrator")]
+pub mod monitoring;
+
 pub use normalizer::{BehaviorAlert, DataNormalizer, SEVERITY_BEHAVIOR_ALERT};
 pub use pipeline::{PipelineOutput, TelemetryPipeline};
 pub use rules::{RuleEngine, RuleVerdict, SiemAlert, SEVERITY_CRITICAL_ALERT};
