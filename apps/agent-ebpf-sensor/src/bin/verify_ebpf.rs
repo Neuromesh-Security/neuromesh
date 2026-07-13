@@ -15,6 +15,14 @@ fn main() -> Result<()> {
 
     let mut verified = 0usize;
 
+    if let Some(program) = ebpf.program_mut("neuromesh_process_events") {
+        let program: &mut TracePoint = program.try_into()?;
+        program
+            .load()
+            .context("kernel verifier rejected tracepoint program neuromesh_process_events")?;
+        verified += 1;
+    }
+
     if let Some(program) = ebpf.program_mut("neuromesh_exec_hook") {
         let program: &mut TracePoint = program.try_into()?;
         program

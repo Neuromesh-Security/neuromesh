@@ -1,9 +1,10 @@
+use agent_ebpf_sensor::monitoring::start_process_monitor;
 use agent_ebpf_sensor::pipeline::TelemetryPipeline;
 use agent_ebpf_sensor::rules::RuleEngine;
 use agent_ebpf_sensor::telemetry_stream::{self, TelemetryStreamHandle};
 use agent_ebpf_sensor::wasm_policy::WasmPolicyEngine;
 use aya::maps::{Array, MapData, RingBuf};
-use aya::programs::{Lsm, TracePoint};
+use aya::programs::Lsm;
 use aya::{Btf, Ebpf};
 use log::info;
 use neuromesh_common::{SecurityTelemetryEvent, TelemetryHealthStats, TELEMETRY_STATS_INDEX};
@@ -12,37 +13,41 @@ use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
 
+const SYS_EXEC_BPF: &[u8] = include_bytes!("../target/bpf/sys_exec.bpf.o");
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
     env_logger::init();
+
     info!("🚀 [Neuromesh] Initializing Enterprise Agent...");
 
-    let bpf_data =
+    let enforcement_bpf_data =
         include_bytes!("../ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf");
 
-    let mut ebpf = Ebpf::load(bpf_data)?;
-
-    let program: &mut TracePoint = ebpf
-        .program_mut("neuromesh_exec_hook")
-        .unwrap()
-        .try_into()?;
-    program.load()?;
-    program.attach("syscalls", "sys_enter_execve")?;
+    let mut enforcement_bpf = Ebpf::load(enforcement_bpf_data)?;
 
     let btf = Btf::from_sys_fs()?;
-    let lsm_program: &mut Lsm = ebpf
+    let lsm_program: &mut Lsm = enforcement_bpf
         .program_mut("neuromesh_lsm_exec_guard")
-        .unwrap()
+        .ok_or_else(|| anyhow::anyhow!("neuromesh_lsm_exec_guard program missing"))?
         .try_into()?;
     lsm_program.load("bprm_check_security", &btf)?;
     lsm_program.attach()?;
 
+    let mut visibility_bpf = Ebpf::load(SYS_EXEC_BPF)?;
+    start_process_monitor(&mut visibility_bpf).await?;
+
     let stats_map = Array::try_from(
-        ebpf.take_map("TELEMETRY_STATS")
+        enforcement_bpf
+            .take_map("TELEMETRY_STATS")
             .ok_or_else(|| anyhow::anyhow!("TELEMETRY_STATS map missing from eBPF object"))?,
     )?;
     let telemetry_map = RingBuf::try_from(
-        ebpf.take_map("TELEMETRY_RINGBUF")
+        enforcement_bpf
+            .take_map("TELEMETRY_RINGBUF")
             .ok_or_else(|| anyhow::anyhow!("TELEMETRY_RINGBUF map missing from eBPF object"))?,
     )?;
     let mut async_ring = AsyncFd::new(telemetry_map)?;
@@ -50,8 +55,9 @@ async fn main() -> Result<(), anyhow::Error> {
     let telemetry_stream = telemetry_stream::spawn_from_env().await;
     let _wasm_policy = WasmPolicyEngine::new();
 
+    info!("👁️ Process visibility armed via sys_enter_execve tracepoint.");
     info!("🛡️ XDR enforcement armed. LSM bprm_check_security active blocking enabled.");
-    info!("⚡ Detection brain armed. RuleEngine + DataNormalizer active on RingBuf stream...");
+    info!("⚡ Detection brain armed. RuleEngine + DataNormalizer active on LSM RingBuf stream...");
     if std::env::var("NEUROMESH_KAFKA_BROKERS").is_ok() {
         info!("📡 Kafka Slow Path armed (topic: neuromesh.telemetry.v1)");
     } else {
