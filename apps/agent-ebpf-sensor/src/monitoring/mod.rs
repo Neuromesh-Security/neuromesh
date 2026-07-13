@@ -1,5 +1,6 @@
 //! Ring 0 visibility consumers (eBPF → RingBuf → userspace).
 
+pub mod correlation;
 pub mod event;
 pub mod network_event;
 
@@ -9,6 +10,7 @@ mod network_monitor;
 #[cfg(feature = "orchestrator")]
 mod process_monitor;
 
+pub use correlation::{CorrelationEngine, EnrichedNetworkEvent};
 pub use event::{drain_events, EventStream, MockEventStream, ProcessEvent, ProcessEventHandler};
 pub use network_event::{NetworkEvent, NetworkEventHandler};
 

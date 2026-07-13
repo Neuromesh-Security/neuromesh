@@ -1,11 +1,13 @@
 //! Async RingBuf consumer for C `tcp_connect` network visibility events.
 
+use crate::monitoring::correlation::CorrelationEngine;
 use crate::monitoring::network_event::{NetworkEvent, NetworkEventHandler};
 use anyhow::{Context, Result};
 use aya::maps::RingBuf;
 use aya::programs::KProbe;
 use aya::Ebpf;
 use std::ptr;
+use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
 use tracing::info;
@@ -14,7 +16,10 @@ pub const NETWORK_EVENTS_MAP: &str = "NETWORK_EVENTS";
 pub const TCP_CONNECT_PROGRAM: &str = "neuromesh_tcp_connect";
 
 /// Attach the C kprobe and spawn a Tokio task that drains `NETWORK_EVENTS`.
-pub async fn start_network_monitor(bpf: &mut Ebpf) -> Result<()> {
+pub async fn start_network_monitor(
+    bpf: &mut Ebpf,
+    correlation: Arc<CorrelationEngine>,
+) -> Result<()> {
     let program: &mut KProbe = bpf
         .program_mut(TCP_CONNECT_PROGRAM)
         .with_context(|| format!("eBPF program `{TCP_CONNECT_PROGRAM}` missing from object file"))?
@@ -42,6 +47,9 @@ pub async fn start_network_monitor(bpf: &mut Ebpf) -> Result<()> {
                     while let Some(item) = ring.next() {
                         let event =
                             unsafe { ptr::read_unaligned(item.as_ptr() as *const NetworkEvent) };
+                        if let Some(enriched) = correlation.correlate(event) {
+                            enriched.log_correlated();
+                        }
                         handler.observe(event);
                     }
                     Ok(())
