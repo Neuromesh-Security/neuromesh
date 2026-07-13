@@ -25,7 +25,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY . .
 
 ENV PYTHONUNBUFFERED=1 \
-    NEUROMESH_KAFKA_BROKERS=kafka:9092 \
+    NEUROMESH_KAFKA_BROKERS=kafka:9094 \
     NEUROMESH_KAFKA_TOPIC=neuromesh.telemetry.v1 \
     NEUROMESH_KAFKA_GROUP_ID=ai-threat-detector
 

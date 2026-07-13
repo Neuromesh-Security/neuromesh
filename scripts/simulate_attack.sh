@@ -2,28 +2,47 @@
 # Neuromesh Attack Simulation — safe local proof-of-value for MITRE ATT&CK T1059 / T1204.
 # Triggers RuleEngine (ephemeral staging path) and DataNormalizer (spawn burst) alerts.
 #
-# Prerequisites:
+# Modes:
+#   Linux + eBPF:  ./scripts/simulate_attack.sh
+#   Kafka mock:    ./scripts/simulate_attack.sh --kafka
+#                  (or: python scripts/mock_ebpf_stream.py)
+#
+# Prerequisites (eBPF mode):
 #   - Linux host with Neuromesh orchestrator running (root / CAP_BPF)
 #   - Kernel >= 5.8 with eBPF RingBuf + LSM support
 #
-# Usage:
-#   chmod +x scripts/simulate_attack.sh
-#   ./scripts/simulate_attack.sh
+# Prerequisites (Kafka mock mode):
+#   - Kafka broker on localhost:9092
+#   - pip install confluent-kafka
 
 set -euo pipefail
 
 readonly PAYLOAD="/tmp/neuromesh-mock-payload.sh"
 readonly BURST_COUNT=10
 readonly BURST_PARENT_TAG="neuromesh-burst"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() {
     printf '[simulate-attack] %s\n' "$*"
 }
 
+kafka_simulation() {
+    log "Kafka mock mode — injecting synthetic Ring 0 telemetry..."
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "${SCRIPT_DIR}/mock_ebpf_stream.py" --brokers "${NEUROMESH_KAFKA_BROKERS:-localhost:9092}"
+    elif command -v python >/dev/null 2>&1; then
+        python "${SCRIPT_DIR}/mock_ebpf_stream.py" --brokers "${NEUROMESH_KAFKA_BROKERS:-localhost:9092}"
+    else
+        log "ERROR: python3 required for Kafka mock mode."
+        exit 1
+    fi
+}
+
 require_linux() {
     if [[ "$(uname -s)" != "Linux" ]]; then
-        log "ERROR: Attack simulation requires Linux (eBPF sensor is Linux-only)."
-        exit 1
+        log "Non-Linux host detected — falling back to Kafka mock injector."
+        kafka_simulation
+        exit 0
     fi
 }
 
@@ -68,6 +87,11 @@ cleanup() {
 }
 
 main() {
+    if [[ "${1:-}" == "--kafka" ]]; then
+        kafka_simulation
+        exit 0
+    fi
+
     require_linux
     trap cleanup EXIT
 
