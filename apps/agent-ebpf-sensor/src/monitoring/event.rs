@@ -12,7 +12,7 @@ use std::ptr;
 /// +0x08  argv0   [u8; 128]
 /// +0x88  cwd     [u8; 256]
 /// ```
-#[repr(C)]
+#[repr(C, packed)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessEvent {
     pub pid: u32,

@@ -2,7 +2,7 @@
 // Neuromesh process visibility — sys_enter_execve tracepoint (Ring 0).
 //
 // CO-RE / BTF maps (SEC ".maps"), bounded user probes, drop-on-full ringbuf.
-// No envp extraction — keeps stack under the 512-byte BPF limit.
+// User probes land on stack buffers first; ringbuf fields are populated via memcpy.
 
 #include "bpf_helpers.h"
 
@@ -22,8 +22,12 @@ struct process_event_t {
 	__u32 uid;
 	char argv0[ARGV0_LEN];
 	char cwd[CWD_LEN];
-};
+} __attribute__((packed));
 
+/*
+ * trace_event_raw_sys_enter — matches the kernel tracepoint layout on x86_64:
+ * common fields (8 bytes) + syscall id (8 bytes) + args[6] (filename = args[0]).
+ */
 struct trace_event_raw_sys_enter {
 	__u16 common_type;
 	__u8 common_flags;
@@ -90,11 +94,15 @@ static __always_inline void read_cwd_best_effort(char *cwd, __u32 cwd_len)
 SEC("tracepoint/syscalls/sys_enter_execve")
 int neuromesh_sys_enter_execve(struct trace_event_raw_sys_enter *ctx)
 {
+	char argv0_buf[ARGV0_LEN];
+	char cwd_buf[CWD_LEN];
 	struct process_event_t *event;
-	const char *filename_ptr;
-	char argv0_tmp[ARGV0_LEN];
+	const char *filename;
 	__u64 pid_tgid;
 	__u64 uid_gid;
+
+	__builtin_memset(argv0_buf, 0, sizeof(argv0_buf));
+	__builtin_memset(cwd_buf, 0, sizeof(cwd_buf));
 
 	event = bpf_ringbuf_reserve(&PROCESS_EVENTS, sizeof(*event), 0);
 	if (!event) {
@@ -108,13 +116,13 @@ int neuromesh_sys_enter_execve(struct trace_event_raw_sys_enter *ctx)
 	uid_gid = bpf_get_current_uid_gid();
 	event->uid = (__u32)uid_gid;
 
-	filename_ptr = (const char *)ctx->args[0];
-	__builtin_memset(argv0_tmp, 0, sizeof(argv0_tmp));
-	if (filename_ptr)
-		bpf_probe_read_user_str(argv0_tmp, sizeof(argv0_tmp), filename_ptr);
-	__builtin_memcpy(event->argv0, argv0_tmp, sizeof(event->argv0));
+	filename = (const char *)ctx->args[0];
+	if (filename)
+		bpf_probe_read_user_str(argv0_buf, sizeof(argv0_buf), filename);
+	__builtin_memcpy(event->argv0, argv0_buf, sizeof(event->argv0));
 
-	read_cwd_best_effort(event->cwd, sizeof(event->cwd));
+	read_cwd_best_effort(cwd_buf, sizeof(cwd_buf));
+	__builtin_memcpy(event->cwd, cwd_buf, sizeof(event->cwd));
 
 	bpf_ringbuf_submit(event, 0);
 	return 0;
