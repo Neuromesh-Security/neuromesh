@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
-// Neuromesh process visibility — kprobe/sys_execve (stable across 6.x kernels).
+// Neuromesh process visibility — tracepoint syscalls/sys_enter_execve.
 //
-// CO-RE / BTF maps (SEC ".maps"). User memory is probed into stack buffers,
-// then copied into ringbuf records (never probe directly into ringbuf memory).
+// CO-RE / BTF maps (SEC ".maps"). User strings are read into a stack buffer via
+// bounded bpf_probe_read_user, then copied into the ringbuf record.
 
-#include "vmlinux.h"
 #include "bpf_helpers.h"
-#include "bpf_tracing.h"
 
 char LICENSE[] SEC("license") = "GPL";
 
@@ -19,6 +17,15 @@ struct process_event_t {
 	__u32 uid;
 	char argv0[ARGV0_LEN];
 	char cwd[CWD_LEN];
+};
+
+struct trace_event_raw_sys_enter {
+	__u16 common_type;
+	__u8 common_flags;
+	__u8 common_preempt_count;
+	__s32 common_pid;
+	__s64 id;
+	unsigned long args[6];
 };
 
 struct {
@@ -46,21 +53,31 @@ static __always_inline void record_drop(void)
 	bpf_map_update_elem(&DROPPED_EVENTS, &key, &next, BPF_ANY);
 }
 
-static __always_inline int kprobe_sys_execve_handler(const char *filename)
+static __always_inline void read_user_cstr(char *dst, __u32 dst_len, unsigned long addr)
+{
+	if (!dst || dst_len < 2 || !addr) {
+		if (dst && dst_len)
+			dst[0] = '\0';
+		return;
+	}
+
+	__builtin_memset(dst, 0, dst_len);
+	bpf_probe_read_user(dst, dst_len - 1, (const void *)addr);
+	dst[dst_len - 1] = '\0';
+}
+
+SEC("tracepoint/syscalls/sys_enter_execve")
+int neuromesh_process_events(struct trace_event_raw_sys_enter *ctx)
 {
 	char stack_buf[ARGV0_LEN];
 	struct process_event_t *event;
-	long err;
 	__u64 pid_tgid;
 	__u64 uid_gid;
 
-	__builtin_memset(stack_buf, 0, sizeof(stack_buf));
-	if (!filename)
+	if (!ctx || !ctx->args[0])
 		return 0;
 
-	err = bpf_probe_read_user_str(stack_buf, sizeof(stack_buf), filename);
-	if (err <= 0)
-		return 0;
+	read_user_cstr(stack_buf, sizeof(stack_buf), ctx->args[0]);
 
 	event = bpf_ringbuf_reserve(&PROCESS_EVENTS, sizeof(*event), 0);
 	if (!event) {
@@ -78,10 +95,4 @@ static __always_inline int kprobe_sys_execve_handler(const char *filename)
 
 	bpf_ringbuf_submit(event, 0);
 	return 0;
-}
-
-SEC("kprobe/sys_execve")
-int kprobe_sys_execve(struct pt_regs *ctx)
-{
-	return kprobe_sys_execve_handler((const char *)PT_REGS_PARM1(ctx));
 }

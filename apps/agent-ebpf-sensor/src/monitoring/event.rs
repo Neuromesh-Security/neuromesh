@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::ptr;
 
-/// Kernel/userspace shared layout for `kprobe/sys_execve` visibility events.
+/// Kernel/userspace shared layout for `sys_enter_execve` visibility events.
 ///
 /// Memory layout (`#[repr(C)]`, 392 bytes):
 /// ```text

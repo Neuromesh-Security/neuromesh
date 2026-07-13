@@ -1,9 +1,9 @@
-//! Async RingBuf consumer for C `kprobe/sys_execve` visibility events.
+//! Async RingBuf consumer for C `sys_enter_execve` visibility events.
 
 use crate::monitoring::event::{ProcessEvent, ProcessEventHandler};
 use anyhow::{Context, Result};
 use aya::maps::RingBuf;
-use aya::programs::KProbe;
+use aya::programs::TracePoint;
 use aya::Ebpf;
 use std::ptr;
 use tokio::io::unix::AsyncFd;
@@ -11,21 +11,21 @@ use tokio::io::Interest;
 use tracing::info;
 
 pub const PROCESS_EVENTS_MAP: &str = "PROCESS_EVENTS";
-pub const SYS_EXEC_PROGRAM: &str = "kprobe_sys_execve";
+pub const SYS_EXEC_PROGRAM: &str = "neuromesh_process_events";
 
-/// Attach the C kprobe and spawn a Tokio task that drains `PROCESS_EVENTS`.
+/// Attach the C tracepoint and spawn a Tokio task that drains `PROCESS_EVENTS`.
 pub async fn start_process_monitor(bpf: &mut Ebpf) -> Result<()> {
-    let program: &mut KProbe = bpf
+    let program: &mut TracePoint = bpf
         .program_mut(SYS_EXEC_PROGRAM)
         .with_context(|| format!("eBPF program `{SYS_EXEC_PROGRAM}` missing from object file"))?
         .try_into()
-        .context("failed to cast eBPF program to KProbe")?;
+        .context("failed to cast eBPF program to TracePoint")?;
     program
         .load()
-        .context("kernel verifier rejected kprobe_sys_execve")?;
+        .context("kernel verifier rejected neuromesh_process_events tracepoint")?;
     program
-        .attach()
-        .context("failed to attach kprobe/sys_execve")?;
+        .attach("syscalls", "sys_enter_execve")
+        .context("failed to attach sys_enter_execve tracepoint")?;
 
     let ring_buf =
         RingBuf::try_from(bpf.take_map(PROCESS_EVENTS_MAP).with_context(|| {
@@ -54,6 +54,6 @@ pub async fn start_process_monitor(bpf: &mut Ebpf) -> Result<()> {
         }
     });
 
-    info!("Process monitor armed on kprobe/sys_execve → PROCESS_EVENTS RingBuf");
+    info!("Process monitor armed on sys_enter_execve → PROCESS_EVENTS RingBuf");
     Ok(())
 }

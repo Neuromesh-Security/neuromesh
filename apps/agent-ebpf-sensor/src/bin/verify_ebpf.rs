@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use aya::programs::{KProbe, Lsm, TracePoint};
+use aya::programs::{Lsm, TracePoint};
 use aya::{Btf, Ebpf};
 use std::env;
 
@@ -15,11 +15,11 @@ fn main() -> Result<()> {
 
     let mut verified = 0usize;
 
-    if let Some(program) = ebpf.program_mut("kprobe_sys_execve") {
-        let program: &mut KProbe = program.try_into()?;
+    if let Some(program) = ebpf.program_mut("neuromesh_process_events") {
+        let program: &mut TracePoint = program.try_into()?;
         program
             .load()
-            .context("kernel verifier rejected kprobe program kprobe_sys_execve")?;
+            .context("kernel verifier rejected tracepoint program neuromesh_process_events")?;
         verified += 1;
     }
 
