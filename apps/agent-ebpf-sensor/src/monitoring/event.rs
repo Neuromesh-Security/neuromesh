@@ -112,6 +112,13 @@ mod tests {
         assert_eq!(offset_of!(ProcessEvent, cwd), 136);
     }
 
+    fn bytes_with_prefix<const N: usize>(prefix: &[u8]) -> [u8; N] {
+        let mut buf = [0u8; N];
+        let len = prefix.len().min(N);
+        buf[..len].copy_from_slice(&prefix[..len]);
+        buf
+    }
+
     #[test]
     fn mock_event_stream_injects_events_without_ebpf() {
         let mut stream = MockEventStream::default();
@@ -120,8 +127,8 @@ mod tests {
         let event = ProcessEvent {
             pid: 4242,
             uid: 1000,
-            argv0: *b"/bin/ls\0",
-            cwd: *b"/tmp\0",
+            argv0: bytes_with_prefix::<128>(b"/bin/ls"),
+            cwd: bytes_with_prefix::<256>(b"/tmp"),
         };
         stream.push(event);
 
