@@ -100,13 +100,14 @@ int neuromesh_process_events(struct trace_event_raw_sys_enter *ctx)
 		return 0;
 	}
 
+	__builtin_memset(event, 0, sizeof(*event));
+
 	pid_tgid = bpf_get_current_pid_tgid();
 	event->pid = (__u32)(pid_tgid >> 32);
 	uid_gid = bpf_get_current_uid_gid();
 	event->uid = (__u32)uid_gid;
 	event->ppid = read_ppid_best_effort();
 
-	__builtin_memset(event->comm, 0, sizeof(event->comm));
 	bpf_get_current_comm(event->comm, sizeof(event->comm));
 
 	__builtin_memcpy(event->filename, filename_buf, sizeof(event->filename));
