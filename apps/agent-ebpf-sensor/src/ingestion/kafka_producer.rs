@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use rdkafka::config::ClientConfig;
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::util::Timeout;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
