@@ -6,10 +6,18 @@ import {
   useContext,
   useMemo,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 
 import { sanitizeTelemetryString } from "@/lib/security/sanitize";
+
+import {
+  getQueryHistoryHydratedServerSnapshot,
+  getQueryHistoryHydratedSnapshot,
+  queryHistoryStore,
+  subscribeQueryHistoryHydration,
+} from "./queryHistoryStore";
 
 export interface QueryHistoryEntry {
   id: string;
@@ -23,6 +31,7 @@ export interface QueryHistoryEntry {
 interface QueryHistoryContextValue {
   entries: QueryHistoryEntry[];
   totalCount: number;
+  isHydrated: boolean;
   searchTerm: string;
   setSearchTerm: (value: string) => void;
   addEntry: (
@@ -31,73 +40,20 @@ interface QueryHistoryContextValue {
   clearHistory: () => void;
 }
 
-const STORAGE_KEY = "neuromesh:threat-hunting:history";
-const MAX_HISTORY_ENTRIES = 500;
-
 const QueryHistoryContext = createContext<QueryHistoryContextValue | null>(null);
 
-function readHistory(): QueryHistoryEntry[] {
-  if (typeof window === "undefined") {
-    return [];
-  }
-
-  try {
-    const raw = window.sessionStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return [];
-    }
-
-    const parsed = JSON.parse(raw) as QueryHistoryEntry[];
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-
-    return parsed
-      .map(sanitizeHistoryEntry)
-      .filter((entry): entry is QueryHistoryEntry => entry !== null)
-      .slice(0, MAX_HISTORY_ENTRIES);
-  } catch {
-    return [];
-  }
-}
-
-function writeHistory(entries: QueryHistoryEntry[]): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(entries.slice(0, MAX_HISTORY_ENTRIES)));
-}
-
-function sanitizeHistoryEntry(entry: QueryHistoryEntry): QueryHistoryEntry | null {
-  const query = sanitizeTelemetryString(entry.query, 512);
-  if (!query) {
-    return null;
-  }
-
-  return {
-    id: sanitizeTelemetryString(entry.id, 64) || crypto.randomUUID(),
-    query,
-    executedAt: sanitizeTelemetryString(entry.executedAt, 32),
-    resultCount:
-      typeof entry.resultCount === "number" && Number.isFinite(entry.resultCount)
-        ? entry.resultCount
-        : 0,
-    status: entry.status === "error" ? "error" : "success",
-    errorMessage: entry.errorMessage
-      ? sanitizeTelemetryString(entry.errorMessage, 256)
-      : undefined,
-  };
-}
-
 export function QueryHistoryProvider({ children }: { children: ReactNode }) {
-  const [entries, setEntries] = useState<QueryHistoryEntry[]>(() => readHistory());
+  const entries = useSyncExternalStore(
+    queryHistoryStore.subscribe,
+    queryHistoryStore.getSnapshot,
+    queryHistoryStore.getServerSnapshot,
+  );
+  const isHydrated = useSyncExternalStore(
+    subscribeQueryHistoryHydration,
+    getQueryHistoryHydratedSnapshot,
+    getQueryHistoryHydratedServerSnapshot,
+  );
   const [searchTerm, setSearchTerm] = useState("");
-
-  const persist = useCallback((next: QueryHistoryEntry[]) => {
-    setEntries(next);
-    writeHistory(next);
-  }, []);
 
   const addEntry = useCallback(
     (
@@ -114,14 +70,19 @@ export function QueryHistoryProvider({ children }: { children: ReactNode }) {
           : undefined,
       };
 
-      persist([nextEntry, ...readHistory()]);
+      const current = queryHistoryStore.readSnapshot();
+      const next =
+        current === queryHistoryStore.getServerSnapshot()
+          ? [nextEntry]
+          : [nextEntry, ...current];
+      queryHistoryStore.write(next);
     },
-    [persist],
+    [],
   );
 
   const clearHistory = useCallback(() => {
-    persist([]);
-  }, [persist]);
+    queryHistoryStore.write([]);
+  }, []);
 
   const filteredEntries = useMemo(() => {
     const normalized = searchTerm.trim().toLowerCase();
@@ -139,12 +100,13 @@ export function QueryHistoryProvider({ children }: { children: ReactNode }) {
     (): QueryHistoryContextValue => ({
       entries: filteredEntries,
       totalCount: entries.length,
+      isHydrated,
       searchTerm,
       setSearchTerm,
       addEntry,
       clearHistory,
     }),
-    [addEntry, clearHistory, entries.length, filteredEntries, searchTerm],
+    [addEntry, clearHistory, entries.length, filteredEntries, isHydrated, searchTerm],
   );
 
   return (

@@ -20,12 +20,20 @@ import {
   SlowPathFetcher,
   type LateralMovementInsight,
 } from "@/api/slow-path";
+import { EMPTY_SNAPSHOT, asMutableSnapshot } from "@/lib/store/frozen-snapshots";
+
+export type SlowPathStatus = "idle" | "checking" | "ready" | "unavailable";
+
+const EMPTY_BLOCK_EVENTS = asMutableSnapshot<FastPathBlockEvent>(EMPTY_SNAPSHOT);
+const EMPTY_CONNECTION_EVENTS = asMutableSnapshot<FastPathConnectionEvent>(EMPTY_SNAPSHOT);
+const EMPTY_INSIGHTS = asMutableSnapshot<LateralMovementInsight>(EMPTY_SNAPSHOT);
 
 interface TelemetryContextValue {
   fastPathStatus: FastPathSubscriberStatus;
   fastPathEvents: FastPathBlockEvent[];
   fastPathConnectionEvents: FastPathConnectionEvent[];
   slowPathInsights: LateralMovementInsight[];
+  slowPathStatus: SlowPathStatus;
   refreshSlowPath: () => Promise<void>;
 }
 
@@ -44,17 +52,18 @@ export function TelemetryProvider({
     "ws://localhost:8081/v1/fast-path",
   grpcWebBaseUrl = process.env.NEXT_PUBLIC_NEUROMESH_GRPC_WEB_URL ??
     "http://localhost:8081",
-  aiApiBaseUrl = process.env.NEXT_PUBLIC_NEUROMESH_AI_API_URL ?? "http://localhost:8090",
+  aiApiBaseUrl = process.env.NEXT_PUBLIC_NEUROMESH_AI_API_URL ?? "/api/ai",
 }: TelemetryProviderProps) {
   const [fastPathStatus, setFastPathStatus] =
     useState<FastPathSubscriberStatus>("idle");
-  const [fastPathEvents, setFastPathEvents] = useState<FastPathBlockEvent[]>([]);
+  const [fastPathEvents, setFastPathEvents] =
+    useState<FastPathBlockEvent[]>(EMPTY_BLOCK_EVENTS);
   const [fastPathConnectionEvents, setFastPathConnectionEvents] = useState<
     FastPathConnectionEvent[]
-  >([]);
-  const [slowPathInsights, setSlowPathInsights] = useState<LateralMovementInsight[]>(
-    [],
-  );
+  >(EMPTY_CONNECTION_EVENTS);
+  const [slowPathInsights, setSlowPathInsights] =
+    useState<LateralMovementInsight[]>(EMPTY_INSIGHTS);
+  const [slowPathStatus, setSlowPathStatus] = useState<SlowPathStatus>("idle");
 
   const slowPathFetcher = useMemo(
     () => new SlowPathFetcher({ baseUrl: aiApiBaseUrl }),
@@ -79,31 +88,71 @@ export function TelemetryProvider({
   }, [grpcWebBaseUrl, websocketUrl]);
 
   const refreshSlowPath = useCallback(async (): Promise<void> => {
+    setSlowPathStatus("checking");
+    const healthy = await slowPathFetcher.checkHealth();
+    if (!healthy) {
+      setSlowPathInsights(EMPTY_INSIGHTS);
+      setSlowPathStatus("unavailable");
+      return;
+    }
+
     const insights = await slowPathFetcher.fetchLateralMovementInsights();
-    setSlowPathInsights(insights);
+    setSlowPathInsights(
+      insights.length === 0 ? EMPTY_INSIGHTS : insights,
+    );
+    setSlowPathStatus("ready");
   }, [slowPathFetcher]);
 
   useEffect(() => {
     let cancelled = false;
 
-    slowPathFetcher.fetchLateralMovementInsights().then((insights) => {
-      if (!cancelled) {
-        setSlowPathInsights(insights);
+    const initializeSlowPath = async (): Promise<void> => {
+      setSlowPathStatus("checking");
+      const healthy = await slowPathFetcher.checkHealth();
+      if (cancelled) {
+        return;
       }
-    });
+
+      if (!healthy) {
+        setSlowPathInsights(EMPTY_INSIGHTS);
+        setSlowPathStatus("unavailable");
+        return;
+      }
+
+      const insights = await slowPathFetcher.fetchLateralMovementInsights();
+      if (!cancelled) {
+        setSlowPathInsights(
+          insights.length === 0 ? EMPTY_INSIGHTS : insights,
+        );
+        setSlowPathStatus("ready");
+      }
+    };
+
+    void initializeSlowPath();
 
     return () => {
       cancelled = true;
     };
   }, [slowPathFetcher]);
 
-  const value: TelemetryContextValue = {
-    fastPathStatus,
-    fastPathEvents,
-    fastPathConnectionEvents,
-    slowPathInsights,
-    refreshSlowPath,
-  };
+  const value = useMemo(
+    (): TelemetryContextValue => ({
+      fastPathStatus,
+      fastPathEvents,
+      fastPathConnectionEvents,
+      slowPathInsights,
+      slowPathStatus,
+      refreshSlowPath,
+    }),
+    [
+      fastPathConnectionEvents,
+      fastPathEvents,
+      fastPathStatus,
+      refreshSlowPath,
+      slowPathInsights,
+      slowPathStatus,
+    ],
+  );
 
   return (
     <TelemetryContext.Provider value={value}>{children}</TelemetryContext.Provider>
