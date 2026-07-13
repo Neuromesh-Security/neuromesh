@@ -7,6 +7,10 @@ typedef unsigned int __u32;
 typedef unsigned long long __u64;
 typedef long long __s64;
 
+#define __uint(name, val) int (*name)[val]
+#define __type(name, val) typeof(val) *name
+#define __array(name, val) typeof(val) *name[]
+
 #define __always_inline inline __attribute__((__always_inline__))
 
 enum bpf_map_type {
@@ -16,14 +20,6 @@ enum bpf_map_type {
 
 enum {
 	BPF_ANY = 0,
-};
-
-struct bpf_map_def {
-	unsigned int type;
-	unsigned int key_size;
-	unsigned int value_size;
-	unsigned int max_entries;
-	unsigned int map_flags;
 };
 
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)1;

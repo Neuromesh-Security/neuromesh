@@ -50,6 +50,9 @@ jobs:
       - name: Install clang (C BPF visibility object)
         run: sudo apt-get update && sudo apt-get install -y clang llvm
 
+      - name: Install bpf-linker (C BPF BTF normalization)
+        run: cargo install bpf-linker --locked
+
       - name: Clippy (strict)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -193,6 +196,9 @@ jobs:
       - name: Install clang (C BPF visibility object)
         run: sudo apt-get update && sudo apt-get install -y clang llvm
 
+      - name: Install bpf-linker (C BPF BTF normalization)
+        run: cargo install bpf-linker --locked
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -204,7 +210,10 @@ jobs:
         working-directory: apps/agent-ebpf-sensor
         run: |
           mkdir -p target/bpf
-          clang -O2 -target bpf -D__TARGET_ARCH_x86 -I src/bpf -c src/bpf/sys_exec.bpf.c -o target/bpf/sys_exec.bpf.o
+          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 -I src/bpf -c src/bpf/sys_exec.bpf.c -o target/bpf/sys_exec.bpf.o
+          llvm-objcopy --remove-section=.BTF.ext target/bpf/sys_exec.bpf.o
+          bpf-linker --output target/bpf/sys_exec.linked.o target/bpf/sys_exec.bpf.o
+          mv target/bpf/sys_exec.linked.o target/bpf/sys_exec.bpf.o
 
       - name: Verify Rust enforcement bytecode
         run: bash scripts/ci/verify_ebpf_bytecode.sh "${{ env.BPF_ARTIFACT_PATH }}"
