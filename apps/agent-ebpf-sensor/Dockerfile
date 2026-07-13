@@ -76,7 +76,6 @@ COPY --from=ebpf-builder \
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
     cargo build --locked -p agent-ebpf-sensor --features orchestrator --release
 
 # ------------------------------------------------------------------------------
