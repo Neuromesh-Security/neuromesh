@@ -200,18 +200,23 @@ jobs:
             .
             apps/agent-ebpf-sensor
 
-      - name: Build C sys_exec bytecode
+      - name: Build C visibility bytecode
         working-directory: apps/agent-ebpf-sensor
         run: |
           mkdir -p target/bpf
-          clang -g -O2 -target bpf -D__TARGET_ARCH_x86 -I src/bpf -c src/bpf/sys_exec.bpf.c -o target/bpf/sys_exec.bpf.o
-          llvm-objcopy --remove-section=.BTF.ext target/bpf/sys_exec.bpf.o
+          for src in sys_exec.bpf.c network_filter.bpf.c; do
+            base="${src%.bpf.c}"
+            clang -g -O2 -target bpf -D__TARGET_ARCH_x86 -I src/bpf -c "src/bpf/${src}" -o "target/bpf/${base}.bpf.o"
+            llvm-objcopy --remove-section=.BTF.ext "target/bpf/${base}.bpf.o"
+          done
 
       - name: Verify Rust enforcement bytecode
         run: bash scripts/ci/verify_ebpf_bytecode.sh "${{ env.BPF_ARTIFACT_PATH }}"
 
       - name: Verify C visibility bytecode
-        run: bash scripts/ci/verify_ebpf_bytecode.sh apps/agent-ebpf-sensor/target/bpf/sys_exec.bpf.o
+        run: |
+          bash scripts/ci/verify_ebpf_bytecode.sh apps/agent-ebpf-sensor/target/bpf/sys_exec.bpf.o
+          bash scripts/ci/verify_ebpf_bytecode.sh apps/agent-ebpf-sensor/target/bpf/network_filter.bpf.o
 
   performance-regression:
     name: Performance Regression
