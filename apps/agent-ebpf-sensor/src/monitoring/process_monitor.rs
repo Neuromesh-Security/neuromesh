@@ -48,7 +48,7 @@ pub async fn start_process_monitor(
                         let event =
                             unsafe { ptr::read_unaligned(item.as_ptr() as *const ProcessEvent) };
                         let pid = event.pid;
-                        correlation.register_process(pid, &event.argv0);
+                        correlation.register_process(pid, &event.filename);
                         handler.observe(&event);
                     }
                     Ok(())
