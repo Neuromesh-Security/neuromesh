@@ -1,3 +1,4 @@
+use agent_ebpf_sensor::ingestion;
 use agent_ebpf_sensor::monitoring::{
     start_network_monitor, start_process_monitor, CorrelationEngine,
 };
@@ -42,12 +43,18 @@ async fn main() -> Result<(), anyhow::Error> {
     lsm_program.attach()?;
 
     let correlation = CorrelationEngine::new();
+    let correlation_ingestion = ingestion::spawn_from_env().await;
 
     let mut process_bpf = Ebpf::load(SYS_EXEC_BPF)?;
     start_process_monitor(&mut process_bpf, Arc::clone(&correlation)).await?;
 
     let mut network_bpf = Ebpf::load(NETWORK_FILTER_BPF)?;
-    start_network_monitor(&mut network_bpf, Arc::clone(&correlation)).await?;
+    start_network_monitor(
+        &mut network_bpf,
+        Arc::clone(&correlation),
+        correlation_ingestion,
+    )
+    .await?;
 
     let stats_map = Array::try_from(
         enforcement_bpf
@@ -67,6 +74,7 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("👁️ Process visibility armed via sys_enter_execve tracepoint.");
     info!("🌐 Network visibility armed via tcp_connect kprobe.");
     info!("🔗 Lock-free correlation engine armed (DashMap PID → process name).");
+    info!("📨 Correlation Kafka ingestion armed (bounded MPSC → idempotent rdkafka).");
     info!("🛡️ XDR enforcement armed. LSM bprm_check_security active blocking enabled.");
     info!("⚡ Detection brain armed. RuleEngine + DataNormalizer active on LSM RingBuf stream...");
     if std::env::var("NEUROMESH_KAFKA_BROKERS").is_ok() {

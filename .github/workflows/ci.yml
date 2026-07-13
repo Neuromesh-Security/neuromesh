@@ -48,7 +48,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Install clang (C BPF visibility object)
-        run: sudo apt-get update && sudo apt-get install -y clang llvm
+        run: sudo apt-get update && sudo apt-get install -y clang llvm cmake g++ gcc build-essential pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
 
       - name: Clippy (strict)
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -167,6 +167,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     needs: build-ebpf
+    env:
+      CARGO_TARGET_DIR: target/ebpf-verifier-${{ matrix.kernel }}
     strategy:
       fail-fast: false
       matrix:
@@ -191,7 +193,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install clang (C BPF visibility object)
-        run: sudo apt-get update && sudo apt-get install -y clang llvm
+        run: sudo apt-get update && sudo apt-get install -y clang llvm cmake g++ gcc build-essential pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -199,6 +201,7 @@ jobs:
           workspaces: |
             .
             apps/agent-ebpf-sensor
+          shared-key: ebpf-verifier-${{ matrix.runner }}-${{ matrix.kernel }}
 
       - name: Build C visibility bytecode
         working-directory: apps/agent-ebpf-sensor
@@ -291,6 +294,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/agent-ebpf-sensor
+          shared-key: docker-orchestrator-${{ matrix.image }}
+
+      - name: Install native build deps (rdkafka)
+        if: matrix.needs_ebpf == true
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config libssl-dev build-essential gcc g++ libcurl4-openssl-dev libsasl2-dev zlib1g-dev clang llvm
 
       - name: Build user-space orchestrator
         if: matrix.needs_ebpf == true

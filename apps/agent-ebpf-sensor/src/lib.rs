@@ -1,5 +1,6 @@
 //! User-space detection and telemetry pipeline (kernel-independent test surface).
 
+pub mod ingestion;
 pub mod mocks;
 pub mod normalizer;
 pub mod pipeline;
