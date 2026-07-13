@@ -6,14 +6,23 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: production-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   BPF_ARTIFACT: ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
+  BPF_ARTIFACT_PATH: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
 
 jobs:
-  quality-gates:
-    name: Lint, Check & Test
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -21,34 +30,61 @@ jobs:
       - name: Install Rust Stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy, llvm-tools-preview
+          components: rustfmt, clippy
 
-      - name: Install Rust Nightly (eBPF prerequisite)
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          components: rust-src
+          workspaces: |
+            .
+            apps/agent-ebpf-sensor
+            apps/agent-ebpf-sensor/ebpf
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (strict)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: lint
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/agent-ebpf-sensor
 
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
 
-      - name: Check Formatting (workspace)
-        run: cargo +stable fmt --all -- --check
-
       - name: cargo check — workspace libraries
         run: |
-          cargo +stable check -p neuromesh-common
-          cargo +stable check -p neuromesh-telemetry --all-targets
-          cargo +stable check -p agent-ebpf-sensor --lib --all-targets
-          cargo +stable check -p neuromesh-integration-tests --all-targets
+          cargo check -p neuromesh-common
+          cargo check -p neuromesh-telemetry --all-targets
+          cargo check -p agent-ebpf-sensor --lib --all-targets
+          cargo check -p neuromesh-integration-tests --all-targets
 
       - name: Integration tests (kernel-independent)
-        run: cargo +stable test -p neuromesh-integration-tests
+        run: cargo test -p neuromesh-integration-tests
 
       - name: Unit tests — sensor library
-        run: cargo +stable test -p agent-ebpf-sensor --lib
+        run: cargo test -p agent-ebpf-sensor --lib
 
       - name: Unit tests — telemetry
-        run: cargo +stable test -p neuromesh-telemetry
+        run: cargo test -p neuromesh-telemetry
 
       - name: Coverage gate (≥70% line coverage)
         run: |
@@ -59,59 +95,125 @@ jobs:
             --lib \
             --fail-under-lines 70
 
-      - name: cargo clippy — workspace
-        run: |
-          cargo +stable clippy -p agent-ebpf-sensor --lib -- -D warnings
-          cargo +stable clippy -p neuromesh-telemetry --all-targets -- -D warnings
-          cargo +stable clippy -p neuromesh-integration-tests --all-targets -- -D warnings
-
       - name: Verify benchmark harness compiles
-        run: cargo +stable bench -p agent-ebpf-sensor --no-run
+        run: cargo bench -p agent-ebpf-sensor --no-run
 
-      - name: Install bpf-linker
-        run: cargo install bpf-linker
-
-      - name: Build eBPF Kernel Space
-        working-directory: apps/agent-ebpf-sensor/ebpf
-        env:
-          CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
-        run: |
-          cargo +nightly build --package agent-ebpf-sensor-ebpf --target bpfel-unknown-none -Z build-std=core --release
-          test -f target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
-
-      - name: Build User Space Orchestrator
-        working-directory: apps/agent-ebpf-sensor
-        run: |
-          test -f "$BPF_ARTIFACT"
-          cargo +stable build --features orchestrator --release
-
-  ebpf-cross-compile:
-    name: eBPF Cross-Compile (${{ matrix.arch }})
+  build-ebpf:
+    name: Build eBPF (${{ matrix.kernel }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    needs: lint
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
-            arch: x86_64
-          - runner: ubuntu-24.04-arm
-            arch: aarch64
-    runs-on: ${{ matrix.runner }}
+          - kernel: "5.15"
+            runner: ubuntu-22.04
+          - kernel: "6.1"
+            runner: ubuntu-22.04
+          - kernel: "6.8+"
+            runner: ubuntu-24.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Rust Nightly
+      - name: Report runner kernel
+        run: uname -r
+
+      - name: Install Rust Nightly (eBPF prerequisite)
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
 
-      - name: Install bpf-linker
-        run: cargo install bpf-linker
+      - name: Cache Rust dependencies (BPF)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/agent-ebpf-sensor/ebpf
+          shared-key: ebpf-${{ matrix.kernel }}
+          cache-on-failure: true
 
-      - name: Cross-compile eBPF (${{ matrix.arch }})
+      - name: Install bpf-linker
+        run: cargo install bpf-linker --locked
+
+      - name: Build eBPF kernel space
         working-directory: apps/agent-ebpf-sensor/ebpf
         env:
           CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
         run: |
-          cargo +nightly build --package agent-ebpf-sensor-ebpf --target bpfel-unknown-none -Z build-std=core --release
-          ls -la target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
+          cargo +nightly build \
+            --package agent-ebpf-sensor-ebpf \
+            --target bpfel-unknown-none \
+            -Z build-std=core \
+            --release
+          test -f target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
+
+      - name: Upload eBPF bytecode artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ebpf-bytecode-${{ matrix.kernel }}
+          path: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
+          retention-days: 14
+          if-no-files-found: error
+
+  build-docker:
+    name: Build Docker (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build-ebpf
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: neuromesh-zt-policy-engine
+            context: apps/zt-policy-engine
+            dockerfile: apps/zt-policy-engine/Dockerfile
+          - image: neuromesh-ai-threat-detector
+            context: apps/ai-threat-detector
+            dockerfile: apps/ai-threat-detector/Dockerfile
+          - image: neuromesh-agent-ebpf-sensor
+            context: .
+            dockerfile: apps/agent-ebpf-sensor/Dockerfile
+            needs_ebpf: true
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download eBPF bytecode (6.8+ matrix artifact)
+        if: matrix.needs_ebpf == true
+        uses: actions/download-artifact@v4
+        with:
+          name: ebpf-bytecode-6.8+
+          path: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release
+
+      - name: Install Rust Stable
+        if: matrix.needs_ebpf == true
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies (orchestrator)
+        if: matrix.needs_ebpf == true
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/agent-ebpf-sensor
+
+      - name: Build user-space orchestrator
+        if: matrix.needs_ebpf == true
+        working-directory: apps/agent-ebpf-sensor
+        run: |
+          test -f "$BPF_ARTIFACT"
+          cargo build --features orchestrator --release
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          tags: ${{ matrix.image }}:ci
+          load: true
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Verify image
+        run: docker image inspect ${{ matrix.image }}:ci
