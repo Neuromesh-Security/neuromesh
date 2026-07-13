@@ -65,12 +65,14 @@ For regulated industries, SOC teams, and multi-cluster Kubernetes estates requir
   * `ai-threat-detector` — Kafka consumer and GNN Slow Path inference service.
   * `zt-policy-engine` — Go control plane: OPA policy evaluation + SPIFFE identity.
   * `k8s-admission-webhook` — Validating/mutating admission webhook (TLS enforcement).
+  * `security-dashboard` — Next.js 16 Enterprise command center (OIDC/SAML RBAC, dual-path telemetry).
 * `/deploy` — Production deployment manifests.
   * `kubernetes/neuromesh-agent.yaml` — Privileged DaemonSet for per-node eBPF enforcement.
 * `/packages` — Shared internal libraries.
   * `neuromesh-common` — Kernel/user-space shared types and BPF map contracts.
   * `telemetry` — Standard `MetricEvent` contract for Kafka and observability pipelines.
   * `proto-definitions` — Protobuf schemas for cross-service telemetry.
+  * `shared-ui-kit` — Enterprise UI primitives (`VirtualizedLogGrid`, `ThreatMap`).
 * `/docs` — Architecture decision records and design documentation.
   * `threat-model.md` — MITRE ATT&CK mapping and integration test traceability.
   * `performance-baseline.md` — Criterion micro-benchmark results and complexity analysis.

@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - apps/ai-threat-detector/src/inference/**
+      - apps/ai-threat-detector/models/**
   pull_request:
     branches: [main]
     paths:
       - apps/ai-threat-detector/src/inference/**
+      - apps/ai-threat-detector/models/**
 
 concurrency:
   group: ai-model-promotion-${{ github.workflow }}-${{ github.ref }}
@@ -19,11 +21,14 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
+  MODEL_ARTIFACT_NAME: gnn-model-weights
+  MODEL_ARTIFACT_PATH: apps/ai-threat-detector/models
 
 jobs:
   gnn-evaluator-validation:
     name: GNN Inference Validation
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: apps/ai-threat-detector
@@ -39,7 +44,16 @@ jobs:
           cache-dependency-path: apps/ai-threat-detector/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pytest
+
+      - name: Upload GNN model weights artifact (if present)
+        uses: actions/upload-artifact@v4
+        if: hashFiles('apps/ai-threat-detector/models/**') != ''
+        with:
+          name: ${{ env.MODEL_ARTIFACT_NAME }}
+          path: ${{ env.MODEL_ARTIFACT_PATH }}/
+          retention-days: 30
+          if-no-files-found: ignore
 
       - name: Run inference unit tests
         run: python -m unittest discover -s tests -v
@@ -96,3 +110,40 @@ jobs:
       - name: Promotion gate summary
         run: |
           echo "MLOps promotion gate: inference path validated for deployment readiness."
+
+  inference-sanity:
+    name: Inference Sanity (placeholder)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: gnn-evaluator-validation
+    defaults:
+      run:
+        working-directory: apps/ai-threat-detector
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: apps/ai-threat-detector/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      - name: Download GNN model weights artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.MODEL_ARTIFACT_NAME }}
+          path: ${{ env.MODEL_ARTIFACT_PATH }}/
+        continue-on-error: true
+
+      - name: Run inference sanity test
+        run: |
+          if [ -f tests/inference_sanity.py ]; then
+            python -m pytest tests/inference_sanity.py -v
+          else
+            echo "::notice::Placeholder — tests/inference_sanity.py not yet committed; skipping minimal inference gate."
+          fi
