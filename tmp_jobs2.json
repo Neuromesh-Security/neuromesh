@@ -1,0 +1,1601 @@
+{
+  "total_count": 13,
+  "jobs": [
+    {
+      "id": 87101462477,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6bXzQ",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101462477",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101462477",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-14T13:45:20Z",
+      "started_at": "2026-07-14T13:45:23Z",
+      "completed_at": "2026-07-14T13:46:11Z",
+      "name": "Lint",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:45:24Z",
+          "completed_at": "2026-07-14T13:45:26Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:45:26Z",
+          "completed_at": "2026-07-14T13:45:27Z"
+        },
+        {
+          "name": "Install Rust Stable",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-14T13:45:27Z",
+          "completed_at": "2026-07-14T13:45:36Z"
+        },
+        {
+          "name": "Cache Rust dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-14T13:45:36Z",
+          "completed_at": "2026-07-14T13:45:40Z"
+        },
+        {
+          "name": "Check formatting",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-14T13:45:40Z",
+          "completed_at": "2026-07-14T13:45:40Z"
+        },
+        {
+          "name": "Install clang (C BPF visibility object)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-14T13:45:40Z",
+          "completed_at": "2026-07-14T13:46:05Z"
+        },
+        {
+          "name": "Clippy (strict)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-14T13:46:05Z",
+          "completed_at": "2026-07-14T13:46:07Z"
+        },
+        {
+          "name": "Post Cache Rust dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13,
+          "started_at": "2026-07-14T13:46:07Z",
+          "completed_at": "2026-07-14T13:46:07Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-07-14T13:46:07Z",
+          "completed_at": "2026-07-14T13:46:08Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-07-14T13:46:08Z",
+          "completed_at": "2026-07-14T13:46:08Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101462477",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "runner_id": 1000001529,
+      "runner_name": "GitHub Actions 1000001529",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 87101675904,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6oZgA",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101675904",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101675904",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-14T13:46:11Z",
+      "started_at": "2026-07-14T13:46:14Z",
+      "completed_at": "2026-07-14T13:47:46Z",
+      "name": "E2E Detection Test",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:46:15Z",
+          "completed_at": "2026-07-14T13:46:15Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:46:15Z",
+          "completed_at": "2026-07-14T13:46:17Z"
+        },
+        {
+          "name": "Run attack simulation and GNN insight probe",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-14T13:46:17Z",
+          "completed_at": "2026-07-14T13:47:44Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-14T13:47:44Z",
+          "completed_at": "2026-07-14T13:47:44Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-14T13:47:44Z",
+          "completed_at": "2026-07-14T13:47:44Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101675904",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "runner_id": 1000001533,
+      "runner_name": "GitHub Actions 1000001533",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 87101675929,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6oZmQ",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101675929",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101675929",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-14T13:46:11Z",
+      "started_at": "2026-07-14T13:46:14Z",
+      "completed_at": "2026-07-14T13:47:54Z",
+      "name": "Performance Regression",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:46:15Z",
+          "completed_at": "2026-07-14T13:46:16Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:46:16Z",
+          "completed_at": "2026-07-14T13:46:17Z"
+        },
+        {
+          "name": "Install Rust Stable",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-14T13:46:17Z",
+          "completed_at": "2026-07-14T13:46:29Z"
+        },
+        {
+          "name": "Cache Rust dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-14T13:46:29Z",
+          "completed_at": "2026-07-14T13:46:32Z"
+        },
+        {
+          "name": "Run events/sec regression gate",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-14T13:46:32Z",
+          "completed_at": "2026-07-14T13:47:51Z"
+        },
+        {
+          "name": "Post Cache Rust dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-07-14T13:47:51Z",
+          "completed_at": "2026-07-14T13:47:52Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-07-14T13:47:52Z",
+          "completed_at": "2026-07-14T13:47:52Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-07-14T13:47:52Z",
+          "completed_at": "2026-07-14T13:47:52Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101675929",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "runner_id": 1000001532,
+      "runner_name": "GitHub Actions 1000001532",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 87101675942,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6oZpg",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101675942",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101675942",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-14T13:46:11Z",
+      "started_at": "2026-07-14T13:46:14Z",
+      "completed_at": "2026-07-14T13:46:45Z",
+      "name": "Build eBPF (6.1)",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:46:15Z",
+          "completed_at": "2026-07-14T13:46:17Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:46:17Z",
+          "completed_at": "2026-07-14T13:46:18Z"
+        },
+        {
+          "name": "Report runner kernel",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-14T13:46:18Z",
+          "completed_at": "2026-07-14T13:46:18Z"
+        },
+        {
+          "name": "Install Rust Nightly (eBPF prerequisite)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-14T13:46:18Z",
+          "completed_at": "2026-07-14T13:46:27Z"
+        },
+        {
+          "name": "Cache Rust dependencies (BPF)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-14T13:46:27Z",
+          "completed_at": "2026-07-14T13:46:30Z"
+        },
+        {
+          "name": "Install bpf-linker",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-14T13:46:30Z",
+          "completed_at": "2026-07-14T13:46:30Z"
+        },
+        {
+          "name": "Build eBPF kernel space",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-14T13:46:30Z",
+          "completed_at": "2026-07-14T13:46:41Z"
+        },
+        {
+          "name": "Upload eBPF bytecode artifact",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-07-14T13:46:41Z",
+          "completed_at": "2026-07-14T13:46:42Z"
+        },
+        {
+          "name": "Post Cache Rust dependencies (BPF)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-07-14T13:46:42Z",
+          "completed_at": "2026-07-14T13:46:42Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-07-14T13:46:42Z",
+          "completed_at": "2026-07-14T13:46:42Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-07-14T13:46:42Z",
+          "completed_at": "2026-07-14T13:46:42Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101675942",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "runner_id": 1000001530,
+      "runner_name": "GitHub Actions 1000001530",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 87101675956,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6oZtA",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101675956",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101675956",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-14T13:46:11Z",
+      "started_at": "2026-07-14T13:46:14Z",
+      "completed_at": "2026-07-14T13:46:46Z",
+      "name": "Build eBPF (6.8+)",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:46:15Z",
+          "completed_at": "2026-07-14T13:46:16Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:46:16Z",
+          "completed_at": "2026-07-14T13:46:18Z"
+        },
+        {
+          "name": "Report runner kernel",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-14T13:46:18Z",
+          "completed_at": "2026-07-14T13:46:18Z"
+        },
+        {
+          "name": "Install Rust Nightly (eBPF prerequisite)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-14T13:46:18Z",
+          "completed_at": "2026-07-14T13:46:28Z"
+        },
+        {
+          "name": "Cache Rust dependencies (BPF)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-14T13:46:28Z",
+          "completed_at": "2026-07-14T13:46:32Z"
+        },
+        {
+          "name": "Install bpf-linker",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-14T13:46:32Z",
+          "completed_at": "2026-07-14T13:46:32Z"
+        },
+        {
+          "name": "Build eBPF kernel space",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-14T13:46:32Z",
+          "completed_at": "2026-07-14T13:46:42Z"
+        },
+        {
+          "name": "Upload eBPF bytecode artifact",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-07-14T13:46:42Z",
+          "completed_at": "2026-07-14T13:46:43Z"
+        },
+        {
+          "name": "Post Cache Rust dependencies (BPF)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-07-14T13:46:43Z",
+          "completed_at": "2026-07-14T13:46:44Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-07-14T13:46:44Z",
+          "completed_at": "2026-07-14T13:46:44Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-07-14T13:46:44Z",
+          "completed_at": "2026-07-14T13:46:44Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101675956",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1000001535,
+      "runner_name": "GitHub Actions 1000001535",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 87101676071,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6oaJw",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101676071",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101676071",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-14T13:46:11Z",
+      "started_at": "2026-07-14T13:46:14Z",
+      "completed_at": "2026-07-14T13:46:50Z",
+      "name": "Build eBPF (5.15)",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:46:15Z",
+          "completed_at": "2026-07-14T13:46:16Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:46:16Z",
+          "completed_at": "2026-07-14T13:46:17Z"
+        },
+        {
+          "name": "Report runner kernel",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-14T13:46:17Z",
+          "completed_at": "2026-07-14T13:46:17Z"
+        },
+        {
+          "name": "Install Rust Nightly (eBPF prerequisite)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-14T13:46:17Z",
+          "completed_at": "2026-07-14T13:46:27Z"
+        },
+        {
+          "name": "Cache Rust dependencies (BPF)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-14T13:46:27Z",
+          "completed_at": "2026-07-14T13:46:35Z"
+        },
+        {
+          "name": "Install bpf-linker",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-14T13:46:35Z",
+          "completed_at": "2026-07-14T13:46:35Z"
+        },
+        {
+          "name": "Build eBPF kernel space",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-14T13:46:35Z",
+          "completed_at": "2026-07-14T13:46:45Z"
+        },
+        {
+          "name": "Upload eBPF bytecode artifact",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-07-14T13:46:45Z",
+          "completed_at": "2026-07-14T13:46:47Z"
+        },
+        {
+          "name": "Post Cache Rust dependencies (BPF)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-07-14T13:46:47Z",
+          "completed_at": "2026-07-14T13:46:47Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 16,
+          "started_at": "2026-07-14T13:46:47Z",
+          "completed_at": "2026-07-14T13:46:47Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-07-14T13:46:47Z",
+          "completed_at": "2026-07-14T13:46:47Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101676071",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "runner_id": 1000001531,
+      "runner_name": "GitHub Actions 1000001531",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 87101676169,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6oaiQ",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101676169",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101676169",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-07-14T13:46:11Z",
+      "started_at": "2026-07-14T13:46:15Z",
+      "completed_at": "2026-07-14T13:48:05Z",
+      "name": "Test",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:46:16Z",
+          "completed_at": "2026-07-14T13:46:18Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:46:18Z",
+          "completed_at": "2026-07-14T13:46:19Z"
+        },
+        {
+          "name": "Install Rust Stable",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-14T13:46:19Z",
+          "completed_at": "2026-07-14T13:46:31Z"
+        },
+        {
+          "name": "Cache Rust dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-14T13:46:31Z",
+          "completed_at": "2026-07-14T13:46:44Z"
+        },
+        {
+          "name": "Install cargo-llvm-cov",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-14T13:46:44Z",
+          "completed_at": "2026-07-14T13:46:45Z"
+        },
+        {
+          "name": "Install native build deps (orchestrator + C BPF)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-14T13:46:45Z",
+          "completed_at": "2026-07-14T13:47:03Z"
+        },
+        {
+          "name": "cargo check — workspace libraries",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-14T13:47:03Z",
+          "completed_at": "2026-07-14T13:47:10Z"
+        },
+        {
+          "name": "Integration tests (kernel-independent)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-07-14T13:47:10Z",
+          "completed_at": "2026-07-14T13:47:12Z"
+        },
+        {
+          "name": "Unit tests — sensor library",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-07-14T13:47:12Z",
+          "completed_at": "2026-07-14T13:47:13Z"
+        },
+        {
+          "name": "Enterprise sensor tests (fuzz + chaos harness)",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 10,
+          "started_at": "2026-07-14T13:47:13Z",
+          "completed_at": "2026-07-14T13:48:02Z"
+        },
+        {
+          "name": "Unit tests — telemetry",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11,
+          "started_at": "2026-07-14T13:48:02Z",
+          "completed_at": "2026-07-14T13:48:02Z"
+        },
+        {
+          "name": "Coverage gate (≥70% line coverage)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-07-14T13:48:02Z",
+          "completed_at": "2026-07-14T13:48:02Z"
+        },
+        {
+          "name": "Verify benchmark harness compiles",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-07-14T13:48:02Z",
+          "completed_at": "2026-07-14T13:48:02Z"
+        },
+        {
+          "name": "Post Cache Rust dependencies",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 25,
+          "started_at": "2026-07-14T13:48:02Z",
+          "completed_at": "2026-07-14T13:48:02Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 26,
+          "started_at": "2026-07-14T13:48:02Z",
+          "completed_at": "2026-07-14T13:48:02Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 27,
+          "started_at": "2026-07-14T13:48:02Z",
+          "completed_at": "2026-07-14T13:48:02Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101676169",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "runner_id": 1000001534,
+      "runner_name": "GitHub Actions 1000001534",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 87101836401,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6yMcQ",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101836401",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101836401",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-07-14T13:46:50Z",
+      "started_at": "2026-07-14T13:46:53Z",
+      "completed_at": "2026-07-14T13:47:46Z",
+      "name": "eBPF Verifier (6.1)",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:46:54Z",
+          "completed_at": "2026-07-14T13:46:55Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:46:55Z",
+          "completed_at": "2026-07-14T13:46:57Z"
+        },
+        {
+          "name": "Download eBPF bytecode (6.1)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-14T13:46:57Z",
+          "completed_at": "2026-07-14T13:46:57Z"
+        },
+        {
+          "name": "Install Rust Stable",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-14T13:46:57Z",
+          "completed_at": "2026-07-14T13:47:08Z"
+        },
+        {
+          "name": "Install clang (C BPF visibility object)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-14T13:47:08Z",
+          "completed_at": "2026-07-14T13:47:35Z"
+        },
+        {
+          "name": "Cache Rust dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-14T13:47:35Z",
+          "completed_at": "2026-07-14T13:47:38Z"
+        },
+        {
+          "name": "Build C visibility bytecode",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-14T13:47:38Z",
+          "completed_at": "2026-07-14T13:47:41Z"
+        },
+        {
+          "name": "Verify Rust enforcement bytecode",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-07-14T13:47:41Z",
+          "completed_at": "2026-07-14T13:47:44Z"
+        },
+        {
+          "name": "Verify C visibility bytecode",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-07-14T13:47:44Z",
+          "completed_at": "2026-07-14T13:47:44Z"
+        },
+        {
+          "name": "Enterprise sensor tests (kernel 6.1)",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 10,
+          "started_at": "2026-07-14T13:47:44Z",
+          "completed_at": "2026-07-14T13:47:45Z"
+        },
+        {
+          "name": "Post Cache Rust dependencies",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 19,
+          "started_at": "2026-07-14T13:47:45Z",
+          "completed_at": "2026-07-14T13:47:45Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-07-14T13:47:45Z",
+          "completed_at": "2026-07-14T13:47:45Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-07-14T13:47:45Z",
+          "completed_at": "2026-07-14T13:47:45Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101836401",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "runner_id": 1000001542,
+      "runner_name": "GitHub Actions 1000001542",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 87101836416,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6yMgA",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101836416",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101836416",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-07-14T13:46:50Z",
+      "started_at": "2026-07-14T13:46:53Z",
+      "completed_at": "2026-07-14T13:47:57Z",
+      "name": "eBPF Verifier (5.15)",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:46:54Z",
+          "completed_at": "2026-07-14T13:46:56Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:46:56Z",
+          "completed_at": "2026-07-14T13:46:57Z"
+        },
+        {
+          "name": "Download eBPF bytecode (5.15)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-14T13:46:57Z",
+          "completed_at": "2026-07-14T13:47:08Z"
+        },
+        {
+          "name": "Install Rust Stable",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-14T13:47:08Z",
+          "completed_at": "2026-07-14T13:47:17Z"
+        },
+        {
+          "name": "Install clang (C BPF visibility object)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-14T13:47:17Z",
+          "completed_at": "2026-07-14T13:47:39Z"
+        },
+        {
+          "name": "Cache Rust dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-14T13:47:39Z",
+          "completed_at": "2026-07-14T13:47:49Z"
+        },
+        {
+          "name": "Build C visibility bytecode",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-14T13:47:49Z",
+          "completed_at": "2026-07-14T13:47:51Z"
+        },
+        {
+          "name": "Verify Rust enforcement bytecode",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-07-14T13:47:51Z",
+          "completed_at": "2026-07-14T13:47:54Z"
+        },
+        {
+          "name": "Verify C visibility bytecode",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-07-14T13:47:54Z",
+          "completed_at": "2026-07-14T13:47:54Z"
+        },
+        {
+          "name": "Enterprise sensor tests (kernel 5.15)",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 10,
+          "started_at": "2026-07-14T13:47:54Z",
+          "completed_at": "2026-07-14T13:47:54Z"
+        },
+        {
+          "name": "Post Cache Rust dependencies",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 19,
+          "started_at": "2026-07-14T13:47:54Z",
+          "completed_at": "2026-07-14T13:47:54Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-07-14T13:47:54Z",
+          "completed_at": "2026-07-14T13:47:55Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-07-14T13:47:55Z",
+          "completed_at": "2026-07-14T13:47:55Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101836416",
+      "labels": [
+        "ubuntu-22.04"
+      ],
+      "runner_id": 1000001543,
+      "runner_name": "GitHub Actions 1000001543",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 87101836425,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6yMiQ",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101836425",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101836425",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-14T13:46:50Z",
+      "started_at": "2026-07-14T13:46:53Z",
+      "completed_at": "2026-07-14T13:52:33Z",
+      "name": "Build Docker (neuromesh-agent-ebpf-sensor)",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:46:53Z",
+          "completed_at": "2026-07-14T13:46:55Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:46:55Z",
+          "completed_at": "2026-07-14T13:46:56Z"
+        },
+        {
+          "name": "Download eBPF bytecode (6.8+ matrix artifact)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-14T13:46:56Z",
+          "completed_at": "2026-07-14T13:46:56Z"
+        },
+        {
+          "name": "Install Rust Stable",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-14T13:46:56Z",
+          "completed_at": "2026-07-14T13:47:06Z"
+        },
+        {
+          "name": "Cache Rust dependencies (orchestrator)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-14T13:47:06Z",
+          "completed_at": "2026-07-14T13:47:07Z"
+        },
+        {
+          "name": "Install native build deps (rdkafka)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-14T13:47:07Z",
+          "completed_at": "2026-07-14T13:47:20Z"
+        },
+        {
+          "name": "Build user-space orchestrator",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-14T13:47:20Z",
+          "completed_at": "2026-07-14T13:49:25Z"
+        },
+        {
+          "name": "Set up Docker Buildx",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-07-14T13:49:25Z",
+          "completed_at": "2026-07-14T13:49:29Z"
+        },
+        {
+          "name": "Build Docker image",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-07-14T13:49:29Z",
+          "completed_at": "2026-07-14T13:52:27Z"
+        },
+        {
+          "name": "Verify image",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-07-14T13:52:27Z",
+          "completed_at": "2026-07-14T13:52:27Z"
+        },
+        {
+          "name": "Post Build Docker image",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-07-14T13:52:27Z",
+          "completed_at": "2026-07-14T13:52:29Z"
+        },
+        {
+          "name": "Post Set up Docker Buildx",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-07-14T13:52:29Z",
+          "completed_at": "2026-07-14T13:52:31Z"
+        },
+        {
+          "name": "Post Cache Rust dependencies (orchestrator)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-07-14T13:52:31Z",
+          "completed_at": "2026-07-14T13:52:31Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-07-14T13:52:31Z",
+          "completed_at": "2026-07-14T13:52:32Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-07-14T13:52:32Z",
+          "completed_at": "2026-07-14T13:52:32Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101836425",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "runner_id": 1000001541,
+      "runner_name": "GitHub Actions 1000001541",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 87101836449,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6yMoQ",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101836449",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101836449",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-07-14T13:46:50Z",
+      "started_at": "2026-07-14T13:46:53Z",
+      "completed_at": "2026-07-14T13:47:41Z",
+      "name": "eBPF Verifier (6.8+)",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:46:54Z",
+          "completed_at": "2026-07-14T13:46:55Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:46:55Z",
+          "completed_at": "2026-07-14T13:46:57Z"
+        },
+        {
+          "name": "Download eBPF bytecode (6.8+)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-07-14T13:46:57Z",
+          "completed_at": "2026-07-14T13:46:58Z"
+        },
+        {
+          "name": "Install Rust Stable",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-07-14T13:46:58Z",
+          "completed_at": "2026-07-14T13:47:07Z"
+        },
+        {
+          "name": "Install clang (C BPF visibility object)",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-07-14T13:47:07Z",
+          "completed_at": "2026-07-14T13:47:24Z"
+        },
+        {
+          "name": "Cache Rust dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-07-14T13:47:24Z",
+          "completed_at": "2026-07-14T13:47:29Z"
+        },
+        {
+          "name": "Build C visibility bytecode",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-07-14T13:47:29Z",
+          "completed_at": "2026-07-14T13:47:35Z"
+        },
+        {
+          "name": "Verify Rust enforcement bytecode",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-07-14T13:47:35Z",
+          "completed_at": "2026-07-14T13:47:37Z"
+        },
+        {
+          "name": "Verify C visibility bytecode",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-07-14T13:47:37Z",
+          "completed_at": "2026-07-14T13:47:38Z"
+        },
+        {
+          "name": "Enterprise sensor tests (kernel 6.8+)",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 10,
+          "started_at": "2026-07-14T13:47:38Z",
+          "completed_at": "2026-07-14T13:47:38Z"
+        },
+        {
+          "name": "Post Cache Rust dependencies",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 19,
+          "started_at": "2026-07-14T13:47:38Z",
+          "completed_at": "2026-07-14T13:47:38Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-07-14T13:47:38Z",
+          "completed_at": "2026-07-14T13:47:38Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-07-14T13:47:38Z",
+          "completed_at": "2026-07-14T13:47:38Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101836449",
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "runner_id": 1000001539,
+      "runner_name": "GitHub Actions 1000001539",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 87101836458,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6yMqg",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101836458",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101836458",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-14T13:46:50Z",
+      "started_at": "2026-07-14T13:46:54Z",
+      "completed_at": "2026-07-14T13:47:24Z",
+      "name": "Build Docker (neuromesh-ai-threat-detector)",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:46:55Z",
+          "completed_at": "2026-07-14T13:46:58Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:46:58Z",
+          "completed_at": "2026-07-14T13:46:59Z"
+        },
+        {
+          "name": "Download eBPF bytecode (6.8+ matrix artifact)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 3,
+          "started_at": "2026-07-14T13:46:59Z",
+          "completed_at": "2026-07-14T13:46:59Z"
+        },
+        {
+          "name": "Install Rust Stable",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 4,
+          "started_at": "2026-07-14T13:46:59Z",
+          "completed_at": "2026-07-14T13:46:59Z"
+        },
+        {
+          "name": "Cache Rust dependencies (orchestrator)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 5,
+          "started_at": "2026-07-14T13:46:59Z",
+          "completed_at": "2026-07-14T13:46:59Z"
+        },
+        {
+          "name": "Install native build deps (rdkafka)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 6,
+          "started_at": "2026-07-14T13:46:59Z",
+          "completed_at": "2026-07-14T13:46:59Z"
+        },
+        {
+          "name": "Build user-space orchestrator",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-07-14T13:46:59Z",
+          "completed_at": "2026-07-14T13:46:59Z"
+        },
+        {
+          "name": "Set up Docker Buildx",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-07-14T13:46:59Z",
+          "completed_at": "2026-07-14T13:47:06Z"
+        },
+        {
+          "name": "Build Docker image",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-07-14T13:47:06Z",
+          "completed_at": "2026-07-14T13:47:18Z"
+        },
+        {
+          "name": "Verify image",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-07-14T13:47:18Z",
+          "completed_at": "2026-07-14T13:47:18Z"
+        },
+        {
+          "name": "Post Build Docker image",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-07-14T13:47:18Z",
+          "completed_at": "2026-07-14T13:47:20Z"
+        },
+        {
+          "name": "Post Set up Docker Buildx",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-07-14T13:47:20Z",
+          "completed_at": "2026-07-14T13:47:20Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-07-14T13:47:20Z",
+          "completed_at": "2026-07-14T13:47:20Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-07-14T13:47:20Z",
+          "completed_at": "2026-07-14T13:47:20Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101836458",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "runner_id": 1000001540,
+      "runner_name": "GitHub Actions 1000001540",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 87101836468,
+      "run_id": 29337823489,
+      "workflow_name": "Production CI",
+      "head_branch": "chore/enterprise-testing-suite",
+      "run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/runs/29337823489",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTS6y5M8AAAAUR6yMtA",
+      "head_sha": "a1c3026620e7310f2e0ec4eae70138a0ebf334b3",
+      "url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/actions/jobs/87101836468",
+      "html_url": "https://github.com/Neuromesh-Security/neuromesh/actions/runs/29337823489/job/87101836468",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-07-14T13:46:50Z",
+      "started_at": "2026-07-14T13:46:53Z",
+      "completed_at": "2026-07-14T13:47:31Z",
+      "name": "Build Docker (neuromesh-zt-policy-engine)",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-07-14T13:46:54Z",
+          "completed_at": "2026-07-14T13:46:57Z"
+        },
+        {
+          "name": "Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-07-14T13:46:57Z",
+          "completed_at": "2026-07-14T13:46:57Z"
+        },
+        {
+          "name": "Download eBPF bytecode (6.8+ matrix artifact)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 3,
+          "started_at": "2026-07-14T13:46:57Z",
+          "completed_at": "2026-07-14T13:46:57Z"
+        },
+        {
+          "name": "Install Rust Stable",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 4,
+          "started_at": "2026-07-14T13:46:57Z",
+          "completed_at": "2026-07-14T13:46:57Z"
+        },
+        {
+          "name": "Cache Rust dependencies (orchestrator)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 5,
+          "started_at": "2026-07-14T13:46:57Z",
+          "completed_at": "2026-07-14T13:46:57Z"
+        },
+        {
+          "name": "Install native build deps (rdkafka)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 6,
+          "started_at": "2026-07-14T13:46:57Z",
+          "completed_at": "2026-07-14T13:46:57Z"
+        },
+        {
+          "name": "Build user-space orchestrator",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-07-14T13:46:57Z",
+          "completed_at": "2026-07-14T13:46:57Z"
+        },
+        {
+          "name": "Set up Docker Buildx",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-07-14T13:46:57Z",
+          "completed_at": "2026-07-14T13:47:02Z"
+        },
+        {
+          "name": "Build Docker image",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-07-14T13:47:02Z",
+          "completed_at": "2026-07-14T13:47:26Z"
+        },
+        {
+          "name": "Verify image",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-07-14T13:47:26Z",
+          "completed_at": "2026-07-14T13:47:26Z"
+        },
+        {
+          "name": "Post Build Docker image",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-07-14T13:47:26Z",
+          "completed_at": "2026-07-14T13:47:27Z"
+        },
+        {
+          "name": "Post Set up Docker Buildx",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-07-14T13:47:27Z",
+          "completed_at": "2026-07-14T13:47:29Z"
+        },
+        {
+          "name": "Post Checkout Code",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-07-14T13:47:29Z",
+          "completed_at": "2026-07-14T13:47:29Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-07-14T13:47:29Z",
+          "completed_at": "2026-07-14T13:47:29Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/Neuromesh-Security/neuromesh/check-runs/87101836468",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "runner_id": 1000001544,
+      "runner_name": "GitHub Actions 1000001544",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 // Neuromesh L4 network visibility — kprobe/tcp_connect.
 //
 // CO-RE / BTF maps (SEC ".maps"). Socket destination fields are read into a
-// kernel stack snapshot via bounded bpf_probe_read_kernel, then copied into ringbuf.
+// kernel stack snapshot via bpf_probe_read_kernel, then copied into ringbuf.
 
 #include "vmlinux.h"
 #include <bpf/bpf_tracing.h>
@@ -11,7 +11,6 @@
 char LICENSE[] SEC("license") = "GPL";
 
 #define DROPPED_KEY 0
-#define SK_PROBE_MAX_OFF 16U
 
 struct network_event_t {
 	__u32 pid;
@@ -50,22 +49,6 @@ static __always_inline void record_drop(void)
 	bpf_map_update_elem(&DROPPED_EVENTS, &key, &next, BPF_ANY);
 }
 
-static __always_inline int sk_probe_field(const struct sock *sk, __u32 off,
-					  void *dst, __u32 len)
-{
-	const char *base;
-
-	if (!sk || !dst)
-		return -1;
-	if (!len || len > 8)
-		return -1;
-	if (off > SK_PROBE_MAX_OFF - len)
-		return -1;
-
-	base = (const char *)sk;
-	return bpf_probe_read_kernel(dst, len, base + off);
-}
-
 static __always_inline void read_sock_dest(struct sock *sk,
 					   struct sock_dest_stack_t *out)
 {
@@ -82,10 +65,10 @@ static __always_inline void read_sock_dest(struct sock *sk,
 	dport_off = __builtin_offsetof(struct sock, __sk_common) +
 		    __builtin_offsetof(struct sock_common, skc_dport);
 
-	if (sk_probe_field(sk, daddr_off, &out->daddr, sizeof(out->daddr)))
-		return;
-	if (sk_probe_field(sk, dport_off, &out->dport, sizeof(out->dport)))
-		return;
+	bpf_probe_read_kernel(&out->daddr, sizeof(out->daddr),
+			      (const char *)sk + daddr_off);
+	bpf_probe_read_kernel(&out->dport, sizeof(out->dport),
+			      (const char *)sk + dport_off);
 }
 
 SEC("kprobe/tcp_connect")
@@ -97,9 +80,6 @@ int neuromesh_tcp_connect(struct pt_regs *ctx)
 	__u64 pid_tgid;
 	__u64 uid_gid;
 	struct sock *sk;
-
-	if (!ctx)
-		return 0;
 
 	sk = (struct sock *)PT_REGS_PARM1(ctx);
 	if (!sk)
