@@ -38,9 +38,7 @@ fn configure_enforcement_bytecode() {
     let abs = if path.is_absolute() {
         path
     } else {
-        std::env::current_dir()
-            .expect("current dir")
-            .join(path)
+        std::env::current_dir().expect("current dir").join(path)
     };
 
     println!("cargo:rerun-if-env-changed=NEUROMESH_EBPF_ENFORCEMENT_BYTECODE");
