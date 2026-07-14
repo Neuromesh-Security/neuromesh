@@ -63,7 +63,13 @@ minimum-line-coverage = 70
 
 [dev-dependencies]
 criterion = { workspace = true }
-tokio = { version = "1.36", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.36", features = ["macros", "rt-multi-thread", "time", "sync"] }
+tokio-util = "0.7"
+
+[[test]]
+name = "chaos_engineering_test"
+path = "tests/chaos_engineering_test.rs"
+required-features = ["orchestrator"]
 
 [[bench]]
 name = "detection_pipeline"

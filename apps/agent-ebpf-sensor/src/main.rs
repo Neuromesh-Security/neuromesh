@@ -38,8 +38,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let shutdown = CancellationToken::new();
 
-    let enforcement_bpf_data =
-        include_bytes!("../ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf");
+    let enforcement_bpf_data = include_bytes!(env!("NEUROMESH_EBPF_ENFORCEMENT_BYTECODE"));
 
     let mut enforcement_bpf = Ebpf::load(enforcement_bpf_data)?;
 

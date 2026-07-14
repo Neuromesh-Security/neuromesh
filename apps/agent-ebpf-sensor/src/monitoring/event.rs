@@ -151,6 +151,26 @@ mod tests {
     }
 
     #[test]
+    fn from_bytes_unaligned_rejects_truncated_records() {
+        assert!(ProcessEvent::from_bytes_unaligned(&[0u8; 16]).is_none());
+    }
+
+    #[test]
+    fn handler_survives_max_field_values() {
+        let event = ProcessEvent {
+            pid: u32::MAX,
+            uid: u32::MAX,
+            ppid: u32::MAX,
+            comm: [0xFF; 16],
+            filename: [0xFF; 128],
+            ts: u64::MAX,
+        };
+        let mut handler = ProcessEventHandler::default();
+        handler.observe(&event);
+        assert_eq!(handler.events_seen(), 1);
+    }
+
+    #[test]
     fn from_bytes_unaligned_roundtrip() {
         let event = ProcessEvent {
             pid: 99,

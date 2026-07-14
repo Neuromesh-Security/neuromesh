@@ -2,12 +2,11 @@
 
 use crate::ingestion::CorrelationIngestionHandle;
 use crate::monitoring::correlation::CorrelationEngine;
-use crate::monitoring::network_event::{NetworkEvent, NetworkEventHandler};
+use crate::monitoring::network_event::NetworkEventHandler;
 use anyhow::{Context, Result};
 use aya::maps::RingBuf;
 use aya::programs::KProbe;
 use aya::Ebpf;
-use std::ptr;
 use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
@@ -53,8 +52,12 @@ pub async fn start_network_monitor(
                 }
                 poll_result = async_ring.async_io_mut(Interest::READABLE, |ring| {
                     while let Some(item) = ring.next() {
-                        let event =
-                            unsafe { ptr::read_unaligned(item.as_ptr() as *const NetworkEvent) };
+                        let bytes = item.as_ref();
+                        let Some(event) =
+                            crate::monitoring::ringbuf_decode::decode_network_event(bytes)
+                        else {
+                            continue;
+                        };
                         if let Some(enriched) = correlation.correlate(event) {
                             ingestion.try_enqueue(enriched);
                         }

@@ -139,6 +139,13 @@ mod tests {
     }
 
     #[test]
+    fn register_process_ignores_zero_pid() {
+        let engine = CorrelationEngine::new();
+        engine.register_process(0, b"/bin/sh");
+        assert_eq!(engine.process_count(), 0);
+    }
+
+    #[test]
     fn enriched_event_log_format_fields() {
         let enriched = EnrichedNetworkEvent {
             pid: 99,

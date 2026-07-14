@@ -3,6 +3,7 @@
 pub mod correlation;
 pub mod event;
 pub mod network_event;
+pub mod ringbuf_decode;
 
 #[cfg(feature = "orchestrator")]
 mod network_monitor;

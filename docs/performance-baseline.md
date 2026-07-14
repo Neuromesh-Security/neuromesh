@@ -200,6 +200,18 @@ observed_drop_rate ≈ max(0, generated_eps − min(kernel_rate_limit, user_spac
 
 The stress test is marked `#[ignore]` and **not executed in GitHub Actions**. It is intended for manual pre-release validation on Linux hardware with the live agent attached.
 
+### Enterprise Test Suite (CI)
+
+Kernel-independent suites run on every PR (no root, no live eBPF):
+
+```bash
+cargo test -p agent-ebpf-sensor --test event_parser_fuzz_test
+cargo test -p agent-ebpf-sensor --test chaos_engineering_test --features orchestrator
+cargo test -p agent-ebpf-sensor --test execve_stress_test --no-run   # compile-only gate
+```
+
+The eBPF verifier matrix (`5.15`, `6.1`, `6.8+`) re-runs the same suites per kernel runner to catch toolchain drift.
+
 ---
 
 ## Prometheus Metrics (Enterprise Observability)

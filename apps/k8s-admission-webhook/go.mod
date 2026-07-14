@@ -1,6 +1,6 @@
 module neuromesh/k8s-admission-webhook
 
-go 1.23.0
+go 1.25.0
 
 require (
 	k8s.io/api v0.32.3
