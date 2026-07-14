@@ -16,7 +16,7 @@ pub fn sum_rate_limit_drops(map: &PerCpuArray<MapData, u64>) -> Result<u64> {
     let values = map
         .get(&RATE_LIMIT_KEY, 0)
         .context("failed to read RATE_LIMIT_DROPS per-CPU values")?;
-    Ok(values.iter().map(|value| *value).sum())
+    Ok(values.iter().copied().sum())
 }
 
 /// Spawn a Tokio task that samples kernel and user-space drop counters every 5 seconds.
