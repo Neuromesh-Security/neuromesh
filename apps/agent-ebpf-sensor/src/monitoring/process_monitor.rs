@@ -17,6 +17,7 @@ use std::sync::{
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
 use tokio::sync::mpsc::error::TrySendError;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 pub const PROCESS_EVENTS_MAP: &str = "PROCESS_EVENTS";
@@ -29,7 +30,10 @@ const DROP_WARN_INTERVAL: u64 = 10_000;
 
 /// Attach the C tracepoint, spawn an async RingBuf poller with backpressure, and return
 /// the shared correlation engine for downstream network enrichment.
-pub async fn start_process_monitor(bpf: &mut Ebpf) -> Result<Arc<CorrelationEngine>> {
+pub async fn start_process_monitor(
+    bpf: &mut Ebpf,
+    cancel: CancellationToken,
+) -> Result<Arc<CorrelationEngine>> {
     let program: &mut TracePoint = bpf
         .program_mut(SYS_EXEC_PROGRAM)
         .with_context(|| format!("eBPF program `{SYS_EXEC_PROGRAM}` missing from object file"))?
@@ -56,25 +60,42 @@ pub async fn start_process_monitor(bpf: &mut Ebpf) -> Result<Arc<CorrelationEngi
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ProcessEvent>(channel_capacity);
 
     let worker_correlation = Arc::clone(&correlation);
+    let worker_cancel = cancel.clone();
     tokio::spawn(async move {
         let mut handler = ProcessEventHandler::default();
-        while let Some(event) = event_rx.recv().await {
-            worker_correlation.register_process(event.pid, &event.filename);
-            handler.observe(&event);
+        loop {
+            tokio::select! {
+                _ = worker_cancel.cancelled() => {
+                    info!(target: "neuromesh::process_monitor", "process monitor worker exiting");
+                    break;
+                }
+                event = event_rx.recv() => {
+                    match event {
+                        Some(event) => {
+                            worker_correlation.register_process(event.pid, &event.filename);
+                            handler.observe(&event);
+                        }
+                        None => break,
+                    }
+                }
+            }
         }
     });
 
     let mut async_ring = AsyncFd::new(ring_buf)?;
     let dropped = Arc::new(AtomicU64::new(0));
     let drop_counter = Arc::clone(&dropped);
-    let pressure_threshold = channel_capacity
-        .saturating_mul(PROCESS_PRESSURE_DROP_THRESHOLD_PCT)
-        .saturating_div(100);
+    let poller_cancel = cancel.clone();
 
     tokio::spawn(async move {
         loop {
-            let poll_result = async_ring
-                .async_io_mut(Interest::READABLE, |ring| {
+            tokio::select! {
+                _ = poller_cancel.cancelled() => {
+                    drop(event_tx);
+                    info!(target: "neuromesh::process_monitor", "process monitor poller exiting");
+                    break;
+                }
+                poll_result = async_ring.async_io_mut(Interest::READABLE, |ring| {
                     while let Some(item) = ring.next() {
                         let event = unsafe {
                             ptr::read_unaligned(item.as_ptr() as *const ProcessEvent)
@@ -98,15 +119,15 @@ pub async fn start_process_monitor(bpf: &mut Ebpf) -> Result<Arc<CorrelationEngi
                         }
                     }
                     Ok(())
-                })
-                .await;
-
-            if let Err(error) = poll_result {
-                warn!(
-                    target: "neuromesh::process_monitor",
-                    error = %error,
-                    "PROCESS_EVENTS ring buffer poll failed"
-                );
+                }) => {
+                    if let Err(error) = poll_result {
+                        warn!(
+                            target: "neuromesh::process_monitor",
+                            error = %error,
+                            "PROCESS_EVENTS ring buffer poll failed"
+                        );
+                    }
+                }
             }
         }
     });

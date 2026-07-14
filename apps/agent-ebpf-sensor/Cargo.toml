@@ -48,6 +48,7 @@ neuromesh-proto = { path = "../../packages/proto-definitions" }
 prost = "0.13"
 rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
 rskafka = { version = "0.6", optional = true }
+tokio-util = "0.7"
 
 [package.metadata.coverage]
 minimum-line-coverage = 70
