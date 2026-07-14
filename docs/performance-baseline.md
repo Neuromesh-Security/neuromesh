@@ -142,4 +142,64 @@ Benchmarks are **compiled but not executed** in GitHub Actions (`cargo bench --n
 
 ---
 
+## Load Testing Methodology
+
+The `execve` syscall generator (`apps/agent-ebpf-sensor/tests/execve_stress_test.rs`) validates end-to-end resilience of the kernel token-bucket rate limiter (`RATE_LIMIT_BUCKET` / `RATE_LIMIT_DROPS`) and the Rust async RingBuf consumer backpressure path (`NEUROMESH_PROCESS_CHANNEL_CAPACITY`, default **8192**).
+
+### Prerequisites
+
+| Requirement | Rationale |
+|-------------|-----------|
+| Linux host with `/bin/true` | Each iteration issues a real `execve` syscall |
+| `agent-ebpf-sensor` running with process monitor armed | Consumes `PROCESS_EVENTS` RingBuf |
+| Root or `CAP_BPF` + `CAP_PERFMON` on agent | eBPF tracepoint must be attached |
+
+### Execution
+
+```bash
+# Terminal 1 — start orchestrator
+cargo run -p agent-ebpf-sensor --features orchestrator --release
+
+# Terminal 2 — default burst (64 workers × 30s)
+cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
+
+# Aggressive burst — designed to exceed 500k events/sec kernel ceiling
+EXECVE_STRESS_WORKERS=256 \
+EXECVE_STRESS_DURATION_SECS=60 \
+  cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
+```
+
+### Tunable Parameters
+
+| Environment variable | Default | Purpose |
+|---------------------|---------|---------|
+| `EXECVE_STRESS_WORKERS` | `64` | Concurrent Tokio worker tasks spawning `/bin/true` |
+| `EXECVE_STRESS_DURATION_SECS` | `30` | Wall-clock burst duration |
+| `EXECVE_STRESS_BINARY` | `/bin/true` | Lightweight target binary (minimal fork/exec overhead) |
+| `NEUROMESH_PROCESS_CHANNEL_CAPACITY` | `8192` | User-space MPSC depth (agent-side) |
+
+### Observability Signals
+
+| Layer | Signal | Interpretation |
+|-------|--------|----------------|
+| **Generator stdout** | `syscalls/sec` per-second delta | Raw syscall generation rate |
+| **Generator stdout** | `average_eps` at completion | Mean execve rate over full burst |
+| **Kernel eBPF** | `RATE_LIMIT_DROPS` map counter growth | Token bucket exhausted (>500k/sec per CPU) |
+| **User-space agent** | `PROCESS_EVENTS backpressure: dropping execve events` | MPSC channel saturated (backpressure engaged) |
+
+### Drop Rate Estimation
+
+```
+observed_drop_rate ≈ max(0, generated_eps − min(kernel_rate_limit, user_space_drain_rate))
+```
+
+- **Kernel ceiling:** ~500k events/sec per CPU (`NS_PER_TOKEN=2000`, `MAX_TOKENS=500000` in `sys_exec.bpf.c`)
+- **User-space drain:** bounded by Tokio worker + correlation registration; channel full → explicit drop with rate-limited warn every 10k events
+
+### CI Policy
+
+The stress test is marked `#[ignore]` and **not executed in GitHub Actions**. It is intended for manual pre-release validation on Linux hardware with the live agent attached.
+
+---
+
 *Generated from Criterion measurements on 2026-07-12. Re-run after material changes to `RuleEngine` or `DataNormalizer`.*

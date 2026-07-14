@@ -54,6 +54,7 @@ minimum-line-coverage = 70
 
 [dev-dependencies]
 criterion = { workspace = true }
+tokio = { version = "1.36", features = ["macros", "rt-multi-thread", "time"] }
 
 [[bench]]
 name = "detection_pipeline"
