@@ -5,15 +5,13 @@
 
 use crate::monitoring::correlation::CorrelationEngine;
 use crate::monitoring::event::{ProcessEvent, ProcessEventHandler};
+use crate::observability::metrics::AgentMetrics;
 use anyhow::{Context, Result};
 use aya::maps::RingBuf;
 use aya::programs::TracePoint;
 use aya::Ebpf;
 use std::ptr;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
 use tokio::sync::mpsc::error::TrySendError;
@@ -33,6 +31,7 @@ const DROP_WARN_INTERVAL: u64 = 10_000;
 pub async fn start_process_monitor(
     bpf: &mut Ebpf,
     cancel: CancellationToken,
+    metrics: Arc<AgentMetrics>,
 ) -> Result<Arc<CorrelationEngine>> {
     let program: &mut TracePoint = bpf
         .program_mut(SYS_EXEC_PROGRAM)
@@ -60,6 +59,7 @@ pub async fn start_process_monitor(
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ProcessEvent>(channel_capacity);
 
     let worker_correlation = Arc::clone(&correlation);
+    let worker_metrics = Arc::clone(&metrics);
     let worker_cancel = cancel.clone();
     tokio::spawn(async move {
         let mut handler = ProcessEventHandler::default();
@@ -74,6 +74,7 @@ pub async fn start_process_monitor(
                         Some(event) => {
                             worker_correlation.register_process(event.pid, &event.filename);
                             handler.observe(&event);
+                            worker_metrics.record_event_processed();
                         }
                         None => break,
                     }
@@ -83,8 +84,7 @@ pub async fn start_process_monitor(
     });
 
     let mut async_ring = AsyncFd::new(ring_buf)?;
-    let dropped = Arc::new(AtomicU64::new(0));
-    let drop_counter = Arc::clone(&dropped);
+    let poller_metrics = Arc::clone(&metrics);
     let poller_cancel = cancel.clone();
 
     tokio::spawn(async move {
@@ -104,7 +104,8 @@ pub async fn start_process_monitor(
                         match event_tx.try_send(event) {
                             Ok(()) => {}
                             Err(TrySendError::Full(_)) => {
-                                let total = drop_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                                poller_metrics.record_userspace_drop();
+                                let total = poller_metrics.userspace_drops();
                                 if total == 1 || total.is_multiple_of(DROP_WARN_INTERVAL) {
                                     warn!(
                                         target: "neuromesh::process_monitor",

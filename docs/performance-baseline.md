@@ -202,4 +202,48 @@ The stress test is marked `#[ignore]` and **not executed in GitHub Actions**. It
 
 ---
 
+## Prometheus Metrics (Enterprise Observability)
+
+The orchestrator exposes a lightweight Prometheus text endpoint for production scraping.
+
+### Endpoint
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Path | `/metrics` | Prometheus exposition format |
+| Port | `9090` | Override with `NEUROMESH_METRICS_PORT` |
+| Bind | `0.0.0.0` | Dedicated listener (separate from Kafka / detection stdout) |
+
+### Critical Metrics
+
+| Metric | Type | Source |
+|--------|------|--------|
+| `ebpf_events_processed_total` | counter | User-space process monitor worker (successful `execve` events) |
+| `ebpf_events_dropped_total` | counter | Kernel `RATE_LIMIT_DROPS` map + MPSC channel-full backpressure |
+| `agent_uptime_seconds` | gauge | Wall-clock seconds since orchestrator start |
+
+### Scrape Configuration
+
+**Prometheus `prometheus.yml`:**
+
+```yaml
+scrape_configs:
+  - job_name: neuromesh-agent-ebpf-sensor
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["<agent-host>:9090"]
+```
+
+**Manual validation (no Prometheus server required):**
+
+```bash
+curl -s http://127.0.0.1:9090/metrics | grep -E 'ebpf_events_|agent_uptime'
+```
+
+### Health Monitor
+
+A background Tokio task samples kernel and user-space drop counters every **5 seconds** (override with `NEUROMESH_HEALTH_INTERVAL_SECS`). Structured logs are emitted under target `neuromesh::health` for SIEM correlation alongside Prometheus counters.
+
+---
+
 *Generated from Criterion measurements on 2026-07-12. Re-run after material changes to `RuleEngine` or `DataNormalizer`.*

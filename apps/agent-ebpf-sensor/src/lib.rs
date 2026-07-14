@@ -12,8 +12,16 @@ pub mod wasm_policy;
 
 pub mod monitoring;
 
+#[cfg(feature = "orchestrator")]
+pub mod observability;
+
 pub use bpf_pin::{load_with_map_pinning, pin_root, DEFAULT_BPF_PIN_ROOT};
 pub use shutdown::wait_for_shutdown_signal;
+
+#[cfg(feature = "orchestrator")]
+pub use observability::{
+    spawn_health_monitor, spawn_metrics_server, AgentMetrics, RATE_LIMIT_DROPS_MAP,
+};
 
 pub use normalizer::{BehaviorAlert, DataNormalizer, SEVERITY_BEHAVIOR_ALERT};
 pub use pipeline::{PipelineOutput, TelemetryPipeline};

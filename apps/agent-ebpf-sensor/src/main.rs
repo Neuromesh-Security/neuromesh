@@ -1,11 +1,15 @@
 use agent_ebpf_sensor::ingestion;
 use agent_ebpf_sensor::monitoring::{start_network_monitor, start_process_monitor};
+use agent_ebpf_sensor::observability::{
+    spawn_health_monitor, spawn_metrics_server, AgentMetrics, RATE_LIMIT_DROPS_MAP,
+};
 use agent_ebpf_sensor::pipeline::TelemetryPipeline;
 use agent_ebpf_sensor::rules::RuleEngine;
 use agent_ebpf_sensor::telemetry_stream::{self, TelemetryStreamHandle};
 use agent_ebpf_sensor::wasm_policy::WasmPolicyEngine;
 use agent_ebpf_sensor::{load_with_map_pinning, pin_root, wait_for_shutdown_signal};
-use aya::maps::{Array, MapData, RingBuf};
+use anyhow::Context;
+use aya::maps::{Array, MapData, PerCpuArray, RingBuf};
 use aya::programs::Lsm;
 use aya::{Btf, Ebpf};
 use log::info;
@@ -51,7 +55,21 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let bpf_pin_root = pin_root();
     let mut process_bpf = load_with_map_pinning(SYS_EXEC_BPF, &bpf_pin_root)?;
-    let correlation = start_process_monitor(&mut process_bpf, shutdown.clone()).await?;
+
+    let metrics = AgentMetrics::new()?;
+    let rate_limit_drops = PerCpuArray::try_from(
+        process_bpf
+            .take_map(RATE_LIMIT_DROPS_MAP)
+            .with_context(|| {
+                format!("BPF map `{RATE_LIMIT_DROPS_MAP}` missing from object file")
+            })?,
+    )?;
+
+    let correlation =
+        start_process_monitor(&mut process_bpf, shutdown.clone(), Arc::clone(&metrics)).await?;
+
+    spawn_health_monitor(rate_limit_drops, Arc::clone(&metrics), shutdown.clone());
+    spawn_metrics_server(Arc::clone(&metrics), shutdown.clone()).await?;
 
     let mut network_bpf = Ebpf::load(NETWORK_FILTER_BPF)?;
     start_network_monitor(
@@ -87,6 +105,8 @@ async fn main() -> Result<(), anyhow::Error> {
         "📌 eBPF map pinning active under {} (PROCESS_EVENTS, RATE_LIMIT_BUCKET)",
         bpf_pin_root.display()
     );
+    info!("📈 Prometheus /metrics exporter armed (default port 9090, override via NEUROMESH_METRICS_PORT)");
+    info!("🩺 Health monitor armed (kernel RATE_LIMIT_DROPS + user-space channel backpressure)");
     if std::env::var("NEUROMESH_KAFKA_BROKERS").is_ok() {
         info!("📡 Kafka Slow Path armed (topic: neuromesh.telemetry.v1)");
     } else {
