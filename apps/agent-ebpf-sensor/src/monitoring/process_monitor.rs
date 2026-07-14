@@ -5,7 +5,9 @@
 
 use crate::monitoring::correlation::CorrelationEngine;
 use crate::monitoring::event::ProcessEventHandler;
-use crate::monitoring::exec_mapper::{exec_event_otel_attributes, exec_event_to_security_telemetry};
+use crate::monitoring::exec_mapper::{
+    exec_event_otel_attributes, exec_event_to_security_telemetry,
+};
 use crate::observability::metrics::AgentMetrics;
 use anyhow::{Context, Result};
 use aya::maps::RingBuf;

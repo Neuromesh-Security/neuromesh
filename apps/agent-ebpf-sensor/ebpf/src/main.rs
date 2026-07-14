@@ -14,9 +14,9 @@ use aya_ebpf::{
 use aya_ebpf_bindings::helpers::bpf_get_current_task;
 use aya_log_ebpf::info;
 use neuromesh_common::{
-    ExecEvent, TelemetryHealthStats, CAPTURE_COMM, CAPTURE_CONTAINER_ID, CAPTURE_FILENAME,
-    CAPTURE_NAMESPACE_ID, CAPTURE_PPID, ENFORCEMENT_BLOCKED, EXEC_EVENT_SCHEMA_VERSION,
-    EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN,
+    CAPTURE_COMM, CAPTURE_CONTAINER_ID, CAPTURE_EUID, CAPTURE_FILENAME, CAPTURE_NAMESPACE_ID,
+    CAPTURE_PPID, ENFORCEMENT_BLOCKED, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE,
+    EXEC_EVENT_TYPE_EXECVE, ExecEvent, TelemetryHealthStats, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN,
     MAX_FILENAME_LEN, TELEMETRY_STATS_INDEX, UNKNOWN_SENTINEL,
 };
 
@@ -181,7 +181,8 @@ fn emit_blocked_exec_event(ctx: &LsmContext) {
         populate_lineage(event);
         event.filename = [0u8; MAX_FILENAME_LEN];
         if let Ok(filename_ptr) = read_bprm_filename_ptr(ctx) {
-            if unsafe { bpf_probe_read_kernel_str_bytes(filename_ptr, &mut event.filename) }.is_err()
+            if unsafe { bpf_probe_read_kernel_str_bytes(filename_ptr, &mut event.filename) }
+                .is_err()
             {
                 mark_unknown(
                     &mut event.filename,

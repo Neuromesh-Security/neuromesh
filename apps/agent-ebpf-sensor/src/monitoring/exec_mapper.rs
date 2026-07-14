@@ -1,12 +1,14 @@
 //! ExecEvent v1 decode, SecurityTelemetryEvent mapping, and OTel attribute export.
 
 use neuromesh_common::{
-    ExecEvent, SecurityTelemetryEvent, CAPTURE_ARGS_COUNT, CAPTURE_COMM, CAPTURE_CONTAINER_ID,
-    CAPTURE_EUID, CAPTURE_FILENAME, CAPTURE_GID, CAPTURE_NAMESPACE_ID, CAPTURE_PPID,
-    CAPTURE_TIMESTAMP, CAPTURE_TGID, CAPTURE_UID, ENFORCEMENT_ALLOWED, ENFORCEMENT_BLOCKED,
-    ENFORCEMENT_UNKNOWN, EXEC_EVENT_STRUCT_SIZE, UNKNOWN_SENTINEL,
+    CAPTURE_ARGS_COUNT, CAPTURE_COMM, CAPTURE_CONTAINER_ID, CAPTURE_EUID, CAPTURE_FILENAME,
+    CAPTURE_GID, CAPTURE_NAMESPACE_ID, CAPTURE_PPID, CAPTURE_TIMESTAMP, CAPTURE_TGID,
+    CAPTURE_UID, ENFORCEMENT_ALLOWED, ENFORCEMENT_BLOCKED, ENFORCEMENT_UNKNOWN,
+    EXEC_EVENT_STRUCT_SIZE, ExecEvent, SecurityTelemetryEvent, UNKNOWN_SENTINEL,
 };
 use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::ptr;
 
 /// OpenTelemetry-ready attribute bag for distributed tracing enrichment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,13 +38,8 @@ pub fn exec_event_to_security_telemetry(event: &ExecEvent) -> SecurityTelemetryE
         ppid: scalar_or_zero(event.ppid, event.field_unknown(CAPTURE_PPID)),
         uid: scalar_or_zero(event.uid, event.field_unknown(CAPTURE_UID)),
         euid: scalar_or_zero(event.euid, event.field_unknown(CAPTURE_EUID)),
-        comm: string_field(&event.comm, CAPTURE_COMM, event.capture_status, "comm"),
-        filename: string_field(
-            &event.filename,
-            CAPTURE_FILENAME,
-            event.capture_status,
-            "filename",
-        ),
+        comm: string_field(&event.comm, CAPTURE_COMM, event.capture_status),
+        filename: string_field(&event.filename, CAPTURE_FILENAME, event.capture_status),
     }
 }
 
@@ -121,7 +118,11 @@ pub fn exec_event_otel_attributes(event: &ExecEvent) -> OtelExecAttributes {
 
 #[inline]
 fn scalar_or_zero(value: u32, unknown: bool) -> u32 {
-    if unknown { 0 } else { value }
+    if unknown {
+        0
+    } else {
+        value
+    }
 }
 
 #[inline]
@@ -151,12 +152,7 @@ fn display_string(bytes: &[u8], bit: u16, status: u16, field: &str) -> String {
 }
 
 #[inline]
-fn string_field<const N: usize>(
-    bytes: &[u8; N],
-    bit: u16,
-    status: u16,
-    field: &str,
-) -> [u8; N] {
+fn string_field<const N: usize>(bytes: &[u8; N], bit: u16, status: u16) -> [u8; N] {
     let mut out = [0u8; N];
     if status & bit != 0 {
         write_unknown(&mut out);
@@ -218,8 +214,8 @@ mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
     use neuromesh_common::{
-        ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_TYPE_EXECVE, MAX_COMM_LEN,
-        MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
+        EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE, ExecEvent,
+        MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
     };
 
     fn bytes_with_prefix<const N: usize>(prefix: &[u8]) -> [u8; N] {

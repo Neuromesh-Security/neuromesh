@@ -7,7 +7,7 @@ use agent_ebpf_sensor::monitoring::event::{
 use agent_ebpf_sensor::monitoring::network_event::{NetworkEvent, NetworkEventHandler};
 use agent_ebpf_sensor::observability::metrics::AgentMetrics;
 use neuromesh_common::{
-    ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
+    EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE, ExecEvent,
     MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
 };
 use tokio::sync::mpsc::error::TrySendError;
