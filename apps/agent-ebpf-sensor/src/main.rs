@@ -109,7 +109,9 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("🔗 Lock-free correlation engine armed (DashMap PID → process name).");
     info!("📨 Correlation Kafka ingestion armed (bounded MPSC → idempotent rdkafka).");
     info!("🛡️ XDR enforcement armed. LSM bprm_check_security active blocking enabled.");
-    info!("⚡ Detection brain armed. RuleEngine + DataNormalizer active on ExecEvent v1 streams...");
+    info!(
+        "⚡ Detection brain armed. RuleEngine + DataNormalizer active on ExecEvent v1 streams..."
+    );
     info!(
         "📌 eBPF map pinning active under {} (PROCESS_EVENTS, RATE_LIMIT_BUCKET)",
         bpf_pin_root.display()

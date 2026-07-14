@@ -1,10 +1,10 @@
 //! ExecEvent v1 decode, SecurityTelemetryEvent mapping, and OTel attribute export.
 
 use neuromesh_common::{
-    CAPTURE_ARGS_COUNT, CAPTURE_COMM, CAPTURE_CONTAINER_ID, CAPTURE_EUID, CAPTURE_FILENAME,
-    CAPTURE_GID, CAPTURE_NAMESPACE_ID, CAPTURE_PPID, CAPTURE_TIMESTAMP, CAPTURE_TGID,
-    CAPTURE_UID, ENFORCEMENT_ALLOWED, ENFORCEMENT_BLOCKED, ENFORCEMENT_UNKNOWN,
-    EXEC_EVENT_STRUCT_SIZE, ExecEvent, SecurityTelemetryEvent, UNKNOWN_SENTINEL,
+    ExecEvent, SecurityTelemetryEvent, CAPTURE_ARGS_COUNT, CAPTURE_COMM, CAPTURE_CONTAINER_ID,
+    CAPTURE_EUID, CAPTURE_FILENAME, CAPTURE_GID, CAPTURE_NAMESPACE_ID, CAPTURE_PPID, CAPTURE_TGID,
+    CAPTURE_TIMESTAMP, CAPTURE_UID, ENFORCEMENT_ALLOWED, ENFORCEMENT_BLOCKED, ENFORCEMENT_UNKNOWN,
+    EXEC_EVENT_STRUCT_SIZE, UNKNOWN_SENTINEL,
 };
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -98,7 +98,11 @@ pub fn exec_event_otel_attributes(event: &ExecEvent) -> OtelExecAttributes {
     );
     attributes.insert(
         "neuromesh.namespace_id".into(),
-        display_scalar_u64(event.namespace_id, CAPTURE_NAMESPACE_ID, event.capture_status),
+        display_scalar_u64(
+            event.namespace_id,
+            CAPTURE_NAMESPACE_ID,
+            event.capture_status,
+        ),
     );
     attributes.insert(
         "neuromesh.timestamp_ns".into(),
@@ -214,7 +218,7 @@ mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
     use neuromesh_common::{
-        EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE, ExecEvent,
+        ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
         MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
     };
 

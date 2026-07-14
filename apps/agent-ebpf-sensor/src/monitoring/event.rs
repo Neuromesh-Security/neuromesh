@@ -93,7 +93,7 @@ mod tests {
     use super::{drain_events, EventStream, MockEventStream, ProcessEventHandler};
     use core::mem::{offset_of, size_of};
     use neuromesh_common::{
-        EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE, ExecEvent,
+        ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
         MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
     };
 

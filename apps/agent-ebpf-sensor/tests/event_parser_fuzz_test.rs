@@ -5,7 +5,7 @@ use agent_ebpf_sensor::monitoring::network_event::{NetworkEvent, NetworkEventHan
 use agent_ebpf_sensor::monitoring::ringbuf_decode::{decode_exec_event, decode_network_event};
 use core::mem::size_of;
 use neuromesh_common::{
-    EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE, ExecEvent,
+    ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
     MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
 };
 
