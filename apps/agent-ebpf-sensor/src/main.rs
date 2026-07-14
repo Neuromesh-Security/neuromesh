@@ -51,8 +51,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let bpf_pin_root = pin_root();
     let mut process_bpf = load_with_map_pinning(SYS_EXEC_BPF, &bpf_pin_root)?;
-    let correlation =
-        start_process_monitor(&mut process_bpf, shutdown.clone()).await?;
+    let correlation = start_process_monitor(&mut process_bpf, shutdown.clone()).await?;
 
     let mut network_bpf = Ebpf::load(NETWORK_FILTER_BPF)?;
     start_network_monitor(
