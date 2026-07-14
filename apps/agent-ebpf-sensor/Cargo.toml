@@ -19,7 +19,13 @@ path = "src/bin/verify_ebpf.rs"
 
 [features]
 default = []
-orchestrator = ["kafka-stream", "kafka-ingestion", "dep:tracing-subscriber"]
+orchestrator = [
+    "kafka-stream",
+    "kafka-ingestion",
+    "dep:tracing-subscriber",
+    "dep:prometheus",
+    "dep:axum",
+]
 kafka-stream = ["dep:rskafka"]
 kafka-ingestion = ["dep:rdkafka"]
 
@@ -49,6 +55,8 @@ prost = "0.13"
 rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
 rskafka = { version = "0.6", optional = true }
 tokio-util = "0.7"
+prometheus = { version = "0.13", optional = true }
+axum = { version = "0.7", optional = true }
 
 [package.metadata.coverage]
 minimum-line-coverage = 70
