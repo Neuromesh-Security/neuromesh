@@ -40,10 +40,12 @@ fn configure_enforcement_bytecode() {
 
     let abs = if path.is_absolute() {
         path
-    } else if path.starts_with("apps/")
-        && let Ok(workspace) = std::env::var("CARGO_WORKSPACE_DIR")
-    {
-        PathBuf::from(workspace).join(path)
+    } else if path.starts_with("apps/") {
+        if let Ok(workspace) = std::env::var("CARGO_WORKSPACE_DIR") {
+            PathBuf::from(workspace).join(&path)
+        } else {
+            manifest_dir.join(&path)
+        }
     } else {
         manifest_dir.join(path)
     };
