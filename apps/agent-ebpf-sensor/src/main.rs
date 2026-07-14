@@ -1,6 +1,6 @@
 use agent_ebpf_sensor::ingestion;
 use agent_ebpf_sensor::monitoring::{
-    start_network_monitor, start_process_monitor, CorrelationEngine,
+    start_network_monitor, start_process_monitor,
 };
 use agent_ebpf_sensor::pipeline::TelemetryPipeline;
 use agent_ebpf_sensor::rules::RuleEngine;
@@ -42,11 +42,10 @@ async fn main() -> Result<(), anyhow::Error> {
     lsm_program.load("bprm_check_security", &btf)?;
     lsm_program.attach()?;
 
-    let correlation = CorrelationEngine::new();
     let correlation_ingestion = ingestion::spawn_from_env().await;
 
     let mut process_bpf = Ebpf::load(SYS_EXEC_BPF)?;
-    start_process_monitor(&mut process_bpf, Arc::clone(&correlation)).await?;
+    let correlation = start_process_monitor(&mut process_bpf).await?;
 
     let mut network_bpf = Ebpf::load(NETWORK_FILTER_BPF)?;
     start_network_monitor(

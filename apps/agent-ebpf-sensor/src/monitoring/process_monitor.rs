@@ -1,4 +1,7 @@
 //! Async RingBuf consumer for C `sys_enter_execve` visibility events.
+//!
+//! Hot path: AsyncFd poll → zero-copy `ProcessEvent` decode → bounded MPSC try_send.
+//! Worker task: correlation registration + rate-limited observability logging.
 
 use crate::monitoring::correlation::CorrelationEngine;
 use crate::monitoring::event::{ProcessEvent, ProcessEventHandler};
@@ -7,19 +10,26 @@ use aya::maps::RingBuf;
 use aya::programs::TracePoint;
 use aya::Ebpf;
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
-use tracing::info;
+use tokio::sync::mpsc::error::TrySendError;
+use tracing::{info, warn};
 
 pub const PROCESS_EVENTS_MAP: &str = "PROCESS_EVENTS";
 pub const SYS_EXEC_PROGRAM: &str = "neuromesh_process_events";
 
-/// Attach the C tracepoint and spawn a Tokio task that drains `PROCESS_EVENTS`.
-pub async fn start_process_monitor(
-    bpf: &mut Ebpf,
-    correlation: Arc<CorrelationEngine>,
-) -> Result<()> {
+/// Bounded queue between kernel RingBuf drain and user-space processing.
+pub const DEFAULT_PROCESS_CHANNEL_CAPACITY: usize = 8192;
+pub const PROCESS_PRESSURE_DROP_THRESHOLD_PCT: usize = 90;
+const DROP_WARN_INTERVAL: u64 = 10_000;
+
+/// Attach the C tracepoint, spawn an async RingBuf poller with backpressure, and return
+/// the shared correlation engine for downstream network enrichment.
+pub async fn start_process_monitor(bpf: &mut Ebpf) -> Result<Arc<CorrelationEngine>> {
     let program: &mut TracePoint = bpf
         .program_mut(SYS_EXEC_PROGRAM)
         .with_context(|| format!("eBPF program `{SYS_EXEC_PROGRAM}` missing from object file"))?
@@ -37,30 +47,76 @@ pub async fn start_process_monitor(
             format!("BPF map `{PROCESS_EVENTS_MAP}` missing from object file")
         })?)?;
 
-    let mut async_ring = AsyncFd::new(ring_buf)?;
+    let channel_capacity = std::env::var("NEUROMESH_PROCESS_CHANNEL_CAPACITY")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_PROCESS_CHANNEL_CAPACITY);
 
+    let correlation = CorrelationEngine::new();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ProcessEvent>(channel_capacity);
+
+    let worker_correlation = Arc::clone(&correlation);
     tokio::spawn(async move {
         let mut handler = ProcessEventHandler::default();
+        while let Some(event) = event_rx.recv().await {
+            worker_correlation.register_process(event.pid, &event.filename);
+            handler.observe(&event);
+        }
+    });
+
+    let mut async_ring = AsyncFd::new(ring_buf)?;
+    let dropped = Arc::new(AtomicU64::new(0));
+    let drop_counter = Arc::clone(&dropped);
+    let pressure_threshold = channel_capacity
+        .saturating_mul(PROCESS_PRESSURE_DROP_THRESHOLD_PCT)
+        .saturating_div(100);
+
+    tokio::spawn(async move {
         loop {
             let poll_result = async_ring
                 .async_io_mut(Interest::READABLE, |ring| {
                     while let Some(item) = ring.next() {
-                        let event =
-                            unsafe { ptr::read_unaligned(item.as_ptr() as *const ProcessEvent) };
-                        let pid = event.pid;
-                        correlation.register_process(pid, &event.filename);
-                        handler.observe(&event);
+                        let event = unsafe {
+                            ptr::read_unaligned(item.as_ptr() as *const ProcessEvent)
+                        };
+
+                        match event_tx.try_send(event) {
+                            Ok(()) => {}
+                            Err(TrySendError::Full(_)) => {
+                                let total = drop_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                                if total == 1 || total.is_multiple_of(DROP_WARN_INTERVAL) {
+                                    warn!(
+                                        target: "neuromesh::process_monitor",
+                                        dropped = total,
+                                        channel_capacity,
+                                        pressure_threshold_pct = PROCESS_PRESSURE_DROP_THRESHOLD_PCT,
+                                        "PROCESS_EVENTS backpressure: dropping execve events (user-space channel full)"
+                                    );
+                                }
+                            }
+                            Err(TrySendError::Closed(_)) => return Ok(()),
+                        }
                     }
                     Ok(())
                 })
                 .await;
 
             if let Err(error) = poll_result {
-                tracing::warn!("PROCESS_EVENTS ring buffer poll failed: {error:#}");
+                warn!(
+                    target: "neuromesh::process_monitor",
+                    error = %error,
+                    "PROCESS_EVENTS ring buffer poll failed"
+                );
             }
         }
     });
 
-    info!("Process monitor armed on sys_enter_execve → PROCESS_EVENTS RingBuf");
-    Ok(())
+    info!(
+        target: "neuromesh::process_monitor",
+        channel_capacity,
+        pressure_threshold_pct = PROCESS_PRESSURE_DROP_THRESHOLD_PCT,
+        "Process monitor armed on sys_enter_execve → PROCESS_EVENTS RingBuf (async consumer with backpressure)"
+    );
+
+    Ok(correlation)
 }
