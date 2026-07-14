@@ -36,10 +36,14 @@ fn configure_enforcement_bytecode() {
         manifest_dir.join("ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf");
     let path = std::env::var("NEUROMESH_EBPF_ENFORCEMENT_BYTECODE")
         .map(PathBuf::from)
-        .unwrap_or(default);
+        .unwrap_or_else(|_| default.clone());
 
     let abs = if path.is_absolute() {
         path
+    } else if path.starts_with("apps/")
+        && let Ok(workspace) = std::env::var("CARGO_WORKSPACE_DIR")
+    {
+        PathBuf::from(workspace).join(path)
     } else {
         manifest_dir.join(path)
     };

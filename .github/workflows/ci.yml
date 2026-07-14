@@ -101,9 +101,14 @@ jobs:
           name: ebpf-bytecode-6.8+
           path: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release
 
+      - name: Export eBPF bytecode path for orchestrator builds
+        run: |
+          BPF="${GITHUB_WORKSPACE}/apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf"
+          ls -la "$(dirname "$BPF")"
+          test -f "$BPF"
+          echo "NEUROMESH_EBPF_ENFORCEMENT_BYTECODE=${BPF}" >> "${GITHUB_ENV}"
+
       - name: Enterprise sensor tests (fuzz + chaos harness)
-        env:
-          NEUROMESH_EBPF_ENFORCEMENT_BYTECODE: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
         run: |
           cargo test -p agent-ebpf-sensor --test event_parser_fuzz_test
           cargo test -p agent-ebpf-sensor --test chaos_engineering_test --features orchestrator
