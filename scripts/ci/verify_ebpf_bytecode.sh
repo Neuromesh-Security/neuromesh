@@ -23,8 +23,14 @@ fi
 ulimit -l unlimited 2>/dev/null || true
 
 cd "${ROOT_DIR}"
+
+# Sudo builds must not share CARGO_TARGET_DIR with later user-space cargo steps
+# (root-owned .cargo-build-lock causes "Permission denied (os error 13)").
+VERIFY_TARGET_DIR="${NEUROMESH_VERIFY_CARGO_TARGET_DIR:-target/ebpf-verify-cargo}"
+
 sudo -E env \
   PATH="${PATH}" \
   CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}" \
+  CARGO_TARGET_DIR="${VERIFY_TARGET_DIR}" \
   CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}" \
   cargo run -q -p agent-ebpf-sensor --bin verify-ebpf -- "${BPF_OBJECT}"

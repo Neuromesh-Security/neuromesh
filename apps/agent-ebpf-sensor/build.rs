@@ -22,6 +22,44 @@ fn main() {
     for (source, output) in BPF_SOURCES {
         compile_bpf(source, output);
     }
+
+    if std::env::var("CARGO_FEATURE_ORCHESTRATOR").is_ok() {
+        configure_enforcement_bytecode();
+    }
+}
+
+/// Resolve Ring 0 enforcement bytecode for `include_bytes!` in the orchestrator binary.
+fn configure_enforcement_bytecode() {
+    let default = PathBuf::from("ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf");
+    let path = std::env::var("NEUROMESH_EBPF_ENFORCEMENT_BYTECODE")
+        .map(PathBuf::from)
+        .unwrap_or(default);
+
+    let abs = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .expect("current dir")
+            .join(path)
+    };
+
+    println!("cargo:rerun-if-env-changed=NEUROMESH_EBPF_ENFORCEMENT_BYTECODE");
+    println!(
+        "cargo:rerun-if-changed=ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf"
+    );
+
+    if !abs.is_file() {
+        panic!(
+            "eBPF enforcement bytecode not found at {}. \
+             Build apps/agent-ebpf-sensor/ebpf first or set NEUROMESH_EBPF_ENFORCEMENT_BYTECODE.",
+            abs.display()
+        );
+    }
+
+    println!(
+        "cargo:rustc-env=NEUROMESH_EBPF_ENFORCEMENT_BYTECODE={}",
+        abs.display()
+    );
 }
 
 fn compile_bpf(source: &str, output: &str) {

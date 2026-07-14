@@ -57,7 +57,9 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: lint
+    needs: [lint, build-ebpf]
+    env:
+      CARGO_TARGET_DIR: target/ci-test
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -92,6 +94,12 @@ jobs:
 
       - name: Unit tests — sensor library
         run: cargo test -p agent-ebpf-sensor --lib
+
+      - name: Download eBPF bytecode (orchestrator compile gate)
+        uses: actions/download-artifact@v4
+        with:
+          name: ebpf-bytecode-6.8+
+          path: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release
 
       - name: Enterprise sensor tests (fuzz + chaos harness)
         run: |
@@ -178,6 +186,7 @@ jobs:
     needs: build-ebpf
     env:
       CARGO_TARGET_DIR: target/ebpf-verifier-${{ matrix.kernel }}
+      NEUROMESH_VERIFY_CARGO_TARGET_DIR: target/ebpf-verifier-sudo-${{ matrix.kernel }}
     strategy:
       fail-fast: false
       matrix:
@@ -231,6 +240,8 @@ jobs:
           bash scripts/ci/verify_ebpf_bytecode.sh apps/agent-ebpf-sensor/target/bpf/network_filter.bpf.o
 
       - name: Enterprise sensor tests (kernel ${{ matrix.kernel }})
+        env:
+          CARGO_TARGET_DIR: target/ebpf-verifier-tests-${{ matrix.kernel }}
         run: |
           cargo test -p agent-ebpf-sensor --lib
           cargo test -p agent-ebpf-sensor --test event_parser_fuzz_test
