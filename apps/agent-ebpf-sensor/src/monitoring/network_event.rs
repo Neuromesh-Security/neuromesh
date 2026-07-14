@@ -102,6 +102,11 @@ mod tests {
     }
 
     #[test]
+    fn from_bytes_unaligned_rejects_truncated_records() {
+        assert!(NetworkEvent::from_bytes_unaligned(&[0u8; 4]).is_none());
+    }
+
+    #[test]
     fn handler_observes_packed_event_without_field_refs() {
         let mut handler = NetworkEventHandler::default();
         let event = NetworkEvent {

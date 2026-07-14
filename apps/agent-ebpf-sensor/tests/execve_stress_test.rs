@@ -4,11 +4,14 @@
 //! # Usage (Linux, agent running with process monitor armed)
 //!
 //! ```bash
-//! # Default: 64 workers × 30s burst via /bin/true
-//! cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
+//! # Standard tier (~100k eps target): 128 workers × 30s
+//! EXECVE_STRESS_TIER=standard cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
 //!
-//! # Aggressive burst tuned to exceed 500k/sec kernel token bucket
-//! EXECVE_STRESS_WORKERS=256 EXECVE_STRESS_DURATION_SECS=60 \
+//! # Extreme tier (~500k eps target): 512 workers × 60s
+//! EXECVE_STRESS_TIER=extreme cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
+//!
+//! # Chaos pairing — shrink agent channel + watch /metrics during burst
+//! EXECVE_STRESS_CHAOS=1 EXECVE_STRESS_TIER=extreme \
 //!   cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
 //! ```
 //!
@@ -16,38 +19,44 @@
 //! - Kernel-side: `RATE_LIMIT_DROPS` map growth (via bpftool if instrumented)
 //! - User-space: `PROCESS_EVENTS backpressure: dropping execve events (user-space channel full)`
 
+mod common;
+
+use common::{ChaosHints, StressTier};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const DEFAULT_WORKERS: usize = 64;
-const DEFAULT_DURATION_SECS: u64 = 30;
 const DEFAULT_TARGET_BINARY: &str = "/bin/true";
 
 struct StressConfig {
+    tier: StressTier,
     workers: usize,
     duration: Duration,
     binary: Arc<str>,
+    chaos: ChaosHints,
 }
 
 impl StressConfig {
     fn from_env() -> Self {
+        let tier = StressTier::from_env();
         let workers = std::env::var("EXECVE_STRESS_WORKERS")
             .ok()
             .and_then(|value| value.parse().ok())
-            .unwrap_or(DEFAULT_WORKERS);
+            .unwrap_or_else(|| tier.default_workers());
         let duration_secs = std::env::var("EXECVE_STRESS_DURATION_SECS")
             .ok()
             .and_then(|value| value.parse().ok())
-            .unwrap_or(DEFAULT_DURATION_SECS);
+            .unwrap_or_else(|| tier.default_duration_secs());
         let binary = std::env::var("EXECVE_STRESS_BINARY")
             .unwrap_or_else(|_| DEFAULT_TARGET_BINARY.to_string());
 
         Self {
+            tier,
             workers: workers.max(1),
             duration: Duration::from_secs(duration_secs.max(1)),
             binary: Arc::from(binary.as_str()),
+            chaos: ChaosHints::from_env(),
         }
     }
 }
@@ -104,7 +113,7 @@ async fn worker_loop(deadline: Instant, binary: Arc<str>, metrics: Arc<StressMet
 }
 
 #[cfg(unix)]
-async fn metrics_reporter(deadline: Instant, metrics: Arc<StressMetrics>) {
+async fn metrics_reporter(deadline: Instant, metrics: Arc<StressMetrics>, target_eps: u64) {
     let mut last_total = 0u64;
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -113,8 +122,9 @@ async fn metrics_reporter(deadline: Instant, metrics: Arc<StressMetrics>) {
         interval.tick().await;
         let current = metrics.spawned();
         let delta = current.saturating_sub(last_total);
+        let pct = (delta as f64 / target_eps as f64) * 100.0;
         eprintln!(
-            "[execve-stress] syscalls/sec: {delta} | cumulative: {current} | failed: {}",
+            "[execve-stress] syscalls/sec: {delta} ({pct:.1}% of {target_eps} target) | cumulative: {current} | failed: {}",
             metrics.failed()
         );
         last_total = current;
@@ -136,8 +146,9 @@ async fn run_stress_burst(config: &StressConfig) -> (u64, u64) {
     }
 
     let reporter_metrics = Arc::clone(&metrics);
+    let target_eps = config.tier.target_eps();
     let reporter = tokio::spawn(async move {
-        metrics_reporter(deadline, reporter_metrics).await;
+        metrics_reporter(deadline, reporter_metrics, target_eps).await;
     });
 
     for worker in workers {
@@ -149,18 +160,25 @@ async fn run_stress_burst(config: &StressConfig) -> (u64, u64) {
 }
 
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "manual Linux load test — run with: cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture"]
-async fn bombard_execve_for_rate_limit_validation() {
+async fn run_tiered_burst(tier: StressTier) {
+    std::env::set_var(
+        "EXECVE_STRESS_TIER",
+        match tier {
+            StressTier::Standard => "standard",
+            StressTier::Extreme => "extreme",
+        },
+    );
+
     let config = StressConfig::from_env();
+    config.chaos.log_guidance();
+
     eprintln!(
-        "[execve-stress] starting burst workers={} duration={}s binary={}",
+        "[execve-stress] tier={:?} workers={} duration={}s binary={} target_eps={}",
+        config.tier,
         config.workers,
         config.duration.as_secs(),
-        config.binary
-    );
-    eprintln!(
-        "[execve-stress] target: trigger RATE_LIMIT_DROPS (kernel) and channel-full warnings (user-space)"
+        config.binary,
+        config.tier.target_eps()
     );
 
     let started = Instant::now();
@@ -169,7 +187,8 @@ async fn bombard_execve_for_rate_limit_validation() {
     let average_eps = spawned as f64 / elapsed;
 
     eprintln!(
-        "[execve-stress] complete spawned={spawned} failed={failed} elapsed={elapsed:.2}s average_eps={average_eps:.0}"
+        "[execve-stress] complete spawned={spawned} failed={failed} elapsed={elapsed:.2}s average_eps={average_eps:.0} target_eps={}",
+        config.tier.target_eps()
     );
 
     assert!(
@@ -178,9 +197,30 @@ async fn bombard_execve_for_rate_limit_validation() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "manual Linux load test — standard tier (~100k eps): cargo test -p agent-ebpf-sensor --test execve_stress_test standard_tier -- --ignored --nocapture"]
+async fn standard_tier_execve_burst_targets_100k_eps() {
+    run_tiered_burst(StressTier::Standard).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "manual Linux load test — extreme tier (~500k eps): cargo test -p agent-ebpf-sensor --test execve_stress_test extreme_tier -- --ignored --nocapture"]
+async fn extreme_tier_execve_burst_targets_500k_eps() {
+    run_tiered_burst(StressTier::Extreme).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "manual Linux load test — legacy entrypoint: cargo test -p agent-ebpf-sensor --test execve_stress_test bombard_execve -- --ignored --nocapture"]
+async fn bombard_execve_for_rate_limit_validation() {
+    run_tiered_burst(StressTier::from_env()).await;
+}
+
 #[cfg(not(unix))]
 #[test]
 #[ignore = "execve stress test requires a Unix host"]
-fn bombard_execve_requires_unix() {
+fn execve_stress_requires_unix() {
     eprintln!("[execve-stress] skipped: requires Linux/macOS with /bin/true");
 }

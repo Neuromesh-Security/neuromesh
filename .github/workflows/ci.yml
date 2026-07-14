@@ -77,6 +77,9 @@ jobs:
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
 
+      - name: Install native build deps (orchestrator + C BPF)
+        run: sudo apt-get update && sudo apt-get install -y clang llvm cmake g++ gcc build-essential pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
+
       - name: cargo check — workspace libraries
         run: |
           cargo check -p neuromesh-common
@@ -89,6 +92,12 @@ jobs:
 
       - name: Unit tests — sensor library
         run: cargo test -p agent-ebpf-sensor --lib
+
+      - name: Enterprise sensor tests (fuzz + chaos harness)
+        run: |
+          cargo test -p agent-ebpf-sensor --test event_parser_fuzz_test
+          cargo test -p agent-ebpf-sensor --test chaos_engineering_test --features orchestrator
+          cargo test -p agent-ebpf-sensor --test execve_stress_test --no-run
 
       - name: Unit tests — telemetry
         run: cargo test -p neuromesh-telemetry
@@ -220,6 +229,13 @@ jobs:
         run: |
           bash scripts/ci/verify_ebpf_bytecode.sh apps/agent-ebpf-sensor/target/bpf/sys_exec.bpf.o
           bash scripts/ci/verify_ebpf_bytecode.sh apps/agent-ebpf-sensor/target/bpf/network_filter.bpf.o
+
+      - name: Enterprise sensor tests (kernel ${{ matrix.kernel }})
+        run: |
+          cargo test -p agent-ebpf-sensor --lib
+          cargo test -p agent-ebpf-sensor --test event_parser_fuzz_test
+          cargo test -p agent-ebpf-sensor --test chaos_engineering_test --features orchestrator
+          cargo test -p agent-ebpf-sensor --test execve_stress_test --no-run
 
   performance-regression:
     name: Performance Regression
