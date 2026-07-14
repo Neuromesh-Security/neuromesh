@@ -1,31 +1,37 @@
-# Neuromesh Performance Baseline
+# Neuromesh Performance Baseline — eBPF Sensor Core
 
-**Status:** Measured baseline  
-**Date:** 2026-07-12  
-**Harness:** [Criterion.rs](https://github.com/bheisler/criterion.rs) v0.5  
-**Target:** `agent-ebpf-sensor` user-space Fast Path (`RuleEngine`, `DataNormalizer`)  
-**Environment:** Linux x86_64 (Docker `rust:1-bookworm`, release profile, CPU unconstrained)
-
-## Executive Summary
-
-Neuromesh user-space detection logic operates at **sub-microsecond per-event latency** for the hot paths exercised in production telemetry streams. Processing 10,000 benign `execve` events completes in **~1.9 ms** — demonstrating near-zero orchestrator overhead relative to syscall and network I/O costs.
-
-| Component | Per-event latency (median) | 10,000-event batch (median) |
-|-----------|---------------------------|-----------------------------|
-| `RuleEngine` (benign whitelist hit) | **115 ns** | **1.90 ms** |
-| `DataNormalizer` (single spawn ingest) | **956 ns** | **1.07 s** (full burst replay) |
-
-These measurements validate enterprise procurement requirements: security decisions in user space add **nanosecond-scale** overhead, not millisecond-scale tax.
+**Status:** Measured (user space) · Pending live kernel validation  
+**Release:** `v0.1.0-core`  
+**Date:** 2026-07-14  
+**Component:** `apps/agent-ebpf-sensor`  
+**Harness:** [Criterion.rs](https://github.com/bheisler/criterion.rs) v0.5 (user space) · `execve_stress_test` (kernel load)  
+**Environment:** Linux x86_64, release profile
 
 ---
 
-## Benchmark Results (Criterion Output)
+## Executive Summary
 
-Captured via:
+The eBPF Sensor Core adds **sub-microsecond user-space detection overhead** on the LSM telemetry hot path and implements **kernel-side rate limiting at ~500k execve events/sec per CPU** before events reach user space. This document separates **measured** micro-benchmark results from **reproducible load-test procedures** used to populate end-to-end kernel metrics post-CI.
+
+| Layer | Median latency | Throughput | Measurement status |
+|-------|----------------|------------|-------------------|
+| User-space `RuleEngine` (benign) | **115 ns** | **8.69 Melem/s** | Measured (Criterion) |
+| User-space `DataNormalizer` (spawn) | **956 ns** | **1.05 Melem/s** | Measured (Criterion) |
+| Combined benign detection path | **~1.07 µs** | — | Derived |
+| Kernel execve capture (tracepoint) | _TBD_ | Up to **500k EPS/CPU** (rate limit) | Load test required |
+| RingBuf → user-space drain | _TBD_ | Bounded by MPSC (default 8192) | Load test required |
+
+---
+
+## 1. User-Space Detection Pipeline (Measured)
+
+### Reproduction
 
 ```bash
 cargo bench -p agent-ebpf-sensor --bench detection_pipeline -- --noplot
 ```
+
+HTML reports: `target/criterion/`
 
 ### RuleEngine
 
@@ -43,11 +49,9 @@ rule_engine/evaluate_batch/10000
                         thrpt:  [638.22 elem/s 679.22 elem/s 723.37 elem/s]
 ```
 
-**Derived metrics:**
-
 | Metric | Value |
 |--------|-------|
-| Median single benign evaluation | **115 ns** (~0.115 µs) |
+| Median single benign evaluation | **115 ns** |
 | Median throughput (single) | **8.69 Melem/s** |
 | Median 10k batch wall time | **1.90 ms** |
 | Amortized cost per event (10k batch) | **~190 ns** |
@@ -64,179 +68,220 @@ data_normalizer/ingest_single_spawn_event
                         thrpt:  [963.53 Kelem/s 1.0459 Melem/s 1.1418 Melem/s]
 ```
 
-**Derived metrics:**
-
 | Metric | Value |
 |--------|-------|
-| Median single spawn ingest | **956 ns** (~0.96 µs) |
+| Median single spawn ingest | **956 ns** |
 | Median throughput (single) | **1.05 Melem/s** |
 | Median 10k burst replay | **1.07 s** |
 | Amortized cost per event (10k burst) | **~107 µs** |
 
-> **Note:** The 10k burst benchmark constructs a fresh `DataNormalizer` per iteration (worst-case isolation). Production pipelines reuse a single instance; single-event ingest (**956 ns**) is the representative hot-path metric.
+> The 10k burst benchmark constructs a fresh `DataNormalizer` per iteration (worst-case isolation). Production reuses a single instance; **956 ns** is the representative hot-path metric.
 
----
-
-## Time Complexity Analysis
-
-### RuleEngine — `evaluate(event)`
-
-| Step | Operation | Complexity | Rationale |
-|------|-----------|------------|-----------|
-| Path extraction | `CStr` parse from fixed `filename[256]` | **O(1)** | Bounded buffer, single NUL scan |
-| Whitelist check | 4-path static array `.contains()` | **O(1)** | Fixed cardinality whitelist |
-| Blacklist check | 3-prefix `starts_with()` | **O(1)** | Fixed prefix count, bounded path length |
-| Alert construction | Struct fill on match | **O(1)** | Only on blacklist hit (rare path) |
-
-**Hot path (benign):** Two O(1) lookups → **constant time per event**.
-
-### DataNormalizer — `ingest(event)`
-
-| Step | Operation | Complexity | Rationale |
-|------|-----------|------------|-----------|
-| Batch push | `Vec::push` | **O(1)** amortized | Pre-allocated capacity |
-| Parent lookup | `HashMap<ppid, Vec<Instant>>` | **O(1)** amortized | Per-parent spawn tracking |
-| Window retain | Filter stale timestamps | **O(k)** | `k` = spawns from parent in window (bounded by burst threshold ≈ 8) |
-| Alert emission | Struct construction | **O(1)** | Only when threshold exceeded |
-
-**Hot path (below burst threshold):** HashMap insert + bounded retain → **O(1) amortized** per event.
-
-### End-to-End Fast Path (user space only)
+### End-to-end user-space path
 
 ```
 RingBuf read → RuleEngine::evaluate → DataNormalizer::ingest
-≈ 115 ns + 956 ns ≈ 1.07 µs per benign event (median)
+≈ 115 ns + 956 ns ≈ 1.07 µs per benign LSM telemetry event (median)
 ```
 
-Kernel eBPF capture (Ring 0) is excluded from this baseline; it operates in the syscall hot path with separate BPF verifier guarantees.
+Kernel eBPF capture latency is measured separately (Section 2).
 
 ---
 
-## Procurement Positioning
+## 2. Kernel eBPF Telemetry Pipeline
 
-| Question | Answer |
-|----------|--------|
-| *"How much does this slow my server?"* | User-space logic adds **~1 µs** per benign exec event. |
-| *"Can it keep up with production traffic?"* | RuleEngine sustains **>8M evaluations/sec** on a single core (benign path). |
-| *"What about fork-bomb detection?"* | Single ingest **<1 µs**; burst analysis is bounded by sliding window size, not total process count. |
+### 2.1 Architecture under test
 
----
+| Hook | Program | RingBuf | Backpressure mechanism |
+|------|---------|---------|------------------------|
+| `sys_enter_execve` | `neuromesh_process_events` | `PROCESS_EVENTS` (256 KiB) | Per-CPU token bucket (~500k/sec) → `RATE_LIMIT_DROPS` |
+| `tcp_connect` | `neuromesh_tcp_connect` | `NETWORK_EVENTS` (256 KiB) | RingBuf reserve failure → `DROPPED_EVENTS` |
+| `bprm_check_security` | `neuromesh_lsm_exec_guard` | `TELEMETRY_RINGBUF` (256 KiB) | Reserve failure → `TELEMETRY_STATS.lost_events_count` |
 
-## Reproducing Locally
+User-space execve consumer: `process_monitor.rs` — AsyncFd poller → bounded MPSC (default **8192**) → correlation worker.
+
+### 2.2 Latency overhead (execve syscall path)
+
+Measure the incremental cost of attaching the execve tracepoint using `perf` on a quiescent node, then under agent load.
 
 ```bash
-# Compile benchmarks (CI safety check)
-cargo bench -p agent-ebpf-sensor --no-run
+# Baseline: execve rate without agent
+perf stat -e syscalls:sys_enter_execve -a -- sleep 30 &
+BURST_PID=$!
+# ... run stress generator ...
+wait $BURST_PID
 
-# Run full suite (requires Linux/macOS; no eBPF kernel needed)
-cargo bench -p agent-ebpf-sensor --bench detection_pipeline
+# With agent: compare syscalls/sec and CPU cycles
+sudo perf stat -e syscalls:sys_enter_execve,cycles,instructions \
+  -p $(pgrep -x agent-ebpf-sensor) -- sleep 30
 ```
 
-HTML reports are emitted to `target/criterion/`.
+| Scenario | Syscall rate | Agent CPU (cores) | Incremental execve latency | Status |
+|----------|--------------|-------------------|---------------------------|--------|
+| Idle agent | — | _TBD_ | _TBD_ | Post-CI |
+| Standard burst (100k EPS target) | 100k/sec | _TBD_ | _TBD_ | Post-CI |
+| Extreme burst (500k EPS target) | 500k/sec | _TBD_ | _TBD_ | Post-CI |
+
+> **Graph placeholder:** `docs/assets/perf-execve-latency-overhead.svg` — plot p50/p99 execve latency delta (agent attached vs detached) across EPS tiers. Generate from `perf stat` JSON export after CI run.
+
+### 2.3 RingBuf drop rates
+
+#### Kernel-side drops
+
+| Map / counter | Trigger | User-space reader |
+|---------------|---------|-------------------|
+| `RATE_LIMIT_DROPS` | Token bucket exhausted (>500k evt/s per CPU) | Health monitor → `ebpf_events_dropped_total` |
+| `DROPPED_EVENTS` (network) | `bpf_ringbuf_reserve` failure on `NETWORK_EVENTS` | Not exported to Prometheus (v0.1.0-core) |
+| `TELEMETRY_STATS.lost_events_count` | LSM RingBuf reserve failure | Polled every 5s in `main.rs` |
+
+#### User-space drops
+
+| Trigger | Signal |
+|---------|--------|
+| MPSC channel full (`NEUROMESH_PROCESS_CHANNEL_CAPACITY`) | Rate-limited warn every 10k drops; `ebpf_events_dropped_total` |
+| Kafka ingestion backpressure | Bounded channel drop (network correlation path) |
+
+#### Drop rate formula
+
+```
+drop_rate = (kernel_drops + userspace_drops) / (processed + kernel_drops + userspace_drops)
+
+observed_drop_rate ≈ max(0, generated_eps − min(500_000, user_space_drain_rate))
+```
+
+| Load tier | Target EPS | Expected kernel drops | Expected user-space drops | Measured drop rate | Status |
+|-----------|------------|----------------------|--------------------------|-------------------|--------|
+| Below ceiling | < 100k | 0 | 0 | _TBD_ | Post-CI |
+| Standard | 100k | 0 (at limit) | 0 | _TBD_ | Post-CI |
+| Extreme | 500k+ | > 0 (by design) | 0–_TBD_ | _TBD_ | Post-CI |
+| Chaos (MPSC=64) | 100k+ | 0 | > 0 (by design) | _TBD_ | Post-CI |
+
+> **Graph placeholder:** `docs/assets/perf-ringbuf-drop-rate.svg` — time-series of `ebpf_events_dropped_total` / (`processed` + `dropped`) during `execve_stress_test` standard and extreme tiers.
+
+### 2.4 CPU utilization
+
+Scrape agent CPU during steady state and burst:
+
+```bash
+# Steady state (5 min idle node with agent running)
+pidstat -u -p $(pgrep -x agent-ebpf-sensor) 5 60
+
+# During burst (Terminal 2)
+EXECVE_STRESS_TIER=standard \
+  cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
+```
+
+| Scenario | Agent CPU (% of 1 core) | Agent RSS (MiB) | Node CPU delta | Status |
+|----------|----------------------|-----------------|----------------|--------|
+| Idle (no workload) | _TBD_ | _TBD_ | _TBD_ | Post-CI |
+| Standard burst (100k EPS, 30s) | _TBD_ | _TBD_ | _TBD_ | Post-CI |
+| Extreme burst (500k EPS, 60s) | _TBD_ | _TBD_ | _TBD_ | Post-CI |
+| Post-burst recovery (60s) | _TBD_ | _TBD_ | _TBD_ | Post-CI |
+
+DaemonSet resource defaults (`deploy/kubernetes/neuromesh-agent.yaml`): request **100m** CPU, limit **500m** CPU, limit **512Mi** memory.
+
+> **Graph placeholder:** `docs/assets/perf-cpu-utilization.svg` — agent CPU % vs generator EPS during standard/extreme tiers.
 
 ---
 
-## CI Policy
-
-Benchmarks are **compiled but not executed** in GitHub Actions (`cargo bench --no-run`). Cloud runner variance makes numeric gates unreliable; compile-time verification prevents benchmark drift during refactors.
-
----
-
-## Load Testing Methodology
-
-The `execve` syscall generator (`apps/agent-ebpf-sensor/tests/execve_stress_test.rs`) validates end-to-end resilience of the kernel token-bucket rate limiter (`RATE_LIMIT_BUCKET` / `RATE_LIMIT_DROPS`) and the Rust async RingBuf consumer backpressure path (`NEUROMESH_PROCESS_CHANNEL_CAPACITY`, default **8192**).
+## 3. Load Testing Methodology
 
 ### Prerequisites
 
 | Requirement | Rationale |
 |-------------|-----------|
-| Linux host with `/bin/true` | Each iteration issues a real `execve` syscall |
+| Linux host with `/bin/true` | Real `execve` syscalls per iteration |
 | `agent-ebpf-sensor` running with process monitor armed | Consumes `PROCESS_EVENTS` RingBuf |
-| Root or `CAP_BPF` + `CAP_PERFMON` on agent | eBPF tracepoint must be attached |
+| root or `CAP_BPF` + `CAP_PERFMON` | Tracepoint attach |
+
+### Stress tiers
+
+Defined in `apps/agent-ebpf-sensor/tests/common/stress_profile.rs`:
+
+| Tier | Env | Workers | Duration | Target EPS |
+|------|-----|---------|----------|------------|
+| Standard | `EXECVE_STRESS_TIER=standard` | 128 | 30s | **100,000** |
+| Extreme | `EXECVE_STRESS_TIER=extreme` | 512 | 60s | **500,000** |
 
 ### Execution
 
 ```bash
-# Terminal 1 — start orchestrator
+# Terminal 1 — orchestrator
 cargo run -p agent-ebpf-sensor --features orchestrator --release
 
-# Terminal 2 — default burst (64 workers × 30s)
-cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
+# Terminal 2 — standard tier
+EXECVE_STRESS_TIER=standard \
+  cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
 
-# Aggressive burst — designed to exceed 500k events/sec kernel ceiling
-EXECVE_STRESS_WORKERS=256 \
-EXECVE_STRESS_DURATION_SECS=60 \
+# Terminal 2 — extreme tier (expect kernel rate-limit drops)
+EXECVE_STRESS_TIER=extreme \
+  cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
+
+# Chaos: force user-space drops
+EXECVE_STRESS_CHAOS=1 NEUROMESH_PROCESS_CHANNEL_CAPACITY=64 \
   cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
 ```
 
-### Tunable Parameters
+### Tunable parameters
 
 | Environment variable | Default | Purpose |
 |---------------------|---------|---------|
-| `EXECVE_STRESS_WORKERS` | `64` | Concurrent Tokio worker tasks spawning `/bin/true` |
-| `EXECVE_STRESS_DURATION_SECS` | `30` | Wall-clock burst duration |
-| `EXECVE_STRESS_BINARY` | `/bin/true` | Lightweight target binary (minimal fork/exec overhead) |
-| `NEUROMESH_PROCESS_CHANNEL_CAPACITY` | `8192` | User-space MPSC depth (agent-side) |
+| `EXECVE_STRESS_TIER` | `standard` | Preset worker count and duration |
+| `EXECVE_STRESS_WORKERS` | tier-dependent | Concurrent spawn tasks |
+| `EXECVE_STRESS_DURATION_SECS` | tier-dependent | Wall-clock burst duration |
+| `EXECVE_STRESS_BINARY` | `/bin/true` | Target binary |
+| `NEUROMESH_PROCESS_CHANNEL_CAPACITY` | `8192` | User-space MPSC depth |
 
-### Observability Signals
+### Observability during load test
 
 | Layer | Signal | Interpretation |
 |-------|--------|----------------|
-| **Generator stdout** | `syscalls/sec` per-second delta | Raw syscall generation rate |
-| **Generator stdout** | `average_eps` at completion | Mean execve rate over full burst |
-| **Kernel eBPF** | `RATE_LIMIT_DROPS` map counter growth | Token bucket exhausted (>500k/sec per CPU) |
-| **User-space agent** | `PROCESS_EVENTS backpressure: dropping execve events` | MPSC channel saturated (backpressure engaged) |
-
-### Drop Rate Estimation
-
-```
-observed_drop_rate ≈ max(0, generated_eps − min(kernel_rate_limit, user_space_drain_rate))
-```
-
-- **Kernel ceiling:** ~500k events/sec per CPU (`NS_PER_TOKEN=2000`, `MAX_TOKENS=500000` in `sys_exec.bpf.c`)
-- **User-space drain:** bounded by Tokio worker + correlation registration; channel full → explicit drop with rate-limited warn every 10k events
-
-### CI Policy
-
-The stress test is marked `#[ignore]` and **not executed in GitHub Actions**. It is intended for manual pre-release validation on Linux hardware with the live agent attached.
-
-### Enterprise Test Suite (CI)
-
-Kernel-independent suites run on every PR (no root, no live eBPF):
-
-```bash
-cargo test -p agent-ebpf-sensor --test event_parser_fuzz_test
-cargo test -p agent-ebpf-sensor --test chaos_engineering_test --features orchestrator
-cargo test -p agent-ebpf-sensor --test execve_stress_test --no-run   # compile-only gate
-```
-
-The eBPF verifier matrix (`5.15`, `6.1`, `6.8+`) re-runs the same suites per kernel runner to catch toolchain drift.
+| Generator stderr | `syscalls/sec` per-second delta | Raw syscall generation rate |
+| Generator stderr | `average_eps` at completion | Mean execve rate over burst |
+| Kernel | `RATE_LIMIT_DROPS` map growth | Token bucket exhausted |
+| Agent logs | `PROCESS_EVENTS backpressure: dropping execve events` | MPSC saturated |
+| Prometheus | `ebpf_events_processed_total`, `ebpf_events_dropped_total` | Production-grade counters |
 
 ---
 
-## Prometheus Metrics (Enterprise Observability)
+## 4. Time Complexity Analysis
 
-The orchestrator exposes a lightweight Prometheus text endpoint for production scraping.
+### RuleEngine — `evaluate(event)`
 
-### Endpoint
+| Step | Operation | Complexity |
+|------|-----------|------------|
+| Path extraction | `CStr` parse from fixed `filename[256]` | **O(1)** |
+| Whitelist check | 4-path static array | **O(1)** |
+| Blacklist check | 3-prefix `starts_with()` | **O(1)** |
+| Alert construction | Struct fill on match | **O(1)** (rare path) |
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Path | `/metrics` | Prometheus exposition format |
-| Port | `9090` | Override with `NEUROMESH_METRICS_PORT` |
-| Bind | `0.0.0.0` | Dedicated listener (separate from Kafka / detection stdout) |
+### DataNormalizer — `ingest(event)`
 
-### Critical Metrics
+| Step | Operation | Complexity |
+|------|-----------|------------|
+| Batch push | `Vec::push` | **O(1)** amortized |
+| Parent lookup | `HashMap<ppid, Vec<Instant>>` | **O(1)** amortized |
+| Window retain | Filter stale timestamps | **O(k)**, k ≤ burst threshold (8) |
+| Alert emission | Struct construction | **O(1)** on threshold exceed |
+
+### Kernel execve tracepoint
+
+| Step | Operation | Complexity |
+|------|-----------|------------|
+| Rate limit check | Per-CPU token bucket | **O(1)** |
+| RingBuf reserve + submit | Fixed-size `process_event_t` (168 B) | **O(1)** |
+
+---
+
+## 5. Prometheus Metrics
 
 | Metric | Type | Source |
 |--------|------|--------|
-| `ebpf_events_processed_total` | counter | User-space process monitor worker (successful `execve` events) |
-| `ebpf_events_dropped_total` | counter | Kernel `RATE_LIMIT_DROPS` map + MPSC channel-full backpressure |
-| `agent_uptime_seconds` | gauge | Wall-clock seconds since orchestrator start |
+| `ebpf_events_processed_total` | counter | Process monitor worker |
+| `ebpf_events_dropped_total` | counter | `RATE_LIMIT_DROPS` + MPSC backpressure |
+| `agent_uptime_seconds` | gauge | Orchestrator start time |
 
-### Scrape Configuration
-
-**Prometheus `prometheus.yml`:**
+### Scrape configuration
 
 ```yaml
 scrape_configs:
@@ -246,16 +291,43 @@ scrape_configs:
       - targets: ["<agent-host>:9090"]
 ```
 
-**Manual validation (no Prometheus server required):**
+### Manual validation
 
 ```bash
 curl -s http://127.0.0.1:9090/metrics | grep -E 'ebpf_events_|agent_uptime'
 ```
 
-### Health Monitor
-
-A background Tokio task samples kernel and user-space drop counters every **5 seconds** (override with `NEUROMESH_HEALTH_INTERVAL_SECS`). Structured logs are emitted under target `neuromesh::health` for SIEM correlation alongside Prometheus counters.
+Health monitor samples kernel drop counters every **5 seconds** (`NEUROMESH_HEALTH_INTERVAL_SECS`).
 
 ---
 
-*Generated from Criterion measurements on 2026-07-12. Re-run after material changes to `RuleEngine` or `DataNormalizer`.*
+## 6. Enterprise Test Suite (CI)
+
+Kernel-independent suites run on every PR:
+
+```bash
+cargo test -p agent-ebpf-sensor --test event_parser_fuzz_test      # 50k decode fuzz iterations
+cargo test -p agent-ebpf-sensor --test chaos_engineering_test --features orchestrator
+cargo test -p agent-ebpf-sensor --test execve_stress_test --no-run   # compile-only gate
+cargo bench -p agent-ebpf-sensor --no-run                            # benchmark compile gate
+```
+
+eBPF verifier matrix (kernels `5.15`, `6.1`, `6.8+`) re-runs suites per kernel runner.
+
+Stress and live kernel benchmarks are **`#[ignore]`** — not executed in GitHub Actions due to runner variance. Numeric gates are populated via manual pre-release validation on Linux hardware.
+
+---
+
+## 7. Procurement Quick Reference
+
+| Question | Answer (v0.1.0-core) |
+|----------|----------------------|
+| How much user-space tax per exec event? | **~1 µs** (benign LSM path) |
+| Can RuleEngine keep up with production? | **>8M evaluations/sec** per core (benign) |
+| What happens above 500k execve/sec? | Kernel token bucket drops; counted in Prometheus |
+| What is unmeasured today? | Syscall latency delta, burst CPU, live drop rate — run Section 2 procedures |
+| Where are graphs? | Placeholders in Section 2; populate post-CI into `docs/assets/` |
+
+---
+
+*User-space figures measured 2026-07-12 via Criterion. Kernel end-to-end figures pending live hardware validation — re-run this document after each material change to BPF programs or monitor pipeline.*

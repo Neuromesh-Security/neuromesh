@@ -1,110 +1,256 @@
-# Neuromesh Threat Model
+# Neuromesh Threat Model — eBPF Sensor Core
 
 **Status:** Living document  
+**Release scope:** `v0.1.0-core`  
 **Last updated:** 2026-07-14  
-**Scope:** User-space detection pipeline (`RuleEngine`, `DataNormalizer`) and eBPF telemetry contracts
+**Component:** `apps/agent-ebpf-sensor` — kernel hooks, telemetry contracts, user-space detection pipeline
 
-## Assumptions
+---
+
+## 1. Scope and assumptions
+
+### In scope
+
+- C visibility programs: `sys_enter_execve` tracepoint, `tcp_connect` kprobe
+- Rust enforcement program: `bprm_check_security` LSM hook
+- User-space pipelines: `RuleEngine`, `DataNormalizer`, `CorrelationEngine`, Prometheus health
+- Map pinning, rate limiting, and backpressure controls
+
+### Out of scope (v0.1.0-core)
+
+- Rust passive tracepoint `neuromesh_exec_hook` (built, not attached)
+- Wasm policy evaluation on hot path (`wasm_policy.rs` scaffold only)
+- Slow Path GNN inference (`ai-threat-detector`)
+- Full argv/env capture from execve tracepoint context
+
+### Assumptions
 
 - Attackers have unprivileged or compromised user-level access on Linux nodes.
-- Living-off-the-land (LotL) binaries (`bash`, `curl`, `python`) are present and often whitelisted.
-- Kernel eBPF enforcement (LSM) is the synchronous control plane; user-space logic must remain correct when tested offline.
+- Living-off-the-land (LotL) binaries (`bash`, `curl`, `python`, `sh`) are present and often whitelisted.
+- LSM eBPF is the synchronous enforcement plane; user-space logic must remain correct when tested offline without a kernel.
+- Operators monitor `ebpf_events_dropped_total` — unmonitored drops are treated as a production incident.
 
-## Assets
+---
 
-| Asset | Impact if compromised |
-|-------|---------------------|
-| RingBuf telemetry stream | Missed detections, false negatives |
-| RuleEngine policies | Silent allow of malware staging executions |
-| DataNormalizer burst logic | Undetected fork bombs / automated post-exploitation |
-| Orchestrator pipeline | Tampered SIEM / Kafka telemetry |
+## 2. Assets and impact
 
-## MITRE ATT&CK Mapping
+| Asset | Description | Impact if compromised |
+|-------|-------------|----------------------|
+| `PROCESS_EVENTS` RingBuf | High-volume execve telemetry | Missed process visibility, fork-bomb blind spots |
+| `TELEMETRY_RINGBUF` | LSM enforcement telemetry | Missed blocks, silent allow of staging-path execution |
+| `NETWORK_EVENTS` RingBuf | Outbound TCP connect telemetry | Missed C2 / lateral movement signals |
+| `RuleEngine` policies | Whitelist / blacklist path rules | False negatives on staging paths; false positives on admin workflows |
+| `DataNormalizer` | Parent-keyed spawn burst detector | Undetected fork bombs, post-exploitation automation |
+| `CorrelationEngine` | PID → process name cache | Enriched network events lose process attribution |
+| Orchestrator stdout / Kafka | Alert and telemetry export | Tampered or dropped SIEM records |
 
-| Technique | ID | Neuromesh Control | Integration Test Anchor |
-|-----------|-----|-------------------|-------------------------|
-| Command and Scripting Interpreter | [T1059](https://attack.mitre.org/techniques/T1059/) | Tracepoint + RuleEngine path classification | `rule_engine_integration::lotl_bash_from_legitimate_path_is_not_blacklisted` |
-| Unix Shell | [T1059.004](https://attack.mitre.org/techniques/T1059/004/) | Lineage-aware spawn burst detection | `data_normalizer_integration::rapid_spawn_burst_triggers_behavior_alert` |
-| User Execution | [T1204](https://attack.mitre.org/techniques/T1204/) | Blacklist of ephemeral staging directories | `rule_engine_integration::all_malicious_staging_prefixes_are_flagged` |
-| Endpoint Denial of Service | [T1499](https://attack.mitre.org/techniques/T1499/) | Parent-keyed spawn frequency analysis | `data_normalizer_integration::rapid_spawn_burst_triggers_behavior_alert` |
-| Masquerading | [T1036](https://attack.mitre.org/techniques/T1036/) | `comm` + path correlation in telemetry | `pipeline_integration::mock_ringbuf_feeds_pipeline_without_kernel` |
+---
 
-## Test Farm Coverage
+## 3. MITRE ATT&CK mapping — execve telemetry
 
-Integration tests run via `cargo test -p neuromesh-integration-tests` **without** a Linux kernel or eBPF loader:
+### Covered techniques (v0.1.0-core)
+
+| Technique | ID | Neuromesh control | Detection signal | Test anchor |
+|-----------|-----|-------------------|------------------|-------------|
+| Command and Scripting Interpreter | [T1059](https://attack.mitre.org/techniques/T1059/) | LSM path classification + spawn burst analysis | `CRITICAL_ALERT` / `BEHAVIOR_ALERT` JSON | `rule_engine_integration`, `data_normalizer_integration` |
+| Unix Shell | [T1059.004](https://attack.mitre.org/techniques/T1059/004/) | Parent-keyed spawn frequency (`ppid` window) | `NEUROMESH-EXEC-SPAWN-BURST` | `rapid_spawn_burst_triggers_behavior_alert` |
+| User Execution | [T1204](https://attack.mitre.org/techniques/T1204/) | LSM deny + blacklist on ephemeral paths | `NEUROMESH-EXEC-BLACKLIST-PATH` | `all_malicious_staging_prefixes_are_flagged` |
+| Masquerading | [T1036](https://attack.mitre.org/techniques/T1036/) | `comm` + filename in LSM telemetry; PID correlation for network | Enriched network events | `pipeline_integration::mock_ringbuf_feeds_pipeline_without_kernel` |
+| Endpoint Denial of Service | [T1499](https://attack.mitre.org/techniques/T1499/) | Kernel token bucket + spawn burst detection | Rate-limit drops; burst alerts | `execve_stress_test`, `data_normalizer_integration` |
+| Non-Standard Port / Application Layer Protocol | [T1571](https://attack.mitre.org/techniques/T1571/) / [T1071](https://attack.mitre.org/techniques/T1071/) | `tcp_connect` kprobe visibility | Correlated network events → Kafka | Network monitor (manual validation) |
+
+### Partially covered / planned
+
+| Technique | ID | Gap | Planned mitigation |
+|-----------|-----|-----|-------------------|
+| Process Injection | [T1055](https://attack.mitre.org/techniques/T1055/) | No `ptrace`/`memfd_create` hooks | v0.2 hook expansion |
+| Impair Defenses | [T1562.001](https://attack.mitre.org/techniques/T1562/001/) | Attacker with CAP_BPF can detach programs | Agent tamper detection, signed bytecode attestation |
+| Hide Artifacts | [T1070](https://attack.mitre.org/techniques/T1070/) | Short-lived processes may evade correlation | Enriched C tracepoint (`neuromesh_exec_hook`) |
+| Signed Binary Proxy Execution | [T1218](https://attack.mitre.org/techniques/T1218/) | LotL from whitelisted paths without burst | Wasm policies + Slow Path GNN |
+
+---
+
+## 4. `execve` telemetry — threat surface
+
+The `sys_enter_execve` tracepoint is the highest-volume syscall surface in the agent. Attackers can abuse exec visibility for **evasion**, **denial of service**, and **telemetry poisoning** if controls are absent.
+
+### 4.1 Threat scenarios
+
+| ID | Threat | Description | MITRE alignment |
+|----|--------|-------------|-----------------|
+| E-01 | **Exec storm / fork bomb** | High-frequency `execve` floods RingBuf and user-space workers | [T1499](https://attack.mitre.org/techniques/T1499/) |
+| E-02 | **Visibility evasion** | Sub-second processes exit before PID→name correlation registers | [T1036](https://attack.mitre.org/techniques/T1036/) |
+| E-03 | **TOCTOU on argv/path** | User-space reads of `filename` after syscall entry; kernel/userspace views can diverge | [T1059](https://attack.mitre.org/techniques/T1059/) |
+| E-04 | **Agent restart blind spot** | Unpinned maps reset rate-limiter state across crashes | Availability |
+| E-05 | **Staging path execution** | Payload dropped to `/tmp/`, `/dev/shm/`, `/var/tmp/` and executed | [T1204](https://attack.mitre.org/techniques/T1204/) |
+| E-06 | **LotL without burst** | Single invocation of whitelisted binary from benign path | [T1218](https://attack.mitre.org/techniques/T1218/) |
+| E-07 | **BPF program tampering** | Root attacker unloads or replaces agent BPF programs | [T1562.001](https://attack.mitre.org/techniques/T1562/001/) |
+| E-08 | **Rate-limit exhaustion** | Deliberate exec flood forces kernel drops, creating visibility gaps | [T1499](https://attack.mitre.org/techniques/T1499/) |
+
+### 4.2 Kernel-level evasion risks
+
+| Risk | Mechanism | Current exposure (v0.1.0-core) |
+|------|-----------|----------------------------------|
+| **Syscall alternative** | Attacker uses `execveat`, `fexecve`, or `clone3` without `execve` | Only `sys_enter_execve` is hooked; `execveat` not monitored |
+| **Namespace escape context** | Container breakout before agent deploy | Agent must run on host PID namespace (`hostPID: true`) |
+| **BPF hook disable** | `CAP_BPF` + `CAP_SYS_ADMIN` attacker detaches programs | No tamper-evident watchdog in open-source core |
+| **Verifier-minimal telemetry** | C tracepoint emits PID-only records | Filename/argv not available for volume path — correlation gap |
+| **Hardcoded struct offsets** | `task_struct` ppid via fixed offsets (Rust LSM) | Wrong ppid on unsupported kernels → burst detection miss |
+| **Kprobe offset drift** | `tcp_connect` socket field offsets from minimal `vmlinux.h` | Dest IP/port read failure on kernel ABI change |
+| **RingBuf loss under load** | Legitimate high exec rate exceeds 500k/sec/CPU | Events dropped by design — attacker can hide in noise |
+| **LSM bypass paths** | Execution paths not passing `bprm_check_security` | Kernel-dependent; no agent coverage claim for all exec variants |
+
+### 4.3 Mitigation strategies
+
+| Control | Implementation | Threats addressed |
+|---------|----------------|-----------------|
+| **Kernel token bucket** | `RATE_LIMIT_BUCKET` per-CPU (~500k evt/s) in `sys_exec.bpf.c` | E-01, E-08 |
+| **RingBuf backpressure** | Bounded Tokio MPSC (`NEUROMESH_PROCESS_CHANNEL_CAPACITY`, default 8192) | E-01 |
+| **BPFfs map pinning** | `PROCESS_EVENTS` + `RATE_LIMIT_BUCKET` under `/sys/fs/bpf/neuromesh` | E-04 |
+| **LSM synchronous deny** | `neuromesh_lsm_exec_guard` returns `-EPERM` for `/tmp/`, `/dev/shm/`, `/var/tmp/` | E-05 |
+| **Spawn burst detection** | `DataNormalizer` — 2s window, threshold 8 spawns per `ppid` | E-01, E-06 (partial) |
+| **Path whitelist suppression** | Static whitelist: `/bin/ls`, `/bin/cat`, `/usr/bin/git`, `/usr/bin/bash` | False positive reduction |
+| **Graceful shutdown** | `CancellationToken` + 500ms drain before BPF link release | Data loss on rolling update |
+| **Prometheus + health monitor** | `ebpf_events_dropped_total`, 5s kernel drop sampling | E-08 detection |
+| **Fuzz-tested decoders** | `event_parser_fuzz_test` — 50k random-byte iterations | Memory safety in user-space decode |
+| **Chaos-tested backpressure** | `chaos_engineering_test` — MPSC saturation, 50k mock RingBuf drain | E-01 resilience validation |
+
+### 4.4 False-positive handling
+
+False positives erode SOC trust. Neuromesh applies layered suppression:
+
+#### RuleEngine (path-based)
+
+| Policy | Paths / prefixes | Behavior |
+|--------|------------------|----------|
+| **Whitelist (exact match)** | `/bin/ls`, `/bin/cat`, `/usr/bin/git`, `/usr/bin/bash` | `RuleVerdict::Suppressed` — no alert emitted |
+| **Blacklist (prefix match)** | `/tmp/`, `/dev/shm/`, `/var/tmp/` | `CRITICAL_ALERT` / `NEUROMESH-EXEC-BLACKLIST-PATH` |
+| **Default** | All other paths | Suppressed (no alert on benign paths) |
+
+**Operational guidance:**
+
+- Extend whitelist via code change (v0.1.0-core) — no runtime policy API yet.
+- Treat `/tmp/` alerts as **high-confidence staging detections**, not automatic block in user space (block already occurred in LSM for matched paths).
+- Document approved temporary execution paths for CI/CD (e.g., package managers writing to `/var/tmp/`) — add to whitelist or relocate artifacts.
+
+#### DataNormalizer (behavior-based)
+
+| Parameter | Default | False-positive scenario | Tuning |
+|-----------|---------|------------------------|--------|
+| Window | 2 seconds | Build systems spawning many short-lived children | Increase window or threshold |
+| Burst threshold | 8 spawns per `ppid` | Parallel test runners | Raise threshold via `with_config()` |
+| `ppid == 0` | Ignored | Kernel lineage read failure | Fix offsets; do not alert on orphan events |
+
+**Operational guidance:**
+
+- `BEHAVIOR_ALERT` severity is **`BEHAVIOR_ALERT`** (not `CRITICAL`) — route to triage queue, not auto-remediation.
+- Correlate with parent `comm` and `last_binary_path` before escalation.
+- CI burst jobs should run with tagged parent processes or excluded nodes.
+
+#### Telemetry volume FPs
+
+| Signal | Cause | Response |
+|--------|-------|----------|
+| High `ebpf_events_processed_total` without alerts | Normal workload | Baseline per node class |
+| `ebpf_events_dropped_total` > 0 | Exec rate exceeds capacity | Scale agent CPU; investigate fork bomb (E-01) |
+| Log sampling every 10k events | Info-level process monitor logs | Do not treat sampled logs as security alerts |
+
+---
+
+## 5. Network telemetry (`tcp_connect`)
+
+| Threat | Control | Residual risk |
+|--------|---------|---------------|
+| C2 over non-TCP protocols | Not visible to kprobe | UDP/ICMP blind spot |
+| Connect before agent start | No retroactive visibility | Deploy agent before workload |
+| Correlation miss (unknown PID) | Event logged, not Kafka-enqueued | Short-lived process (E-02) |
+
+---
+
+## 6. Test farm coverage
+
+Integration tests run via `cargo test -p neuromesh-integration-tests` **without** a Linux kernel:
 
 ```
 /tests
-  src/fixtures.rs          # Static benign / malicious telemetry vectors
-  src/mocks.rs             # Re-exports MockRingBuf + TelemetrySource trait
+  src/fixtures.rs          # Benign / malicious telemetry vectors
+  src/mocks.rs             # MockRingBuf + TelemetrySource trait
   tests/
     rule_engine_integration.rs
     data_normalizer_integration.rs
     pipeline_integration.rs
 ```
 
-### Fixture → ATT&CK Traceability
+### Fixture → ATT&CK traceability
 
 | Fixture vector | MITRE intent | Expected outcome |
 |----------------|--------------|------------------|
 | `benign_events()` | Baseline admin activity | `RuleVerdict::Suppressed`, no `BEHAVIOR_ALERT` |
-| `malicious_blacklist_events()` | T1204 — payload staging in `/tmp`, `/dev/shm`, `/var/tmp` | `CRITICAL_ALERT` / `NEUROMESH-EXEC-BLACKLIST-PATH` |
+| `malicious_blacklist_events()` | T1204 — staging in ephemeral dirs | `CRITICAL_ALERT` / `NEUROMESH-EXEC-BLACKLIST-PATH` |
 | `malicious_spawn_burst_events()` | T1059 / T1499 — rapid interpreter chaining | `BEHAVIOR_ALERT` / `NEUROMESH-EXEC-SPAWN-BURST` |
-| `mixed_ringbuf_drain()` | Combined kill-chain simulation | Both SIEM and behavioral alerts via `TelemetryPipeline` |
+| `mixed_ringbuf_drain()` | Combined kill-chain simulation | Both SIEM and behavioral alerts |
 
-## Offline eBPF Mocking Strategy
+### Offline eBPF mocking
 
 | Kernel construct | Test double | Location |
 |------------------|-------------|----------|
 | `TELEMETRY_RINGBUF` | `MockRingBuf::from_events(vec![])` | `agent_ebpf_sensor::mocks::ringbuf` |
 | Map health counters | `TelemetryHealthStats` on mock drain | `pipeline_integration` |
-| Async poll loop | `TelemetrySource` trait + `StaticTelemetrySource` | `agent_ebpf_sensor::mocks::telemetry_source` |
+| Async poll loop | `TelemetrySource` trait | `agent_ebpf_sensor::mocks::telemetry_source` |
 
-## `execve` Visibility Threat Surface
+---
 
-The `sys_enter_execve` tracepoint is the highest-volume syscall surface in the agent. Attackers can abuse it for **evasion**, **TOCTOU**, and **endpoint DoS** if the pipeline lacks kernel-side throttling and restart-safe state.
+## 7. Residual risks (v0.1.0-core)
 
-### Threats
+| Risk | Severity | Notes |
+|------|----------|-------|
+| C execve tracepoint emits PID-only | Medium | Full argv capture requires verifier-reviewed `ctx` reads |
+| `neuromesh_exec_hook` not attached | Low | Rich passive telemetry exists but unused at runtime |
+| Per-CPU drop accounting | Low | `RATE_LIMIT_DROPS` summed across CPUs; NUMA hot spots may dominate |
+| Hardcoded `task_struct` offsets | Medium | `ppid == 0` silently excluded from burst detection |
+| No `execveat` hook | Medium | Alternative exec syscall unmonitored |
+| LotL single-shot from whitelisted path | Medium | Requires Slow Path / Wasm (future) |
+| Agent tampering by root | High | No open-source tamper detection |
+| CI coverage gate | Low | ≥70% line coverage on core crates; Ring 0 not measured |
 
-| Risk | Description | MITRE alignment |
-|------|-------------|-----------------|
-| **Exec storm / fork bomb** | High-frequency `execve` floods starve RingBuf consumers and user-space workers | [T1499](https://attack.mitre.org/techniques/T1499/) Endpoint Denial of Service |
-| **Visibility evasion** | Rapid short-lived processes may disappear before correlation registers PID → binary path | [T1036](https://attack.mitre.org/techniques/T1036/) Masquerading |
-| **TOCTOU on argv/path** | User-space reads of `filename` occur after syscall entry; kernel and userspace views can diverge under race conditions | [T1059](https://attack.mitre.org/techniques/T1059/) Command and Scripting Interpreter |
-| **Agent restart data loss** | Unpinned maps reset rate-limiter state and ringbuf backing metadata across crashes | Availability / blind spots after restart |
+---
 
-### Architectural Mitigations
+## 8. Validation workflow
 
-| Control | Implementation | Effect |
-|---------|----------------|--------|
-| **Kernel token-bucket** | `RATE_LIMIT_BUCKET` per-CPU map (~500k events/sec) in `sys_exec.bpf.c` | Bounds Ring 0 work; excess events increment `RATE_LIMIT_DROPS` instead of unbounded enqueue |
-| **Ringbuf backpressure** | Bounded Tokio MPSC (`NEUROMESH_PROCESS_CHANNEL_CAPACITY`, default 8192) with explicit drop + warn | Prevents unbounded user-space memory growth when drain rate < syscall rate |
-| **BPFfs map pinning** | `PROCESS_EVENTS` + `RATE_LIMIT_BUCKET` pinned under `/sys/fs/bpf/neuromesh` | Restores rate-limiter and ringbuf map state across agent restarts — zero intentional data loss on controlled recycle |
-| **Graceful shutdown** | `CancellationToken` + SIGINT/SIGTERM drain window before BPF link release | Avoids torn-down consumers mid-flight; monitor tasks exit cleanly |
-| **Enterprise observability** | Health monitor samples `RATE_LIMIT_DROPS` + channel drops; Prometheus `/metrics` on port 9090 | Unmonitored drops are treated as a production incident — `ebpf_events_dropped_total` surfaces kernel and user-space loss |
-
-### Residual `execve` Risks
-
-- **Verifier-locked skeleton:** `sys_exec.bpf.c` intentionally omits `ctx->args` reads; full argv capture requires a separate verifier-reviewed change.
-- **Per-CPU drop accounting:** `RATE_LIMIT_DROPS` is per-CPU; health monitor sums all CPUs but hot NUMA nodes may dominate drops under uneven load.
-- **Prometheus scrape gap:** Metrics reflect last health interval; sub-second exec storms require log targets `neuromesh::process_monitor` and `neuromesh::health` for forensic drill-down.
-
-## Residual Risks
-
-- **CO-RE / `ppid` accuracy:** Kernel lineage uses best-effort offsets; `ppid == 0` events are ignored by burst detection.
-- **LotL without bursts:** Single whitelisted binary invocations require future Wasm/AI policies (Slow Path).
-- **Coverage gate:** CI enforces ≥70% line coverage on core crates; does not yet measure eBPF kernel code (Ring 0).
-
-## Local Developer Workflow
+### Offline (no root, no kernel)
 
 ```bash
-# No root, no eBPF kernel support required
 cargo test -p neuromesh-integration-tests
 cargo test -p agent-ebpf-sensor --lib
+cargo test -p agent-ebpf-sensor --test event_parser_fuzz_test
+cargo test -p agent-ebpf-sensor --test chaos_engineering_test --features orchestrator
 ```
 
-Orchestrator binary (requires eBPF artifact + root):
+### Live (Linux + root)
 
 ```bash
 cargo build -p agent-ebpf-sensor --features orchestrator --release
+sudo -E ./target/release/agent-ebpf-sensor &
+./scripts/simulate_attack.sh
+curl -s http://127.0.0.1:9090/metrics | grep ebpf_events
 ```
+
+Expected simulation output:
+
+1. Benign `/bin/ls`, `/bin/cat` — suppressed (no alert)
+2. `/tmp/neuromesh-mock-payload.sh` execution — `CRITICAL_ALERT` (T1204)
+3. Rapid `/bin/sh` spawn burst — `BEHAVIOR_ALERT` (T1059.004)
+
+---
+
+## 9. Related documents
+
+| Document | Content |
+|----------|---------|
+| [`adr-001-lsm-vs-tracepoint.md`](architecture-decision-records/adr-001-lsm-vs-tracepoint.md) | Dual-hook design rationale |
+| [`performance-baseline.md`](performance-baseline.md) | Latency, drop rate, load-test methodology |
+| [`../README.md`](../README.md) | Architecture overview, deployment checklist |
+
+---
+
+*Review this document before each release candidate. Update MITRE mappings when new hooks ship or detection rules change.*
