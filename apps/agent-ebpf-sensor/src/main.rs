@@ -60,10 +60,13 @@ async fn main() -> Result<(), anyhow::Error> {
     let rate_limit_drops = PerCpuArray::try_from(
         process_bpf
             .take_map(RATE_LIMIT_DROPS_MAP)
-            .with_context(|| format!("BPF map `{RATE_LIMIT_DROPS_MAP}` missing from object file"))?,
+            .with_context(|| {
+                format!("BPF map `{RATE_LIMIT_DROPS_MAP}` missing from object file")
+            })?,
     )?;
 
-    let correlation = start_process_monitor(&mut process_bpf, shutdown.clone(), Arc::clone(&metrics)).await?;
+    let correlation =
+        start_process_monitor(&mut process_bpf, shutdown.clone(), Arc::clone(&metrics)).await?;
 
     spawn_health_monitor(rate_limit_drops, Arc::clone(&metrics), shutdown.clone());
     spawn_metrics_server(Arc::clone(&metrics), shutdown.clone()).await?;
