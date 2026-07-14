@@ -14,6 +14,8 @@ char __license[] SEC("license") = "GPL";
 /* 500k events/sec → one token every 2000 ns; burst matches one second at peak rate. */
 #define NS_PER_TOKEN 2000ULL
 #define MAX_TOKENS 500000ULL
+/* Verifier-bound refill: fixed unroll count caps per-event token credit. */
+#define REFILL_UNROLL 8U
 
 struct process_event_t {
 	__u32 pid;
@@ -65,7 +67,7 @@ static __always_inline int rate_limit_allow(void)
 	struct rate_limit_state *state;
 	__u64 now;
 	__u64 delta;
-	__u64 refill;
+	__u32 i;
 
 	state = bpf_map_lookup_elem(&RATE_LIMIT_BUCKET, &key);
 	if (!state)
@@ -77,10 +79,18 @@ static __always_inline int rate_limit_allow(void)
 		state->tokens = MAX_TOKENS;
 	}
 
+	if (now <= state->last_ns)
+		return 0;
+
 	delta = now - state->last_ns;
 	if (delta >= NS_PER_TOKEN) {
-		refill = delta / NS_PER_TOKEN;
-		state->tokens += refill;
+#pragma clang loop unroll_count(REFILL_UNROLL)
+		for (i = 0; i < REFILL_UNROLL; i++) {
+			if (delta < NS_PER_TOKEN || state->tokens >= MAX_TOKENS)
+				break;
+			state->tokens += 1;
+			delta -= NS_PER_TOKEN;
+		}
 		if (state->tokens > MAX_TOKENS)
 			state->tokens = MAX_TOKENS;
 		state->last_ns = now;
