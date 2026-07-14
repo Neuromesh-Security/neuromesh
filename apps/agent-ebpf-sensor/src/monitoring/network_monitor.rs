@@ -11,6 +11,7 @@ use std::ptr;
 use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub const NETWORK_EVENTS_MAP: &str = "NETWORK_EVENTS";
@@ -21,6 +22,7 @@ pub async fn start_network_monitor(
     bpf: &mut Ebpf,
     correlation: Arc<CorrelationEngine>,
     ingestion: CorrelationIngestionHandle,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let program: &mut KProbe = bpf
         .program_mut(TCP_CONNECT_PROGRAM)
@@ -44,8 +46,12 @@ pub async fn start_network_monitor(
     tokio::spawn(async move {
         let mut handler = NetworkEventHandler::default();
         loop {
-            let poll_result = async_ring
-                .async_io_mut(Interest::READABLE, |ring| {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!(target: "neuromesh::network_monitor", "network monitor exiting");
+                    break;
+                }
+                poll_result = async_ring.async_io_mut(Interest::READABLE, |ring| {
                     while let Some(item) = ring.next() {
                         let event =
                             unsafe { ptr::read_unaligned(item.as_ptr() as *const NetworkEvent) };
@@ -55,11 +61,15 @@ pub async fn start_network_monitor(
                         handler.observe(event);
                     }
                     Ok(())
-                })
-                .await;
-
-            if let Err(error) = poll_result {
-                tracing::warn!("NETWORK_EVENTS ring buffer poll failed: {error:#}");
+                }) => {
+                    if let Err(error) = poll_result {
+                        tracing::warn!(
+                            target: "neuromesh::network_monitor",
+                            error = %error,
+                            "NETWORK_EVENTS ring buffer poll failed"
+                        );
+                    }
+                }
             }
         }
     });

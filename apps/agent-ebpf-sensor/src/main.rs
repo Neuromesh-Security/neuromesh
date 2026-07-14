@@ -4,6 +4,7 @@ use agent_ebpf_sensor::pipeline::TelemetryPipeline;
 use agent_ebpf_sensor::rules::RuleEngine;
 use agent_ebpf_sensor::telemetry_stream::{self, TelemetryStreamHandle};
 use agent_ebpf_sensor::wasm_policy::WasmPolicyEngine;
+use agent_ebpf_sensor::{load_with_map_pinning, pin_root, wait_for_shutdown_signal};
 use aya::maps::{Array, MapData, RingBuf};
 use aya::programs::Lsm;
 use aya::{Btf, Ebpf};
@@ -14,9 +15,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio_util::sync::CancellationToken;
 
 const SYS_EXEC_BPF: &[u8] = include_bytes!("../target/bpf/sys_exec.bpf.o");
 const NETWORK_FILTER_BPF: &[u8] = include_bytes!("../target/bpf/network_filter.bpf.o");
+
+/// Drain window for monitor tasks after cancellation before dropping BPF links.
+const SHUTDOWN_DRAIN_MS: u64 = 500;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -26,6 +31,8 @@ async fn main() -> Result<(), anyhow::Error> {
     env_logger::init();
 
     info!("🚀 [Neuromesh] Initializing Enterprise Agent...");
+
+    let shutdown = CancellationToken::new();
 
     let enforcement_bpf_data =
         include_bytes!("../ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf");
@@ -42,14 +49,17 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let correlation_ingestion = ingestion::spawn_from_env().await;
 
-    let mut process_bpf = Ebpf::load(SYS_EXEC_BPF)?;
-    let correlation = start_process_monitor(&mut process_bpf).await?;
+    let bpf_pin_root = pin_root();
+    let mut process_bpf = load_with_map_pinning(SYS_EXEC_BPF, &bpf_pin_root)?;
+    let correlation =
+        start_process_monitor(&mut process_bpf, shutdown.clone()).await?;
 
     let mut network_bpf = Ebpf::load(NETWORK_FILTER_BPF)?;
     start_network_monitor(
         &mut network_bpf,
         Arc::clone(&correlation),
         correlation_ingestion,
+        shutdown.clone(),
     )
     .await?;
 
@@ -74,6 +84,10 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("📨 Correlation Kafka ingestion armed (bounded MPSC → idempotent rdkafka).");
     info!("🛡️ XDR enforcement armed. LSM bprm_check_security active blocking enabled.");
     info!("⚡ Detection brain armed. RuleEngine + DataNormalizer active on LSM RingBuf stream...");
+    info!(
+        "📌 eBPF map pinning active under {} (PROCESS_EVENTS, RATE_LIMIT_BUCKET)",
+        bpf_pin_root.display()
+    );
     if std::env::var("NEUROMESH_KAFKA_BROKERS").is_ok() {
         info!("📡 Kafka Slow Path armed (topic: neuromesh.telemetry.v1)");
     } else {
@@ -85,6 +99,16 @@ async fn main() -> Result<(), anyhow::Error> {
 
     loop {
         tokio::select! {
+            _ = shutdown.cancelled() => {
+                tracing::info!(target: "neuromesh::shutdown", "shutdown token cancelled");
+                break;
+            }
+            result = wait_for_shutdown_signal() => {
+                result?;
+                tracing::info!(target: "neuromesh::shutdown", "initiating graceful shutdown");
+                shutdown.cancel();
+                break;
+            }
             _ = stats_interval.tick() => {
                 log_health_metrics(&stats_map)?;
             }
@@ -105,6 +129,15 @@ async fn main() -> Result<(), anyhow::Error> {
             }
         }
     }
+
+    tokio::time::sleep(Duration::from_millis(SHUTDOWN_DRAIN_MS)).await;
+    tracing::info!(
+        target: "neuromesh::shutdown",
+        drain_ms = SHUTDOWN_DRAIN_MS,
+        "graceful shutdown complete — BPF links released"
+    );
+
+    Ok(())
 }
 
 fn emit_pipeline_output(
