@@ -1,3 +1,5 @@
+#![cfg(feature = "orchestrator")]
+
 //! Kernel-independent chaos scenarios for backpressure, observability, and shutdown.
 
 use agent_ebpf_sensor::monitoring::correlation::CorrelationEngine;
