@@ -102,6 +102,8 @@ jobs:
           path: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release
 
       - name: Enterprise sensor tests (fuzz + chaos harness)
+        env:
+          NEUROMESH_EBPF_ENFORCEMENT_BYTECODE: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
         run: |
           cargo test -p agent-ebpf-sensor --test event_parser_fuzz_test
           cargo test -p agent-ebpf-sensor --test chaos_engineering_test --features orchestrator
@@ -185,7 +187,6 @@ jobs:
     timeout-minutes: 10
     needs: build-ebpf
     env:
-      CARGO_TARGET_DIR: target/ebpf-verifier-${{ matrix.kernel }}
       NEUROMESH_VERIFY_CARGO_TARGET_DIR: target/ebpf-verifier-sudo-${{ matrix.kernel }}
     strategy:
       fail-fast: false
@@ -238,15 +239,6 @@ jobs:
         run: |
           bash scripts/ci/verify_ebpf_bytecode.sh apps/agent-ebpf-sensor/target/bpf/sys_exec.bpf.o
           bash scripts/ci/verify_ebpf_bytecode.sh apps/agent-ebpf-sensor/target/bpf/network_filter.bpf.o
-
-      - name: Enterprise sensor tests (kernel ${{ matrix.kernel }})
-        env:
-          CARGO_TARGET_DIR: target/ebpf-verifier-tests-${{ matrix.kernel }}
-        run: |
-          cargo test -p agent-ebpf-sensor --lib
-          cargo test -p agent-ebpf-sensor --test event_parser_fuzz_test
-          cargo test -p agent-ebpf-sensor --test chaos_engineering_test --features orchestrator
-          cargo test -p agent-ebpf-sensor --test execve_stress_test --no-run
 
   performance-regression:
     name: Performance Regression

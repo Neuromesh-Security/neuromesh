@@ -30,7 +30,10 @@ fn main() {
 
 /// Resolve Ring 0 enforcement bytecode for `include_bytes!` in the orchestrator binary.
 fn configure_enforcement_bytecode() {
-    let default = PathBuf::from("ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf");
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set"));
+    let default =
+        manifest_dir.join("ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf");
     let path = std::env::var("NEUROMESH_EBPF_ENFORCEMENT_BYTECODE")
         .map(PathBuf::from)
         .unwrap_or(default);
@@ -38,12 +41,15 @@ fn configure_enforcement_bytecode() {
     let abs = if path.is_absolute() {
         path
     } else {
-        std::env::current_dir().expect("current dir").join(path)
+        manifest_dir.join(path)
     };
 
     println!("cargo:rerun-if-env-changed=NEUROMESH_EBPF_ENFORCEMENT_BYTECODE");
     println!(
-        "cargo:rerun-if-changed=ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf"
+        "cargo:rerun-if-changed={}",
+        manifest_dir
+            .join("ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf")
+            .display()
     );
 
     if !abs.is_file() {
