@@ -1,62 +1,37 @@
 //! Shared process-event layout and testable event stream abstractions.
 
+use neuromesh_common::ExecEvent;
 use std::collections::VecDeque;
 use std::ptr;
 
-/// Kernel/userspace shared layout for `sys_enter_execve` visibility events.
-///
-/// Memory layout (`#[repr(C)]`, 168 bytes):
-/// ```text
-/// +0x00  pid       u32
-/// +0x04  uid       u32
-/// +0x08  ppid      u32
-/// +0x0C  comm      [u8; 16]
-/// +0x1C  filename  [u8; 128]
-/// +0xA0  ts        u64
-/// ```
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProcessEvent {
-    pub pid: u32,
-    pub uid: u32,
-    pub ppid: u32,
-    pub comm: [u8; 16],
-    pub filename: [u8; 128],
-    pub ts: u64,
-}
+/// Type alias — `ExecEvent` v1 is the sole kernel/userspace exec visibility record.
+pub type ProcessEvent = ExecEvent;
 
-unsafe impl aya::Pod for ProcessEvent {}
-
-impl ProcessEvent {
-    /// Zero-copy decode from a ring buffer record slice (no heap allocation).
-    #[inline]
-    pub fn from_bytes_unaligned(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < core::mem::size_of::<Self>() {
-            return None;
-        }
-        Some(unsafe { ptr::read_unaligned(bytes.as_ptr() as *const Self) })
-    }
+/// Zero-copy decode from a ring buffer record slice (no heap allocation).
+#[inline]
+pub fn decode_process_event(bytes: &[u8]) -> Option<ExecEvent> {
+    crate::monitoring::exec_mapper::decode_exec_event(bytes)
 }
 
 /// Abstraction over event producers (live RingBuf or unit-test mocks).
 pub trait EventStream {
-    fn next_event(&mut self) -> Option<ProcessEvent>;
+    fn next_event(&mut self) -> Option<ExecEvent>;
 }
 
 /// In-memory injector for unit tests — no eBPF loader required.
 #[derive(Default)]
 pub struct MockEventStream {
-    queue: VecDeque<ProcessEvent>,
+    queue: VecDeque<ExecEvent>,
 }
 
 impl MockEventStream {
-    pub fn push(&mut self, event: ProcessEvent) {
+    pub fn push(&mut self, event: ExecEvent) {
         self.queue.push_back(event);
     }
 }
 
 impl EventStream for MockEventStream {
-    fn next_event(&mut self) -> Option<ProcessEvent> {
+    fn next_event(&mut self) -> Option<ExecEvent> {
         self.queue.pop_front()
     }
 }
@@ -72,7 +47,7 @@ impl ProcessEventHandler {
 
     /// Observe one exec event without heap allocation on the hot path.
     #[inline]
-    pub fn observe(&mut self, event: &ProcessEvent) {
+    pub fn observe(&mut self, event: &ExecEvent) {
         let pid = event.pid;
         let uid = event.uid;
         let ppid = event.ppid;
@@ -81,7 +56,10 @@ impl ProcessEventHandler {
             pid,
             uid,
             ppid,
-            ts = event.ts,
+            ts = event.timestamp_ns,
+            args_count = event.args_count,
+            enforcement = event.enforcement_action,
+            capture_status = event.capture_status,
             "execve event"
         );
 
@@ -112,16 +90,12 @@ pub fn drain_events(stream: &mut impl EventStream, handler: &mut ProcessEventHan
 
 #[cfg(test)]
 mod tests {
-    use super::{drain_events, EventStream, MockEventStream, ProcessEvent, ProcessEventHandler};
+    use super::{drain_events, EventStream, MockEventStream, ProcessEventHandler};
     use core::mem::{offset_of, size_of};
-
-    #[test]
-    fn process_event_layout_matches_bpf_struct() {
-        assert_eq!(size_of::<ProcessEvent>(), 168);
-        assert_eq!(offset_of!(ProcessEvent, comm), 12);
-        assert_eq!(offset_of!(ProcessEvent, filename), 28);
-        assert_eq!(offset_of!(ProcessEvent, ts), 160);
-    }
+    use neuromesh_common::{
+        ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
+        MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
+    };
 
     fn bytes_with_prefix<const N: usize>(prefix: &[u8]) -> [u8; N] {
         let mut buf = [0u8; N];
@@ -130,63 +104,81 @@ mod tests {
         buf
     }
 
+    fn sample_event() -> ExecEvent {
+        ExecEvent {
+            schema_version: EXEC_EVENT_SCHEMA_VERSION,
+            event_type: EXEC_EVENT_TYPE_EXECVE,
+            flags: 0,
+            struct_size: EXEC_EVENT_STRUCT_SIZE,
+            header_reserved: 0,
+            header_pad: [0; 8],
+            pid: 4242,
+            ppid: 1,
+            tgid: 4242,
+            uid: 1000,
+            euid: 1000,
+            gid: 1000,
+            comm: bytes_with_prefix::<MAX_COMM_LEN>(b"ls"),
+            filename: bytes_with_prefix::<MAX_FILENAME_LEN>(b"/bin/ls"),
+            args_count: 1,
+            container_id: bytes_with_prefix::<MAX_CONTAINER_ID_LEN>(b"host"),
+            align_pad: [0; 4],
+            namespace_id: 1,
+            timestamp_ns: 1_234_567_890,
+            enforcement_action: 0,
+            capture_status: 0,
+            status_reserved: [0; 5],
+        }
+    }
+
+    #[test]
+    fn exec_event_layout_matches_bpf_struct() {
+        assert_eq!(size_of::<ExecEvent>(), EXEC_EVENT_STRUCT_SIZE as usize);
+        assert_eq!(offset_of!(ExecEvent, comm), 40);
+        assert_eq!(offset_of!(ExecEvent, filename), 56);
+        assert_eq!(offset_of!(ExecEvent, timestamp_ns), 392);
+    }
+
     #[test]
     fn mock_event_stream_injects_events_without_ebpf() {
         let mut stream = MockEventStream::default();
         let mut handler = ProcessEventHandler::default();
-
-        let event = ProcessEvent {
-            pid: 4242,
-            uid: 1000,
-            ppid: 1,
-            comm: bytes_with_prefix::<16>(b"ls"),
-            filename: bytes_with_prefix::<128>(b"/bin/ls"),
-            ts: 1_234_567_890,
-        };
-        stream.push(event);
-
+        stream.push(sample_event());
         drain_events(&mut stream, &mut handler);
         assert_eq!(handler.events_seen(), 1);
         assert!(stream.next_event().is_none());
     }
 
     #[test]
-    fn from_bytes_unaligned_rejects_truncated_records() {
-        assert!(ProcessEvent::from_bytes_unaligned(&[0u8; 16]).is_none());
+    fn decode_process_event_rejects_truncated_records() {
+        assert!(super::decode_process_event(&[0u8; 16]).is_none());
     }
 
     #[test]
     fn handler_survives_max_field_values() {
-        let event = ProcessEvent {
-            pid: u32::MAX,
-            uid: u32::MAX,
-            ppid: u32::MAX,
-            comm: [0xFF; 16],
-            filename: [0xFF; 128],
-            ts: u64::MAX,
-        };
+        let mut event = sample_event();
+        event.pid = u32::MAX;
+        event.uid = u32::MAX;
+        event.ppid = u32::MAX;
+        event.comm = [0xFF; MAX_COMM_LEN];
+        event.filename = [0xFF; MAX_FILENAME_LEN];
+        event.timestamp_ns = u64::MAX;
         let mut handler = ProcessEventHandler::default();
         handler.observe(&event);
         assert_eq!(handler.events_seen(), 1);
     }
 
     #[test]
-    fn from_bytes_unaligned_roundtrip() {
-        let event = ProcessEvent {
-            pid: 99,
-            uid: 1,
-            ppid: 42,
-            comm: [0; 16],
-            filename: [0; 128],
-            ts: 99,
-        };
+    fn decode_process_event_roundtrip() {
+        let event = sample_event();
         let bytes = unsafe {
             core::slice::from_raw_parts(
-                &event as *const ProcessEvent as *const u8,
-                size_of::<ProcessEvent>(),
+                &event as *const ExecEvent as *const u8,
+                size_of::<ExecEvent>(),
             )
         };
-        let decoded = ProcessEvent::from_bytes_unaligned(bytes).expect("decode");
-        assert_eq!(decoded, event);
+        let decoded = super::decode_process_event(bytes).expect("decode");
+        assert_eq!(decoded.pid, event.pid);
+        assert_eq!(decoded.filename[..7], *b"/bin/ls");
     }
 }

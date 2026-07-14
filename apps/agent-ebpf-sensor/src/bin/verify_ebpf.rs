@@ -31,14 +31,6 @@ fn main() -> Result<()> {
         verified += 1;
     }
 
-    if let Some(program) = ebpf.program_mut("neuromesh_exec_hook") {
-        let program: &mut TracePoint = program.try_into()?;
-        program
-            .load()
-            .context("kernel verifier rejected tracepoint program neuromesh_exec_hook")?;
-        verified += 1;
-    }
-
     if let Some(program) = ebpf.program_mut("neuromesh_lsm_exec_guard") {
         let program: &mut Lsm = program.try_into()?;
         let btf =

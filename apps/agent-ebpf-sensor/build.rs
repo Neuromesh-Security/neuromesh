@@ -11,6 +11,7 @@ const BPF_SOURCES: &[(&str, &str)] = &[
 
 fn main() {
     println!("cargo:rerun-if-changed=src/bpf/sys_exec.bpf.c");
+    println!("cargo:rerun-if-changed=src/bpf/exec_event.h");
     println!("cargo:rerun-if-changed=src/bpf/network_filter.bpf.c");
     println!("cargo:rerun-if-changed=src/bpf/bpf_helpers.h");
     println!("cargo:rerun-if-changed=src/bpf/vmlinux.h");

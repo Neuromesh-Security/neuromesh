@@ -2,8 +2,12 @@
 
 use agent_ebpf_sensor::monitoring::event::{ProcessEvent, ProcessEventHandler};
 use agent_ebpf_sensor::monitoring::network_event::{NetworkEvent, NetworkEventHandler};
-use agent_ebpf_sensor::monitoring::ringbuf_decode::{decode_network_event, decode_process_event};
+use agent_ebpf_sensor::monitoring::ringbuf_decode::{decode_exec_event, decode_network_event};
 use core::mem::size_of;
+use neuromesh_common::{
+    ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
+    MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
+};
 
 const DEFAULT_ITERATIONS: usize = 50_000;
 
@@ -23,15 +27,42 @@ fn random_bytes(state: &mut u64, max_len: usize) -> Vec<u8> {
     buf
 }
 
+fn sample_valid_event() -> ProcessEvent {
+    ExecEvent {
+        schema_version: EXEC_EVENT_SCHEMA_VERSION,
+        event_type: EXEC_EVENT_TYPE_EXECVE,
+        flags: 0,
+        struct_size: EXEC_EVENT_STRUCT_SIZE,
+        header_reserved: 0,
+        header_pad: [0; 8],
+        pid: 4242,
+        ppid: 1,
+        tgid: 4242,
+        uid: 1000,
+        euid: 1000,
+        gid: 1000,
+        comm: [0; MAX_COMM_LEN],
+        filename: [0; MAX_FILENAME_LEN],
+        args_count: 0,
+        container_id: [0; MAX_CONTAINER_ID_LEN],
+        align_pad: [0; 4],
+        namespace_id: 0,
+        timestamp_ns: 99,
+        enforcement_action: 0,
+        capture_status: 0,
+        status_reserved: [0; 5],
+    }
+}
+
 fn fuzz_decode_paths(seed: u64, iterations: usize) {
     let mut state = seed;
     let mut process_handler = ProcessEventHandler::default();
     let mut network_handler = NetworkEventHandler::default();
 
     for _ in 0..iterations {
-        let bytes = random_bytes(&mut state, size_of::<ProcessEvent>() * 2);
+        let bytes = random_bytes(&mut state, size_of::<ExecEvent>() * 2);
 
-        if let Some(event) = decode_process_event(&bytes) {
+        if let Some(event) = decode_exec_event(&bytes) {
             process_handler.observe(&event);
         }
 
@@ -48,23 +79,16 @@ fn ringbuf_decoders_never_panic_on_random_bytes() {
 
 #[test]
 fn ringbuf_decoders_never_panic_on_edge_length_buffers() {
-    for len in 0..=size_of::<ProcessEvent>() + 8 {
+    for len in 0..=size_of::<ExecEvent>() + 8 {
         let bytes = vec![0xFFu8; len];
-        let _ = decode_process_event(&bytes);
+        let _ = decode_exec_event(&bytes);
         let _ = decode_network_event(&bytes);
     }
 }
 
 #[test]
 fn valid_process_event_bytes_roundtrip_through_handler() {
-    let event = ProcessEvent {
-        pid: 4242,
-        uid: 1000,
-        ppid: 1,
-        comm: [0; 16],
-        filename: [0; 128],
-        ts: 99,
-    };
+    let event = sample_valid_event();
     let bytes = unsafe {
         core::slice::from_raw_parts(
             &event as *const ProcessEvent as *const u8,
@@ -72,7 +96,7 @@ fn valid_process_event_bytes_roundtrip_through_handler() {
         )
     };
 
-    let decoded = decode_process_event(bytes).expect("valid layout");
+    let decoded = decode_exec_event(bytes).expect("valid layout");
     let mut handler = ProcessEventHandler::default();
     handler.observe(&decoded);
     assert_eq!(handler.events_seen(), 1);

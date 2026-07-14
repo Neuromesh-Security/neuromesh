@@ -36,6 +36,9 @@ static __u64 (*bpf_get_current_pid_tgid)(void) = (void *)14;
 static __u64 (*bpf_get_current_uid_gid)(void) = (void *)15;
 static long (*bpf_get_current_comm)(void *buf, __u32 size) = (void *)16;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *)5;
+static void *(*bpf_get_current_task)(void) = (void *)236;
+static __u64 (*bpf_get_current_cgroup_id)(void) = (void *)276;
+static __u64 (*bpf_get_current_euid_egid)(void) = (void *)311;
 
 static long (*bpf_probe_read_user)(void *dst, __u32 size, const void *unsafe_ptr) =
 	(void *)112;
