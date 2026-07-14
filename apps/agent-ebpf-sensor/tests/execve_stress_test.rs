@@ -172,7 +172,10 @@ async fn bombard_execve_for_rate_limit_validation() {
         "[execve-stress] complete spawned={spawned} failed={failed} elapsed={elapsed:.2}s average_eps={average_eps:.0}"
     );
 
-    assert!(spawned > 0, "expected at least one successful execve syscall");
+    assert!(
+        spawned > 0,
+        "expected at least one successful execve syscall"
+    );
 }
 
 #[cfg(not(unix))]
