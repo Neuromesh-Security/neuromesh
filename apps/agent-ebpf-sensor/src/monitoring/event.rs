@@ -2,7 +2,6 @@
 
 use neuromesh_common::ExecEvent;
 use std::collections::VecDeque;
-use std::ptr;
 
 /// Type alias — `ExecEvent` v1 is the sole kernel/userspace exec visibility record.
 pub type ProcessEvent = ExecEvent;
@@ -51,15 +50,19 @@ impl ProcessEventHandler {
         let pid = event.pid;
         let uid = event.uid;
         let ppid = event.ppid;
+        let ts = event.timestamp_ns;
+        let args_count = event.args_count;
+        let enforcement = event.enforcement_action;
+        let capture_status = event.capture_status;
         tracing::debug!(
             target: "neuromesh::process_monitor",
             pid,
             uid,
             ppid,
-            ts = event.timestamp_ns,
-            args_count = event.args_count,
-            enforcement = event.enforcement_action,
-            capture_status = event.capture_status,
+            ts,
+            args_count,
+            enforcement,
+            capture_status,
             "execve event"
         );
 
@@ -178,7 +181,8 @@ mod tests {
             )
         };
         let decoded = super::decode_process_event(bytes).expect("decode");
-        assert_eq!(decoded.pid, event.pid);
+        let (decoded_pid, event_pid) = (decoded.pid, event.pid);
+        assert_eq!(decoded_pid, event_pid);
         assert_eq!(decoded.filename[..7], *b"/bin/ls");
     }
 }

@@ -1,12 +1,27 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const BPF_SOURCES: &[(&str, &str)] = &[
-    ("src/bpf/sys_exec.bpf.c", "target/bpf/sys_exec.bpf.o"),
-    (
-        "src/bpf/network_filter.bpf.c",
-        "target/bpf/network_filter.bpf.o",
-    ),
+/// `keep_btf_ext` preserves the CO-RE relocation table so Aya can fix up
+/// `bpf_core_read` field accesses against the target kernel's BTF at load
+/// time (see `src/bpf/vmlinux.h`). Objects with no CO-RE accesses strip it,
+/// matching upstream Aya examples' minimal-artifact convention.
+struct BpfSource {
+    source: &'static str,
+    output: &'static str,
+    keep_btf_ext: bool,
+}
+
+const BPF_SOURCES: &[BpfSource] = &[
+    BpfSource {
+        source: "src/bpf/sys_exec.bpf.c",
+        output: "target/bpf/sys_exec.bpf.o",
+        keep_btf_ext: true,
+    },
+    BpfSource {
+        source: "src/bpf/network_filter.bpf.c",
+        output: "target/bpf/network_filter.bpf.o",
+        keep_btf_ext: false,
+    },
 ];
 
 fn main() {
@@ -20,8 +35,8 @@ fn main() {
     let out_dir = PathBuf::from("target/bpf");
     std::fs::create_dir_all(&out_dir).expect("failed to create target/bpf");
 
-    for (source, output) in BPF_SOURCES {
-        compile_bpf(source, output);
+    for bpf_source in BPF_SOURCES {
+        compile_bpf(bpf_source);
     }
 
     if std::env::var("CARGO_FEATURE_ORCHESTRATOR").is_ok() {
@@ -73,9 +88,9 @@ fn configure_enforcement_bytecode() {
     );
 }
 
-fn compile_bpf(source: &str, output: &str) {
-    let output_path = PathBuf::from(output);
-    let source_path = PathBuf::from(source);
+fn compile_bpf(bpf_source: &BpfSource) {
+    let output_path = PathBuf::from(bpf_source.output);
+    let source_path = PathBuf::from(bpf_source.source);
 
     let mut command = Command::new("clang");
     command.args([
@@ -112,7 +127,9 @@ fn compile_bpf(source: &str, output: &str) {
         }
     }
 
-    strip_btf_ext(&output_path);
+    if !bpf_source.keep_btf_ext {
+        strip_btf_ext(&output_path);
+    }
 }
 
 /// Clang emits `.BTF.ext` alongside `.BTF`; Aya requires the former to be removed.

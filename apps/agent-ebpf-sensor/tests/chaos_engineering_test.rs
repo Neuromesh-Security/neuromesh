@@ -85,13 +85,18 @@ async fn userspace_memory_pressure_records_drops_in_metrics() {
     assert!(dropped > 0);
     assert_eq!(metrics.userspace_drops(), dropped);
 
+    // Drop the sender so the drain loop below observes channel closure
+    // instead of blocking forever waiting for more sends.
+    drop(tx);
     while rx.recv().await.is_some() {}
 }
 
 #[test]
 fn correlation_engine_survives_high_cardinality_exec_storm() {
     let engine = CorrelationEngine::new();
-    for pid in 0..10_000 {
+    // pid 0 is reserved (kernel scheduler) and intentionally ignored by
+    // `register_process` — see `register_process_ignores_zero_pid`.
+    for pid in 1..=10_000 {
         let event = sample_process_event(pid);
         engine.register_process(event.pid, &event.filename);
     }

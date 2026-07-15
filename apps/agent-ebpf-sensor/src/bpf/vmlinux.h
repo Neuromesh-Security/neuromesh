@@ -59,4 +59,59 @@ struct pt_regs {
 	unsigned long ss;
 };
 
+/* Common tracepoint header, mirrors /sys/kernel/tracing/events/.../format
+ * `common_*` fields. Stable ABI (include/linux/trace_events.h) — read
+ * directly, no CO-RE relocation needed. */
+struct trace_entry {
+	unsigned short type;
+	unsigned char flags;
+	unsigned char preempt_count;
+	int pid;
+};
+
+/*
+ * Ring 0 process-lineage / cgroup lookup chain for ExecEvent v1 enrichment
+ * (ppid, namespace_id, container_id). These are CO-RE (Compile Once – Run
+ * Everywhere) stand-ins, not full struct definitions: only the accessed
+ * field *names* need to match the real kernel — `preserve_access_index`
+ * makes clang emit a BTF field relocation for every access instead of a
+ * baked-in offset, and Aya resolves it against the target kernel's BTF at
+ * load time. Field order/padding below is therefore irrelevant to
+ * correctness and intentionally left minimal.
+ */
+#pragma clang attribute push(__attribute__((preserve_access_index)), apply_to = record)
+
+struct task_struct {
+	struct task_struct *real_parent;
+	struct nsproxy *nsproxy;
+	struct css_set *cgroups;
+	int tgid;
+};
+
+struct nsproxy {
+	struct pid_namespace *pid_ns_for_children;
+};
+
+struct ns_common {
+	unsigned int inum;
+};
+
+struct pid_namespace {
+	struct ns_common ns;
+};
+
+struct css_set {
+	struct cgroup *dfl_cgrp;
+};
+
+struct cgroup {
+	struct kernfs_node *kn;
+};
+
+struct kernfs_node {
+	const char *name;
+};
+
+#pragma clang attribute pop
+
 #endif /* __VMLINUX_H__ */

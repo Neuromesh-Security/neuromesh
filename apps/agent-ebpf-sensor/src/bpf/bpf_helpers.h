@@ -14,6 +14,9 @@ typedef long long __s64;
 
 #define __always_inline inline __attribute__((__always_inline__))
 
+/* Kernel `linux/compiler_types.h` sparse annotation — no-op outside sparse. */
+#define __user
+
 enum bpf_map_type {
 	BPF_MAP_TYPE_ARRAY = 2,
 	BPF_MAP_TYPE_PERCPU_ARRAY = 6,

@@ -89,10 +89,13 @@ fn init_exec_event(event: &mut ExecEvent, enforcement_action: u8) {
     };
 }
 
-fn mark_unknown(bytes: &mut [u8], status: &mut u16, bit: u16) {
+/// Returns the updated `capture_status` bitmask; callers must write it back.
+/// (`capture_status` lives in a `#[repr(C, packed)]` struct, so it cannot be
+/// passed as `&mut u16` — taking a reference to an unaligned field is UB.)
+fn mark_unknown(bytes: &mut [u8], status: u16, bit: u16) -> u16 {
     let len = UNKNOWN_SENTINEL.len().min(bytes.len());
     bytes[..len].copy_from_slice(&UNKNOWN_SENTINEL[..len]);
-    *status |= bit;
+    status | bit
 }
 
 fn populate_lineage(event: &mut ExecEvent) {
@@ -106,9 +109,9 @@ fn populate_lineage(event: &mut ExecEvent) {
     event.euid = uid_gid as u32;
     event.capture_status |= CAPTURE_EUID;
 
-    mark_unknown(
+    event.capture_status = mark_unknown(
         &mut event.container_id,
-        &mut event.capture_status,
+        event.capture_status,
         CAPTURE_CONTAINER_ID,
     );
 
@@ -118,7 +121,7 @@ fn populate_lineage(event: &mut ExecEvent) {
         let copy_len = comm.len().min(MAX_COMM_LEN);
         event.comm[..copy_len].copy_from_slice(&comm[..copy_len]);
     } else {
-        mark_unknown(&mut event.comm, &mut event.capture_status, CAPTURE_COMM);
+        event.capture_status = mark_unknown(&mut event.comm, event.capture_status, CAPTURE_COMM);
     }
 }
 
@@ -184,22 +187,16 @@ fn emit_blocked_exec_event(ctx: &LsmContext) {
             if unsafe { bpf_probe_read_kernel_str_bytes(filename_ptr, &mut event.filename) }
                 .is_err()
             {
-                mark_unknown(
-                    &mut event.filename,
-                    &mut event.capture_status,
-                    CAPTURE_FILENAME,
-                );
+                event.capture_status =
+                    mark_unknown(&mut event.filename, event.capture_status, CAPTURE_FILENAME);
             }
         } else {
-            mark_unknown(
-                &mut event.filename,
-                &mut event.capture_status,
-                CAPTURE_FILENAME,
-            );
+            event.capture_status =
+                mark_unknown(&mut event.filename, event.capture_status, CAPTURE_FILENAME);
         }
         event.namespace_id = 0;
         event.capture_status |= CAPTURE_NAMESPACE_ID;
-        event.timestamp_ns = bpf_ktime_get_ns();
+        event.timestamp_ns = unsafe { bpf_ktime_get_ns() };
         event.schema_version = EXEC_EVENT_SCHEMA_VERSION;
         entry.submit(0);
         record_event_submitted();

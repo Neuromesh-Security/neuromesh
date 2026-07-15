@@ -214,7 +214,6 @@ static __always_inline void capture_container_id(struct exec_event_t *event)
 {
 	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
 	struct css_set *cgroups;
-	struct cgroup_subsys_state *dfl_css;
 	struct cgroup *cgrp;
 	struct kernfs_node *kn;
 	long ret;
@@ -231,13 +230,9 @@ static __always_inline void capture_container_id(struct exec_event_t *event)
 		return;
 	}
 
-	if (bpf_core_read(&dfl_css, sizeof(dfl_css), &cgroups->dfl) < 0 || !dfl_css) {
-		exec_mark_unknown(event->container_id, sizeof(event->container_id),
-				  &event->capture_status, CAPTURE_CONTAINER_ID);
-		return;
-	}
-
-	if (bpf_core_read(&cgrp, sizeof(cgrp), &dfl_css->cgroup) < 0 || !cgrp) {
+	/* css_set->dfl_cgrp is the default-hierarchy cgroup directly — no
+	 * cgroup_subsys_state indirection (see kernel/cgroup/cgroup.c). */
+	if (bpf_core_read(&cgrp, sizeof(cgrp), &cgroups->dfl_cgrp) < 0 || !cgrp) {
 		exec_mark_unknown(event->container_id, sizeof(event->container_id),
 				  &event->capture_status, CAPTURE_CONTAINER_ID);
 		return;

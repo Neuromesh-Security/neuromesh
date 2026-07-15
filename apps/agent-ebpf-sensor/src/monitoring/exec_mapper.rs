@@ -48,12 +48,15 @@ pub fn exec_event_otel_attributes(event: &ExecEvent) -> OtelExecAttributes {
     let mut attributes = BTreeMap::new();
 
     attributes.insert("neuromesh.event.type".into(), "execve".into());
+    let schema_version = event.schema_version;
+    let pid = event.pid;
+    let tgid = event.tgid;
     attributes.insert(
         "neuromesh.schema.version".into(),
-        event.schema_version.to_string(),
+        schema_version.to_string(),
     );
-    attributes.insert("neuromesh.pid".into(), event.pid.to_string());
-    attributes.insert("neuromesh.tgid".into(), event.tgid.to_string());
+    attributes.insert("neuromesh.pid".into(), pid.to_string());
+    attributes.insert("neuromesh.tgid".into(), tgid.to_string());
     attributes.insert(
         "neuromesh.ppid".into(),
         display_scalar(event.ppid, CAPTURE_PPID, event.capture_status),
@@ -112,9 +115,10 @@ pub fn exec_event_otel_attributes(event: &ExecEvent) -> OtelExecAttributes {
         "neuromesh.enforcement_action".into(),
         enforcement_label(event.enforcement_action).into(),
     );
+    let capture_status = event.capture_status;
     attributes.insert(
         "neuromesh.capture_status".into(),
-        format!("0x{:04x}", event.capture_status),
+        format!("0x{capture_status:04x}"),
     );
 
     OtelExecAttributes { attributes }
@@ -132,7 +136,7 @@ fn scalar_or_zero(value: u32, unknown: bool) -> u32 {
 #[inline]
 fn display_scalar(value: u32, bit: u16, status: u16) -> String {
     if status & bit != 0 {
-        format!("UNKNOWN:{bit_name(bit)}")
+        format!("UNKNOWN:{}", bit_name(bit))
     } else {
         value.to_string()
     }
@@ -141,7 +145,7 @@ fn display_scalar(value: u32, bit: u16, status: u16) -> String {
 #[inline]
 fn display_scalar_u64(value: u64, bit: u16, status: u16) -> String {
     if status & bit != 0 {
-        format!("UNKNOWN:{bit_name(bit)}")
+        format!("UNKNOWN:{}", bit_name(bit))
     } else {
         value.to_string()
     }

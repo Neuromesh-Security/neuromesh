@@ -65,6 +65,7 @@ pub async fn start_process_monitor(
     let worker_correlation = Arc::clone(&correlation);
     let worker_metrics = Arc::clone(&metrics);
     let worker_cancel = cancel.clone();
+    let detection_fanout = detection_tx.is_some();
     tokio::spawn(async move {
         let mut handler = ProcessEventHandler::default();
         loop {
@@ -80,9 +81,10 @@ pub async fn start_process_monitor(
                             handler.observe(&event);
 
                             let otel = exec_event_otel_attributes(&event);
+                            let pid = event.pid;
                             tracing::trace!(
                                 target: "neuromesh::otel",
-                                pid = event.pid,
+                                pid,
                                 ?otel,
                                 "exec visibility OTel attributes"
                             );
@@ -92,7 +94,7 @@ pub async fn start_process_monitor(
                                 if tx.try_send(telemetry).is_err() {
                                     tracing::debug!(
                                         target: "neuromesh::process_monitor",
-                                        pid = event.pid,
+                                        pid,
                                         "detection pipeline channel full — exec telemetry dropped"
                                     );
                                 }
@@ -163,7 +165,7 @@ pub async fn start_process_monitor(
         target: "neuromesh::process_monitor",
         channel_capacity,
         pressure_threshold_pct = PROCESS_PRESSURE_DROP_THRESHOLD_PCT,
-        detection_fanout = detection_tx.is_some(),
+        detection_fanout,
         "Process monitor armed on sys_enter_execve → PROCESS_EVENTS RingBuf (ExecEvent v1)"
     );
 
