@@ -85,7 +85,22 @@ struct task_struct {
 	struct task_struct *real_parent;
 	struct nsproxy *nsproxy;
 	struct css_set *cgroups;
+	struct cred *cred;
 	int tgid;
+};
+
+/* `kuid_t` is a fixed one-`unsigned int` wrapper (include/linux/uidgid.h),
+ * ABI-stable across all supported kernel versions — no CO-RE relocation
+ * needed for `.val` itself, only for locating `cred->euid`. */
+typedef struct {
+	unsigned int val;
+} kuid_t;
+
+/* There is no `BPF_FUNC_get_current_euid_egid` helper in the kernel (see
+ * bpf_helpers.h) — effective uid is only reachable via
+ * task_struct->cred->euid, so `cred` must be modeled here for CO-RE. */
+struct cred {
+	kuid_t euid;
 };
 
 struct nsproxy {

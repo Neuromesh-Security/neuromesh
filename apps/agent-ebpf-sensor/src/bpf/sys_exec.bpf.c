@@ -132,12 +132,35 @@ static __always_inline void capture_pid_tgid(struct exec_event_t *event)
 
 static __always_inline void capture_credentials(struct exec_event_t *event)
 {
+	struct task_struct *task;
+	struct cred *cred;
+	kuid_t euid = {};
 	__u64 uid_gid = bpf_get_current_uid_gid();
-	__u64 euid_egid = bpf_get_current_euid_egid();
 
 	event->uid = (__u32)uid_gid;
 	event->gid = (__u32)(uid_gid >> 32);
-	event->euid = (__u32)euid_egid;
+
+	/* The kernel has no dedicated "get effective uid/gid" helper (checked
+	 * against enum bpf_func_id, max id 211 — see bpf_helpers.h). Effective
+	 * uid is read directly from task_struct->cred->euid via CO-RE, the
+	 * same pattern used for ppid/namespace_id/container_id below. */
+	task = (struct task_struct *)bpf_get_current_task();
+	if (!task) {
+		event->capture_status |= CAPTURE_EUID;
+		return;
+	}
+
+	if (bpf_core_read(&cred, sizeof(cred), &task->cred) < 0 || !cred) {
+		event->capture_status |= CAPTURE_EUID;
+		return;
+	}
+
+	if (bpf_core_read(&euid, sizeof(euid), &cred->euid) < 0) {
+		event->capture_status |= CAPTURE_EUID;
+		return;
+	}
+
+	event->euid = euid.val;
 }
 
 static __always_inline void capture_comm(struct exec_event_t *event)
@@ -216,6 +239,7 @@ static __always_inline void capture_container_id(struct exec_event_t *event)
 	struct css_set *cgroups;
 	struct cgroup *cgrp;
 	struct kernfs_node *kn;
+	const char *name_ptr = (const char *)0;
 	long ret;
 
 	if (!task) {
@@ -244,8 +268,21 @@ static __always_inline void capture_container_id(struct exec_event_t *event)
 		return;
 	}
 
+	/* `kn->name` must be fetched into a local variable via bpf_core_read
+	 * first — `kn` is an untrusted/probed pointer (not a verifier-tracked
+	 * PTR_TO_BTF_ID), so dereferencing `kn->name` directly (a plain load)
+	 * is rejected by the verifier as an invalid memory access on an `inv`
+	 * (scalar) register. Only the *address* `&kn->name` may be taken
+	 * directly; the pointer *value* stored there must come back through a
+	 * probe-read, exactly like every other field access in this chain. */
+	if (bpf_core_read(&name_ptr, sizeof(name_ptr), &kn->name) < 0 || !name_ptr) {
+		exec_mark_unknown(event->container_id, sizeof(event->container_id),
+				  &event->capture_status, CAPTURE_CONTAINER_ID);
+		return;
+	}
+
 	ret = bpf_probe_read_kernel_str(event->container_id,
-					sizeof(event->container_id), kn->name);
+					sizeof(event->container_id), name_ptr);
 	if (ret < 0)
 		exec_mark_unknown(event->container_id, sizeof(event->container_id),
 				  &event->capture_status, CAPTURE_CONTAINER_ID);
