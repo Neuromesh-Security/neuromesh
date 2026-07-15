@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn registers_process_and_correlates_network_event() {
         let engine = CorrelationEngine::new();
-        let mut argv0 = [0u8; 128];
+        let mut argv0 = [0u8; 256];
         argv0[..9].copy_from_slice(b"/bin/curl");
         engine.register_process(4242, &argv0);
 

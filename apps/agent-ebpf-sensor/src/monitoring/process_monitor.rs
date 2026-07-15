@@ -1,15 +1,19 @@
-//! Async RingBuf consumer for C `sys_enter_execve` visibility events.
+//! Async RingBuf consumer for C `sys_enter_execve` ExecEvent v1 records.
 //!
-//! Hot path: AsyncFd poll → zero-copy `ProcessEvent` decode → bounded MPSC try_send.
-//! Worker task: correlation registration + rate-limited observability logging.
+//! Hot path: AsyncFd poll → zero-copy `ExecEvent` decode → bounded MPSC try_send.
+//! Worker task: correlation registration, OTel attribute export, detection pipeline fan-out.
 
 use crate::monitoring::correlation::CorrelationEngine;
-use crate::monitoring::event::{ProcessEvent, ProcessEventHandler};
+use crate::monitoring::event::ProcessEventHandler;
+use crate::monitoring::exec_mapper::{
+    exec_event_otel_attributes, exec_event_to_security_telemetry,
+};
 use crate::observability::metrics::AgentMetrics;
 use anyhow::{Context, Result};
 use aya::maps::RingBuf;
 use aya::programs::TracePoint;
 use aya::Ebpf;
+use neuromesh_common::{ExecEvent, SecurityTelemetryEvent};
 use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
@@ -31,6 +35,7 @@ pub async fn start_process_monitor(
     bpf: &mut Ebpf,
     cancel: CancellationToken,
     metrics: Arc<AgentMetrics>,
+    detection_tx: Option<tokio::sync::mpsc::Sender<SecurityTelemetryEvent>>,
 ) -> Result<Arc<CorrelationEngine>> {
     let program: &mut TracePoint = bpf
         .program_mut(SYS_EXEC_PROGRAM)
@@ -55,11 +60,12 @@ pub async fn start_process_monitor(
         .unwrap_or(DEFAULT_PROCESS_CHANNEL_CAPACITY);
 
     let correlation = CorrelationEngine::new();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ProcessEvent>(channel_capacity);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ExecEvent>(channel_capacity);
 
     let worker_correlation = Arc::clone(&correlation);
     let worker_metrics = Arc::clone(&metrics);
     let worker_cancel = cancel.clone();
+    let detection_fanout = detection_tx.is_some();
     tokio::spawn(async move {
         let mut handler = ProcessEventHandler::default();
         loop {
@@ -73,6 +79,27 @@ pub async fn start_process_monitor(
                         Some(event) => {
                             worker_correlation.register_process(event.pid, &event.filename);
                             handler.observe(&event);
+
+                            let otel = exec_event_otel_attributes(&event);
+                            let pid = event.pid;
+                            tracing::trace!(
+                                target: "neuromesh::otel",
+                                pid,
+                                ?otel,
+                                "exec visibility OTel attributes"
+                            );
+
+                            if let Some(ref tx) = detection_tx {
+                                let telemetry = exec_event_to_security_telemetry(&event);
+                                if tx.try_send(telemetry).is_err() {
+                                    tracing::debug!(
+                                        target: "neuromesh::process_monitor",
+                                        pid,
+                                        "detection pipeline channel full — exec telemetry dropped"
+                                    );
+                                }
+                            }
+
                             worker_metrics.record_event_processed();
                         }
                         None => break,
@@ -97,7 +124,7 @@ pub async fn start_process_monitor(
                 poll_result = async_ring.async_io_mut(Interest::READABLE, |ring| {
                     while let Some(item) = ring.next() {
                         let bytes = item.as_ref();
-                        let Some(event) = crate::monitoring::ringbuf_decode::decode_process_event(bytes)
+                        let Some(event) = crate::monitoring::ringbuf_decode::decode_exec_event(bytes)
                         else {
                             continue;
                         };
@@ -138,7 +165,8 @@ pub async fn start_process_monitor(
         target: "neuromesh::process_monitor",
         channel_capacity,
         pressure_threshold_pct = PROCESS_PRESSURE_DROP_THRESHOLD_PCT,
-        "Process monitor armed on sys_enter_execve → PROCESS_EVENTS RingBuf (async consumer with backpressure)"
+        detection_fanout,
+        "Process monitor armed on sys_enter_execve → PROCESS_EVENTS RingBuf (ExecEvent v1)"
     );
 
     Ok(correlation)

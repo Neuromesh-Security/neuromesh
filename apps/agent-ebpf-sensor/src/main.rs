@@ -1,5 +1,8 @@
 use agent_ebpf_sensor::ingestion;
-use agent_ebpf_sensor::monitoring::{start_network_monitor, start_process_monitor};
+use agent_ebpf_sensor::monitoring::ringbuf_decode::decode_exec_event;
+use agent_ebpf_sensor::monitoring::{
+    exec_event_to_security_telemetry, start_network_monitor, start_process_monitor,
+};
 use agent_ebpf_sensor::observability::{
     spawn_health_monitor, spawn_metrics_server, AgentMetrics, RATE_LIMIT_DROPS_MAP,
 };
@@ -14,7 +17,6 @@ use aya::programs::Lsm;
 use aya::{Btf, Ebpf};
 use log::info;
 use neuromesh_common::{SecurityTelemetryEvent, TelemetryHealthStats, TELEMETRY_STATS_INDEX};
-use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::unix::AsyncFd;
@@ -64,8 +66,16 @@ async fn main() -> Result<(), anyhow::Error> {
             })?,
     )?;
 
-    let correlation =
-        start_process_monitor(&mut process_bpf, shutdown.clone(), Arc::clone(&metrics)).await?;
+    let (detection_tx, mut detection_rx) =
+        tokio::sync::mpsc::channel::<SecurityTelemetryEvent>(4096);
+
+    let correlation = start_process_monitor(
+        &mut process_bpf,
+        shutdown.clone(),
+        Arc::clone(&metrics),
+        Some(detection_tx),
+    )
+    .await?;
 
     spawn_health_monitor(rate_limit_drops, Arc::clone(&metrics), shutdown.clone());
     spawn_metrics_server(Arc::clone(&metrics), shutdown.clone()).await?;
@@ -99,7 +109,9 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("🔗 Lock-free correlation engine armed (DashMap PID → process name).");
     info!("📨 Correlation Kafka ingestion armed (bounded MPSC → idempotent rdkafka).");
     info!("🛡️ XDR enforcement armed. LSM bprm_check_security active blocking enabled.");
-    info!("⚡ Detection brain armed. RuleEngine + DataNormalizer active on LSM RingBuf stream...");
+    info!(
+        "⚡ Detection brain armed. RuleEngine + DataNormalizer active on ExecEvent v1 streams..."
+    );
     info!(
         "📌 eBPF map pinning active under {} (PROCESS_EVENTS, RATE_LIMIT_BUCKET)",
         bpf_pin_root.display()
@@ -132,9 +144,11 @@ async fn main() -> Result<(), anyhow::Error> {
             }
             result = async_ring.async_io_mut(Interest::READABLE, |ring| {
                 while let Some(item) = ring.next() {
-                    let event = unsafe {
-                        ptr::read_unaligned(item.as_ptr() as *const SecurityTelemetryEvent)
+                    let bytes = item.as_ref();
+                    let Some(exec) = decode_exec_event(bytes) else {
+                        continue;
                     };
+                    let event = exec_event_to_security_telemetry(&exec);
                     if let Err(error) =
                         emit_pipeline_output(&mut pipeline, &telemetry_stream, &event)
                     {
@@ -144,6 +158,13 @@ async fn main() -> Result<(), anyhow::Error> {
                 Ok(())
             }) => {
                 result?;
+            }
+            Some(visibility) = detection_rx.recv() => {
+                if let Err(error) =
+                    emit_pipeline_output(&mut pipeline, &telemetry_stream, &visibility)
+                {
+                    log::warn!("visibility pipeline failed: {error}");
+                }
             }
         }
     }
