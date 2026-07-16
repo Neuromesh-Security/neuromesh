@@ -18,3 +18,5 @@ EXPOSE 8080
 
 USER nonroot:nonroot
 ENTRYPOINT ["/zt-policy-engine"]
+
+LABEL org.opencontainers.image.source=https://github.com/Neuromesh-Security/neuromesh
