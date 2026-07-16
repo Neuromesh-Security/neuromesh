@@ -44,7 +44,26 @@ func main() {
 		log.Fatalf("failed to initialize OPA evaluator: %v", err)
 	}
 
-	spiffe := identity.NewSPIFFEValidator(identity.DefaultConfig())
+	spiffeCfg, err := identity.ConfigFromEnv()
+	if err != nil {
+		log.Fatalf("invalid SPIFFE identity configuration: %v", err)
+	}
+
+	// NewSPIFFEValidator blocks on this context when using the live
+	// Workload API mode until the initial SVID/bundle update arrives. Bound
+	// it so a misconfigured/unreachable SPIRE agent fails startup instead of
+	// hanging forever -- fail closed, not fail silent.
+	spiffeInitCtx, cancelSPIFFEInit := context.WithTimeout(ctx, 30*time.Second)
+	spiffe, err := identity.NewSPIFFEValidator(spiffeInitCtx, spiffeCfg)
+	cancelSPIFFEInit()
+	if err != nil {
+		log.Fatalf("failed to initialize SPIFFE identity validator: %v", err)
+	}
+	defer func() {
+		if err := spiffe.Close(); err != nil {
+			log.Printf("error closing SPIFFE identity validator: %v", err)
+		}
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthHandler)
@@ -124,13 +143,12 @@ func evaluateHandler(opa *evaluator.OPAEvaluator, spiffe *identity.SPIFFEValidat
 			return
 		}
 
-		certPEM := []byte(req.Certificate)
-		if len(certPEM) == 0 {
-			certPEM = []byte("mock-internal")
-		}
-
-		idResult, err := spiffe.ValidateCertificatePEM(certPEM)
+		// No synthesized fallback certificate: a caller that presents no
+		// certificate gets exactly the same fail-closed denial as a caller
+		// that presents a malformed one. Zero trust means zero exceptions.
+		idResult, err := spiffe.ValidateCertificatePEM([]byte(req.Certificate))
 		if err != nil {
+			log.Printf("zt-policy-engine: DENY identity validation binary=%q: %v", req.BinaryPath, err)
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
 		}
