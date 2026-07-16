@@ -21,13 +21,12 @@ env:
   NEUROMESH_PERF_REGRESSION_PCT: "5"
   NEUROMESH_E2E_TIMEOUT_SECS: "30"
   NEUROMESH_MIN_GNN_SCORE: "0.8"
-  # Registry/owner for pushed + Cosign-signed images. Lowercase and pinned
-  # explicitly (rather than derived from github.repository_owner) because
-  # GHCR repository paths are case-sensitive-lowercase-only, and this must
-  # match the image path convention already used in
-  # deploy/kubernetes/neuromesh-agent.yaml (ghcr.io/neuromesh-security/...).
+  # Registry for pushed + Cosign-signed images. The owner segment is
+  # computed per-job from github.repository_owner (see the "Compute
+  # lowercase image owner" step in build-docker) rather than hardcoded here,
+  # since GHCR repository paths require lowercase and github.repository_owner
+  # preserves the org's display casing (e.g. "Neuromesh-Security").
   REGISTRY: ghcr.io
-  IMAGE_OWNER: neuromesh-security
 
 jobs:
   lint:
@@ -359,32 +358,38 @@ jobs:
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # GHCR auth root cause (2026-07-16 incident): this job already
-      # requests the correct job-level `packages: write` permission above
-      # (which is the only YAML-level lever available), but the GITHUB_TOKEN
-      # issued to a workflow run is additionally capped by the repository's
-      # or organization's Settings -> Actions -> General -> "Workflow
-      # permissions" toggle. If that toggle is set to "Read repository
-      # contents permission" (a common org-wide default), GITHUB_TOKEN will
-      # NEVER receive write:packages, regardless of what any workflow YAML
-      # requests -- this produces exactly "401 Unauthorized: token has
-      # insufficient scopes" / "failed to fetch oauth token" at this login
-      # step, with no YAML-only fix possible. That repo/org setting must be
-      # verified/changed by an admin in the GitHub UI; it cannot be set from
-      # workflow code. As a code-level mitigation that does not depend on
-      # that toggle, this step prefers a dedicated GHCR_PAT secret (a
-      # classic/fine-grained PAT scoped to write:packages) when present,
-      # since a PAT's scope is independent of the org's GITHUB_TOKEN
-      # ceiling, falling back to GITHUB_TOKEN for orgs where that ceiling is
-      # already open.
+      # GHCR_PAT is a classic PAT scoped to write:packages, provisioned as a
+      # repository secret specifically to authenticate this login step
+      # against ghcr.io (independent of the org's GITHUB_TOKEN "Workflow
+      # permissions" ceiling -- see git history for the prior incident this
+      # resolved).
       - name: Log in to GitHub Container Registry
         if: steps.publish.outputs.should_publish == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_PAT != '' && secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_PAT }}
 
+      # Docker/GHCR repository paths must be all-lowercase, but
+      # github.repository_owner preserves the org's display casing (e.g.
+      # "Neuromesh-Security"), and GitHub Actions expressions have no
+      # built-in lower() function -- compute it once here with a shell
+      # step and reuse the output everywhere an image reference is built.
+      - name: Compute lowercase image owner (Docker/GHCR tags require lowercase)
+        id: owner
+        run: echo "lower=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # Root cause of the prior "auth.docker.io/token...401 Unauthorized"
+      # failure (reproduced locally with `docker push` before this fix,
+      # 2026-07-16): every tag in this list is pushed whenever `push` is
+      # true, and any tag WITHOUT an explicit registry host (e.g. the old
+      # bare "${{ matrix.image }}:ci") is resolved by Docker to
+      # docker.io/library/... by default -- an anonymous Docker Hub push
+      # attempt, entirely unrelated to the ghcr.io login above, which then
+      # 401s. Every tag below is therefore explicitly ghcr.io-prefixed; none
+      # are bare, so there is no tag left that can silently fall back to
+      # Docker Hub.
       - name: Build Docker image
         id: build
         uses: docker/build-push-action@v6
@@ -392,15 +397,15 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           tags: |
-            ${{ matrix.image }}:ci
-            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ matrix.image }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/${{ matrix.image }}:ci
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/${{ matrix.image }}:${{ github.sha }}
           load: true
           push: ${{ steps.publish.outputs.should_publish == 'true' }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
       - name: Verify image
-        run: docker image inspect ${{ matrix.image }}:ci
+        run: docker image inspect ${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/${{ matrix.image }}:ci
 
       # --- Cosign static-key signing -------------------------------------
       # Matches apps/k8s-admission-webhook/src/validation/verifier.go's
@@ -420,7 +425,7 @@ jobs:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
           cosign sign --key env://COSIGN_PRIVATE_KEY --yes \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+            "${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
 
       # Fail-fast gate: prove the signature this job just produced actually
       # verifies against the public key *before* the pipeline reports green,
@@ -432,4 +437,4 @@ jobs:
           COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
         run: |
           cosign verify --key env://COSIGN_PUBLIC_KEY \
-            "${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+            "${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
