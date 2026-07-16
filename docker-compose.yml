@@ -52,6 +52,13 @@ services:
       - "8080:8080"
     environment:
       ZT_POLICY_ENGINE_PORT: "8080"
+      # This E2E/local dev stack has no SPIRE agent and this compose file's
+      # services never present or verify a SPIFFE X.509-SVID (the E2E flow
+      # only exercises the Kafka -> ai-threat-detector -> QueryService
+      # surface, never /v1/evaluate). Explicit, loud opt-in only -- see
+      # internal/identity/spiffe_validator.go; this must never be set in a
+      # real deployment, where NEUROMESH_SPIFFE_TRUST_BUNDLE_MODE is required.
+      NEUROMESH_INSECURE_MOCK_IDENTITY: "true"
     healthcheck:
       disable: true
     networks:
