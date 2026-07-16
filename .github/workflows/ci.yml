@@ -21,6 +21,13 @@ env:
   NEUROMESH_PERF_REGRESSION_PCT: "5"
   NEUROMESH_E2E_TIMEOUT_SECS: "30"
   NEUROMESH_MIN_GNN_SCORE: "0.8"
+  # Registry/owner for pushed + Cosign-signed images. Lowercase and pinned
+  # explicitly (rather than derived from github.repository_owner) because
+  # GHCR repository paths are case-sensitive-lowercase-only, and this must
+  # match the image path convention already used in
+  # deploy/kubernetes/neuromesh-agent.yaml (ghcr.io/neuromesh-security/...).
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: neuromesh-security
 
 jobs:
   lint:
@@ -284,6 +291,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: build-ebpf
+    permissions:
+      contents: read
+      # Required to push to GHCR with the ambient GITHUB_TOKEN below.
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -334,15 +345,73 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Images are only pushed to the registry (and therefore only signed
+      # below) on push to main. PR builds are built + loaded locally and
+      # inspected below for a fast build-sanity gate, but are never pushed:
+      # there is no registry reference to sign, and forked-repo PRs do not
+      # have access to the COSIGN_PRIVATE_KEY secret by GitHub Actions design.
+      - name: Determine whether to push + sign this build
+        id: publish
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GitHub Container Registry
+        if: steps.publish.outputs.should_publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build Docker image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          tags: ${{ matrix.image }}:ci
+          tags: |
+            ${{ matrix.image }}:ci
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ matrix.image }}:${{ github.sha }}
           load: true
+          push: ${{ steps.publish.outputs.should_publish == 'true' }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
       - name: Verify image
         run: docker image inspect ${{ matrix.image }}:ci
+
+      # --- Cosign static-key signing -------------------------------------
+      # Matches apps/k8s-admission-webhook/src/validation/verifier.go's
+      # default NEUROMESH_COSIGN_VERIFY_MODE=key trust root exactly: a
+      # single static keypair, no Fulcio/keyless, no Rekor transparency-log
+      # requirement (webhook runs with IgnoreTlog=true). Signing is keyed to
+      # the immutable digest produced by the push above, never a mutable
+      # tag, so this cannot be bypassed by re-tagging after the fact.
+      - name: Install Cosign
+        if: steps.publish.outputs.should_publish == 'true'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign pushed image with Cosign (static key)
+        if: steps.publish.outputs.should_publish == 'true'
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          cosign sign --key env://COSIGN_PRIVATE_KEY --yes \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+
+      # Fail-fast gate: prove the signature this job just produced actually
+      # verifies against the public key *before* the pipeline reports green,
+      # rather than discovering a broken signing setup only when the
+      # admission webhook later denies every pod in the cluster.
+      - name: Verify Cosign signature (fail-fast)
+        if: steps.publish.outputs.should_publish == 'true'
+        env:
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+        run: |
+          cosign verify --key env://COSIGN_PUBLIC_KEY \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
