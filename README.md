@@ -144,13 +144,17 @@ Neuromesh follows an **Open Core** strategy: the runtime sensor and deterministi
 
 ### Enterprise Edition (Commercial)
 
-| Capability | Included |
+> **Status key:** *Shipped* — implemented and tested in this repo today. *Partial* —
+> some real implementation exists but a required piece is missing (see note).
+> *Planned* — not yet implemented; no code exists for this capability yet.
+
+| Capability | Status |
 |------------|----------|
-| AI / GNN Anomaly Engine (Kafka Slow Path) | Yes |
-| SIEM integrations (Splunk HEC, Datadog, Elastic, Sentinel) | Yes |
-| Post-Quantum Cryptography signed telemetry envelopes | Yes |
-| Fleet Management (multi-cluster policy sync) | Yes |
-| OIDC / SAML SSO, audited admin dashboards | Yes |
+| AI / GNN Anomaly Engine (Kafka Slow Path) | Scaffold — rule-based edge-growth heuristic on a `networkx` graph (`ai-threat-detector/src/inference/gnn_evaluator.py`); no ML/GNN model, training, or inference framework is implemented. Planned for a future release. |
+| SIEM integrations (Splunk HEC, Datadog, Elastic, Sentinel) | Planned — no integration code exists yet. |
+| Post-Quantum Cryptography signed telemetry envelopes | Planned — no PQC (Kyber/Dilithium or otherwise) code exists yet. |
+| Fleet Management (multi-cluster policy sync) | Planned — `zt-policy-engine` is currently a single-node policy evaluator; no multi-cluster sync exists yet. |
+| OIDC / SAML SSO, audited admin dashboards | Partial — RBAC, session verification, and structured access-decision logging are implemented (`security-dashboard/src/middleware.ts`, `src/lib/auth/rbac.ts`); the OIDC/SAML authentication handshake (callback endpoint, authorization-code/token exchange) is not yet implemented. |
 | 24×7 SLA, dedicated TAM, custom MITRE detection packs | Yes |
 
 **Pricing:** [sales@neuromesh.security](mailto:sales@neuromesh.security)
