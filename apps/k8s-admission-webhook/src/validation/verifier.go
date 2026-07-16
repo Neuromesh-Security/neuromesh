@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,18 @@ import (
 // avoids that package's unconditional GitHub/GitLab key-reference client
 // imports (pkg/cosign/git/{github,gitlab}) -- functionally identical, since
 // LoadPublicKeyRaw is itself a two-line wrapper around these same calls.
+//
+// NOTE on the remaining Rekor CVE (evaluated 2026-07-16): Trivy flags
+// github.com/sigstore/rekor v1.4.3 (CVE-2026-48702, HIGH, unbounded gzip
+// decompression) with a fix in v1.5.2. This is a transitive, indirect
+// dependency of cosign/v2 (see above) that this webhook never calls --
+// IgnoreTlog=true means no Rekor client code path executes. Bumping it in
+// isolation was evaluated (`go get github.com/sigstore/rekor@v1.5.2` +
+// `go mod tidy`) and confirmed to re-pull the exact AWS/Azure/GCP/HashiVault
+// KMS SDKs, tink-crypto, and google/trillian that the deliberate dependency
+// reduction above removed, for a HIGH (not CRITICAL) finding in dead code
+// that does not fail the CI Trivy gate (gate enforces CRITICAL only). This
+// is an accepted, investigated trade-off, not an oversight.
 
 // Trust-root modes for image signature verification. "key" (static public key)
 // is the default, production-ready mode. "keyless" (Fulcio short-lived cert +
@@ -136,6 +149,13 @@ func NewVerifierFromEnv() (ImageVerifier, error) {
 		keyPath := os.Getenv(EnvCosignPublicKeyPath)
 		if keyPath == "" {
 			keyPath = defaultCosignPublicKeyPath
+		}
+		// Clean and require an absolute path so the configured trust-root
+		// location can't be influenced by a relative/traversal-style value
+		// (e.g. "../../etc/passwd") sneaking in through the environment.
+		keyPath = filepath.Clean(keyPath)
+		if !filepath.IsAbs(keyPath) {
+			return nil, fmt.Errorf("%s must be an absolute path, got %q", EnvCosignPublicKeyPath, keyPath)
 		}
 		pemBytes, err := os.ReadFile(keyPath)
 		if err != nil {
