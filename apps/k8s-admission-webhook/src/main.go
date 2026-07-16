@@ -28,10 +28,22 @@ const (
 )
 
 func main() {
+	// Fail closed on startup if the image signature trust root cannot be
+	// loaded -- serving admission traffic without a working verifier would
+	// mean silently allowing unverified images, which is unacceptable for a
+	// security-gating webhook.
+	verifier, err := validation.NewVerifierFromEnv()
+	if err != nil {
+		log.Fatalf("failed to initialize container image signature verifier: %v", err)
+	}
+	validator := validation.NewValidator(verifier)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc(healthPath, healthHandler)
-	mux.HandleFunc(validatePath, admissionHandler(validation.ValidateAdmissionReview))
-	mux.HandleFunc(mutatePath, admissionHandler(mutation.MutateAdmissionReview))
+	mux.HandleFunc(validatePath, admissionHandler(validator.ValidateAdmissionReview))
+	mux.HandleFunc(mutatePath, admissionHandler(func(_ context.Context, req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
+		return mutation.MutateAdmissionReview(req)
+	}))
 
 	addr := envOrDefault("WEBHOOK_LISTEN_ADDR", defaultListenAddr)
 	certFile := envOrDefault("WEBHOOK_TLS_CERT_FILE", defaultCertFile)
@@ -64,7 +76,7 @@ func main() {
 	}
 }
 
-type reviewHandler func(*admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse
+type reviewHandler func(context.Context, *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse
 
 func admissionHandler(handler reviewHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +102,7 @@ func admissionHandler(handler reviewHandler) http.HandlerFunc {
 			return
 		}
 
-		review.Response = handler(review.Request)
+		review.Response = handler(r.Context(), review.Request)
 		review.APIVersion = "admission.k8s.io/v1"
 		review.Kind = admissionReviewKind
 		review.Response.UID = review.Request.UID
