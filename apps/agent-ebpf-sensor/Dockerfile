@@ -94,3 +94,5 @@ COPY --from=agent-builder \
 
 ENV RUST_LOG=info
 ENTRYPOINT ["/usr/local/bin/agent-ebpf-sensor"]
+
+LABEL org.opencontainers.image.source=https://github.com/Neuromesh-Security/neuromesh

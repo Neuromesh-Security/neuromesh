@@ -30,3 +30,5 @@ ENV PYTHONUNBUFFERED=1 \
     NEUROMESH_KAFKA_GROUP_ID=ai-threat-detector
 
 CMD ["python", "main.py"]
+
+LABEL org.opencontainers.image.source=https://github.com/Neuromesh-Security/neuromesh
