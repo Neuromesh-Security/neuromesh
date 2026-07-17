@@ -202,16 +202,26 @@ Integration tests run via `cargo test -p neuromesh-integration-tests` **without*
 
 ## 7. Residual risks (v0.1.0-core)
 
-| Risk | Severity | Notes |
-|------|----------|-------|
-| C execve tracepoint emits PID-only | Medium | Full argv capture requires verifier-reviewed `ctx` reads |
-| `neuromesh_exec_hook` not attached | Low | Rich passive telemetry exists but unused at runtime |
-| Per-CPU drop accounting | Low | `RATE_LIMIT_DROPS` summed across CPUs; NUMA hot spots may dominate |
-| Hardcoded `task_struct` offsets | Medium | `ppid == 0` silently excluded from burst detection |
-| No `execveat` hook | Medium | Alternative exec syscall unmonitored |
-| LotL single-shot from whitelisted path | Medium | Requires Slow Path / Wasm (future) |
-| Agent tampering by root | High | No open-source tamper detection |
-| CI coverage gate | Low | ≥70% line coverage on core crates; Ring 0 not measured |
+> **Ownership note (2026-07-17):** `Owner`/`Target` columns added below following
+> two independent audit findings that High/Medium residual risks were disclosed
+> but unowned — an acknowledged-but-unowned finding reads worse in a Fortune 500
+> security review than an undisclosed one. `Agent tampering by root` is tracked
+> in [#44](https://github.com/Neuromesh-Security/neuromesh/issues/44); the
+> remaining Medium-severity rows below are flagged as needing their own issues
+> (`Tracked in #TBD`) and are intentionally NOT assigned a real issue number or
+> a named owner here until those issues exist — do not treat `#TBD` as a real
+> reference.
+
+| Risk | Severity | Notes | Owner | Target |
+|------|----------|-------|-------|--------|
+| C execve tracepoint emits PID-only | Medium | Full argv capture requires verifier-reviewed `ctx` reads. Planned mitigation: add verifier-reviewed argv capture to the C tracepoint. | Unassigned | Tracked in #TBD — new issue needed |
+| `neuromesh_exec_hook` not attached | Low | Rich passive telemetry exists but unused at runtime | — | — |
+| Per-CPU drop accounting | Low | `RATE_LIMIT_DROPS` summed across CPUs; NUMA hot spots may dominate | — | — |
+| Hardcoded `task_struct` offsets | Medium | `ppid == 0` silently excluded from burst detection. Planned mitigation: replace with CO-RE/BTF-relocatable field access, matching the C tracepoint's approach. | Unassigned | Tracked in #TBD — new issue needed |
+| No `execveat` hook | Medium | Alternative exec syscall unmonitored. Planned mitigation: add `execveat` coverage to the tracepoint hook. | Unassigned | Tracked in #TBD — new issue needed |
+| LotL single-shot from whitelisted path | Medium | Requires Slow Path / Wasm (future). Planned mitigation: Wasm policy engine + Slow Path GNN correlation (currently scaffold-only, see §3). | Unassigned | Tracked in #TBD — new issue needed |
+| Agent tampering by root | High | No open-source tamper detection. Planned mitigation: signed eBPF bytecode attestation + runtime integrity check. | Dragan Flavius (@DraganFlavius) | Tracked in #44, target: v0.2 |
+| CI coverage gate | Low | ≥70% line coverage on core crates; Ring 0 not measured | — | — |
 
 ---
 
