@@ -3,8 +3,22 @@ name: Security Scan Pipeline
 on:
   push:
     branches: [main]
+    # Non-core services (see experimental-ci.yml) have their own,
+    # independent SAST/SBOM/Trivy pipeline -- see sast-bandit and
+    # supply-chain notes below. A push/PR touching ONLY those paths must
+    # not trigger this core workflow at all.
+    paths-ignore:
+      - apps/ai-threat-detector/**
+      - apps/security-dashboard/**
   pull_request:
     branches: [main]
+    paths-ignore:
+      - apps/ai-threat-detector/**
+      - apps/security-dashboard/**
+  # The nightly schedule is intentionally NOT path-filtered (schedule
+  # triggers ignore paths-ignore/paths entirely) -- it always does a full
+  # repo sweep regardless of what changed, which is correct for a
+  # scheduled security scan.
   schedule:
     - cron: "0 3 * * *"
 
@@ -19,7 +33,8 @@ permissions:
 env:
   GO_VERSION: "1.25.8"
   GOSEC_VERSION: "v2.22.4"
-  PYTHON_VERSION: "3.12"
+  # PYTHON_VERSION removed: its only consumer (sast-bandit) moved to
+  # experimental-ci.yml, which declares its own PYTHON_VERSION.
 
 jobs:
   filesystem-trivy:
@@ -170,53 +185,28 @@ jobs:
             cargo deny check advisories
           fi
 
-  sast-bandit:
-    name: SAST — Python (bandit)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: apps/ai-threat-detector
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: apps/ai-threat-detector/requirements.txt
-
-      - name: Install bandit
-        run: pip install 'bandit[toml]>=1.7.5'
-
-      - name: Run bandit
-        run: |
-          bandit -r src main.py \
-            -f json \
-            -o bandit.json \
-            -ll
-
-      - name: Upload bandit report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bandit-ai-threat-detector
-          path: bandit.json
-          retention-days: 30
+  # sast-bandit (Python/bandit SAST for apps/ai-threat-detector) moved to
+  # .github/workflows/experimental-ci.yml (2026-07-17 CI blast-radius
+  # review): this job used to be a hard `needs:` prerequisite for the
+  # `supply-chain` job below, meaning a bandit finding in this non-core
+  # service could prevent agent-ebpf-sensor's and zt-policy-engine's own
+  # SBOM/Trivy container scans from ever running. It now runs
+  # independently, gated only on apps/ai-threat-detector/** changes, with
+  # identical rigor (same bandit invocation, same severity flags).
 
   supply-chain:
     name: SBOM & Container Scan (${{ matrix.image }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # neuromesh-ai-threat-detector intentionally NOT in this matrix -- see
+    # the sast-bandit note above. Its SBOM/Trivy container scan now runs
+    # in experimental-ci.yml, independent of these core-only prerequisites.
     needs:
       - filesystem-trivy
       - semgrep
       - sast-gosec
       - sast-cargo-audit
       - sast-cargo-deny
-      - sast-bandit
     strategy:
       fail-fast: true
       matrix:
@@ -224,9 +214,6 @@ jobs:
           - image: neuromesh-zt-policy-engine
             context: apps/zt-policy-engine
             dockerfile: apps/zt-policy-engine/Dockerfile
-          - image: neuromesh-ai-threat-detector
-            context: apps/ai-threat-detector
-            dockerfile: apps/ai-threat-detector/Dockerfile
           - image: neuromesh-agent-ebpf-sensor
             context: .
             dockerfile: apps/agent-ebpf-sensor/Dockerfile

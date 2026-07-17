@@ -1,0 +1,248 @@
+# Experimental / Non-Core Services CI
+#
+# Scope-boundary note (CI blast-radius review, 2026-07-17): ai-threat-detector
+# and security-dashboard are explicitly out of v0.1.0-core scope per
+# docs/threat-model.md's own "Out of scope (v0.1.0-core)" section (Slow Path
+# GNN inference is listed there by name). They are validated independently in
+# this workflow, pending dedicated engineering capacity, so that a failure or
+# slow test in either non-core service can never block or delay CI for the
+# core sensor (agent-ebpf-sensor), zt-policy-engine, or k8s-admission-webhook.
+#
+# Everything in this file is scoped via the `paths:` filter below to changes
+# under apps/ai-threat-detector/** or apps/security-dashboard/** only -- it
+# does not run at all for core-only changes, and nothing in ci.yml or
+# security-scan-pipeline.yml waits on it.
+#
+# security-dashboard currently has no lint/build/test/scan jobs anywhere in
+# this repository (verified during this review -- zero references in any
+# workflow file). Its path is included in the trigger filter below so that
+# whenever dashboard-specific CI is added, it lands here by construction
+# rather than being wired back into the core pipeline.
+
+name: Experimental / Non-Core Services CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/ai-threat-detector/**
+      - apps/security-dashboard/**
+      - .github/workflows/experimental-ci.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - apps/ai-threat-detector/**
+      - apps/security-dashboard/**
+      - .github/workflows/experimental-ci.yml
+
+concurrency:
+  group: experimental-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  REGISTRY: ghcr.io
+
+jobs:
+  # --- ai-threat-detector -----------------------------------------------
+
+  sast-bandit:
+    name: SAST — Python (bandit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    defaults:
+      run:
+        working-directory: apps/ai-threat-detector
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: apps/ai-threat-detector/requirements.txt
+
+      - name: Install bandit
+        run: pip install 'bandit[toml]>=1.7.5'
+
+      - name: Run bandit
+        run: |
+          bandit -r src main.py \
+            -f json \
+            -o bandit.json \
+            -ll
+
+      - name: Upload bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-ai-threat-detector
+          path: apps/ai-threat-detector/bandit.json
+          retention-days: 30
+
+  build-docker-ai-threat-detector:
+    name: Build Docker (neuromesh-ai-threat-detector)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Required to push to GHCR with the ambient token below.
+      packages: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Mirrors ci.yml's build-docker "should_publish" gate exactly: only
+      # push + sign on a push to main, never on PR builds (forked-repo PRs
+      # do not have access to COSIGN_PRIVATE_KEY by GitHub Actions design).
+      - name: Determine whether to push + sign this build
+        id: publish
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GitHub Container Registry
+        if: steps.publish.outputs.should_publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Compute lowercase image owner (Docker/GHCR tags require lowercase)
+        id: owner
+        run: echo "lower=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/ai-threat-detector
+          file: apps/ai-threat-detector/Dockerfile
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/neuromesh-ai-threat-detector:ci
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/neuromesh-ai-threat-detector:${{ github.sha }}
+          load: true
+          push: ${{ steps.publish.outputs.should_publish == 'true' }}
+          cache-from: type=gha,scope=neuromesh-ai-threat-detector
+          cache-to: type=gha,mode=max,scope=neuromesh-ai-threat-detector
+
+      - name: Verify image
+        run: docker image inspect ${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/neuromesh-ai-threat-detector:ci
+
+      # --- Cosign static-key signing -------------------------------------
+      # Identical trust root and rigor to ci.yml's build-docker signing
+      # step: matches apps/k8s-admission-webhook's default
+      # NEUROMESH_COSIGN_VERIFY_MODE=key trust root, keyed to the immutable
+      # digest produced by the push above.
+      - name: Install Cosign
+        if: steps.publish.outputs.should_publish == 'true'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign pushed image with Cosign (static key)
+        if: steps.publish.outputs.should_publish == 'true'
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          cosign sign --key env://COSIGN_PRIVATE_KEY --yes \
+            "${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/neuromesh-ai-threat-detector@${{ steps.build.outputs.digest }}"
+
+      - name: Verify Cosign signature (fail-fast)
+        if: steps.publish.outputs.should_publish == 'true'
+        env:
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+        run: |
+          cosign verify --key env://COSIGN_PUBLIC_KEY \
+            "${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/neuromesh-ai-threat-detector@${{ steps.build.outputs.digest }}"
+
+  supply-chain-ai-threat-detector:
+    name: SBOM & Container Scan (neuromesh-ai-threat-detector)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: sast-bandit
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/ai-threat-detector
+          file: apps/ai-threat-detector/Dockerfile
+          tags: neuromesh-ai-threat-detector:ci
+          load: true
+          cache-from: type=gha,scope=neuromesh-ai-threat-detector
+          cache-to: type=gha,mode=max,scope=neuromesh-ai-threat-detector
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: neuromesh-ai-threat-detector:ci
+          format: spdx-json
+          output-file: neuromesh-ai-threat-detector-sbom.spdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-neuromesh-ai-threat-detector
+          path: neuromesh-ai-threat-detector-sbom.spdx.json
+          retention-days: 30
+
+      - name: Scan image for CVEs (Trivy report)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: neuromesh-ai-threat-detector:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: 0
+          format: sarif
+          output: trivy-neuromesh-ai-threat-detector.sarif
+
+      - name: Enforce Trivy container gate (CRITICAL only)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: neuromesh-ai-threat-detector:ci
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+          format: table
+          skip-setup-trivy: true
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-neuromesh-ai-threat-detector.sarif
+          category: trivy-neuromesh-ai-threat-detector
+
+  # --- security-dashboard -------------------------------------------------
+  # No jobs today: this service currently has no lint/build/test/scan step
+  # anywhere in the repository (verified 2026-07-17 -- zero references in
+  # ci.yml, security-scan-pipeline.yml, or ai-model-promotion.yml prior to
+  # this change). Nothing existing was moved here because nothing existing
+  # covers it yet. The `paths:` trigger above already includes
+  # apps/security-dashboard/** so that whenever CI is added for this
+  # service, it belongs in this file from the start.
