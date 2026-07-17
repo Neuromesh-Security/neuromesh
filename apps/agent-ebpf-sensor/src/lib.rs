@@ -1,6 +1,7 @@
 //! User-space detection and telemetry pipeline (kernel-independent test surface).
 
 pub mod bpf_pin;
+pub mod btf_offsets;
 pub mod ingestion;
 pub mod mocks;
 pub mod normalizer;

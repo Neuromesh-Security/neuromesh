@@ -203,6 +203,19 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # IMPORTANT — matrix `kernel` labels vs. actual booted kernels:
+  # The labels "5.15" / "6.1" / "6.8+" are historical aspirational tags, NOT
+  # the kernel versions GitHub-hosted runners actually boot. As of 2026-07
+  # (actions/runner-images Ubuntu2204/Ubuntu2404 readmes + prior GH issues):
+  #   - "5.15" and "6.1" both run on ubuntu-22.04 → ~6.8.0-*-azure (same image)
+  #   - "6.8+" runs on ubuntu-24.04 → ~6.17.0-*-azure
+  # So this job gives live-kernel BTF + verifier coverage on *two* distinct
+  # Azure HWE kernels (≈6.8 and ≈6.17), NOT three labeled LTS lines and NOT
+  # real 5.15 / 6.1. The "Verify Rust enforcement + live BTF offsets" step
+  # below makes that residual gap visible in CI logs (uname -r + resolved
+  # offsets) rather than claiming cross-kernel coverage the runners cannot
+  # provide. See PR discussion for the recommended manual 5.15/6.1 pre-release
+  # check path (same disclosure pattern as execve_stress_test).
   ebpf-verifier-check:
     name: eBPF Verifier (${{ matrix.kernel }})
     runs-on: ${{ matrix.runner }}
@@ -223,6 +236,16 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Report runner kernel (actual booted version, not matrix label)
+        run: |
+          echo "matrix.kernel label: ${{ matrix.kernel }}"
+          echo "matrix.runner:       ${{ matrix.runner }}"
+          echo "uname -r:            $(uname -r)"
+          echo "--- /proc/version ---"
+          cat /proc/version
+          echo "--- BTF present? ---"
+          ls -la /sys/kernel/btf/vmlinux
 
       - name: Download eBPF bytecode (${{ matrix.kernel }})
         uses: actions/download-artifact@v4
@@ -254,7 +277,12 @@ jobs:
             llvm-objcopy --remove-section=.BTF.ext "target/bpf/${base}.bpf.o"
           done
 
-      - name: Verify Rust enforcement bytecode
+      # Exercises the production BTF offset resolver against this runner's
+      # live /sys/kernel/btf/vmlinux, injects offsets, then asks the kernel
+      # verifier to accept neuromesh_lsm_exec_guard. Fail-closed: any
+      # resolution failure fails this job. Does not weaken the prior
+      # verifier gate — it strengthens it to cover the new startup path.
+      - name: Verify Rust enforcement + live BTF offsets
         run: bash scripts/ci/verify_ebpf_bytecode.sh "${{ env.BPF_ARTIFACT_PATH }}"
 
       - name: Verify C visibility bytecode

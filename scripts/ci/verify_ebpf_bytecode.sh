@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Load compiled eBPF bytecode through the kernel verifier (Aya loader).
 # Fails CI when the verifier rejects any program in the object file.
+#
+# For the Rust LSM enforcement object this also runs the production BTF
+# offset-resolution path (live /sys/kernel/btf/vmlinux → resolve_offsets →
+# EbpfLoader::override_global → verifier load). Fail-closed: resolution
+# failure fails this script. See apps/agent-ebpf-sensor/src/bin/verify_ebpf.rs.
 set -euo pipefail
 
 readonly BPF_OBJECT="${1:?usage: verify_ebpf_bytecode.sh <path-to-bytecode>}"

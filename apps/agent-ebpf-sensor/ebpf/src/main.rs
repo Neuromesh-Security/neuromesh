@@ -26,14 +26,34 @@ const LSM_DENY: i32 = -1;
 /// Prefix window used for blacklist matching without exhausting the 512-byte BPF stack.
 const PATH_PREFIX_LEN: usize = 16;
 
-/// `linux_binprm->filename` field offset on kernel 6.x (see `struct linux_binprm`).
-const BPRM_FILENAME_OFFSET: usize = 72;
+/// `linux_binprm->filename`, `task_struct->real_parent`, and `task_struct->tgid`
+/// byte offsets.
+///
+/// These are **not** compile-time constants: rustc/bpf-linker have no
+/// equivalent of Clang's `__builtin_preserve_access_index`, so this program
+/// cannot emit CO-RE relocations for these fields the way the sibling C
+/// tracepoint (`src/bpf/sys_exec.bpf.c`, via `bpf_core_read()`) does.
+/// Instead, the orchestrator resolves the real, running kernel's offsets from
+/// its BTF at startup (see `agent_ebpf_sensor::btf_offsets`) and injects them
+/// here via `aya::EbpfLoader::override_global(name, value, must_exist = true)`
+/// *before* this program is loaded into the kernel.
+///
+/// The `u64::MAX` initializers below are never used by a correctly-functioning
+/// agent: if BTF resolution fails for any reason (BTF unavailable, struct or
+/// member not found by name, unexpected bitfield encoding, malformed BTF),
+/// the orchestrator aborts startup and this program is never loaded — there
+/// is no fallback to a guessed or previously-hardcoded offset. Per the
+/// `override_global` contract, reads of these statics must go through
+/// `core::ptr::read_volatile` so the compiler cannot constant-fold away the
+/// load-time-patched value.
+#[no_mangle]
+static BPRM_FILENAME_OFFSET: u64 = u64::MAX;
 
-/// `task_struct->real_parent` offset (x86_64, kernel 6.x — best-effort).
-const TASK_REAL_PARENT_OFFSET: usize = 1216;
+#[no_mangle]
+static TASK_REAL_PARENT_OFFSET: u64 = u64::MAX;
 
-/// `task_struct->tgid` offset (x86_64, kernel 6.x — best-effort).
-const TASK_TGID_OFFSET: usize = 104;
+#[no_mangle]
+static TASK_TGID_OFFSET: u64 = u64::MAX;
 
 #[map]
 static TELEMETRY_RINGBUF: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
@@ -133,22 +153,23 @@ fn read_ppid_best_effort(event: &mut ExecEvent) -> u32 {
             return 0;
         }
 
-        let parent_ptr: *const u8 = match bpf_probe_read_kernel(
-            task.add(TASK_REAL_PARENT_OFFSET) as *const *const u8,
-        ) {
-            Ok(ptr) => ptr,
-            Err(_) => {
-                event.capture_status |= CAPTURE_PPID;
-                return 0;
-            }
-        };
+        let real_parent_offset = core::ptr::read_volatile(&TASK_REAL_PARENT_OFFSET) as usize;
+        let parent_ptr: *const u8 =
+            match bpf_probe_read_kernel(task.add(real_parent_offset) as *const *const u8) {
+                Ok(ptr) => ptr,
+                Err(_) => {
+                    event.capture_status |= CAPTURE_PPID;
+                    return 0;
+                }
+            };
 
         if parent_ptr.is_null() {
             event.capture_status |= CAPTURE_PPID;
             return 0;
         }
 
-        match bpf_probe_read_kernel(parent_ptr.add(TASK_TGID_OFFSET) as *const u32) {
+        let tgid_offset = core::ptr::read_volatile(&TASK_TGID_OFFSET) as usize;
+        match bpf_probe_read_kernel(parent_ptr.add(tgid_offset) as *const u32) {
             Ok(ppid) => ppid,
             Err(_) => {
                 event.capture_status |= CAPTURE_PPID;
@@ -172,7 +193,8 @@ fn read_bprm_path_prefix(ctx: &LsmContext) -> Result<[u8; PATH_PREFIX_LEN], i64>
 fn read_bprm_filename_ptr(ctx: &LsmContext) -> Result<*const u8, i64> {
     let bprm_ptr: *const u8 = unsafe { ctx.arg::<*const u8>(0) };
     unsafe {
-        bpf_probe_read_kernel(bprm_ptr.add(BPRM_FILENAME_OFFSET) as *const *const u8)
+        let filename_offset = core::ptr::read_volatile(&BPRM_FILENAME_OFFSET) as usize;
+        bpf_probe_read_kernel(bprm_ptr.add(filename_offset) as *const *const u8)
             .map_err(|error| error as i64)
     }
 }

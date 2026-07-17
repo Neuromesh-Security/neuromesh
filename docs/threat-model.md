@@ -221,6 +221,7 @@ Integration tests run via `cargo test -p neuromesh-integration-tests` **without*
 | No `execveat` hook | Medium | Alternative exec syscall unmonitored. Planned mitigation: add `execveat` coverage to the tracepoint hook. | Unassigned | Tracked in #TBD — new issue needed |
 | LotL single-shot from whitelisted path | Medium | Requires Slow Path / Wasm (future). Planned mitigation: Wasm policy engine + Slow Path GNN correlation (currently scaffold-only, see §3). | Unassigned | Tracked in #TBD — new issue needed |
 | Agent tampering by root | High | No open-source tamper detection. Planned mitigation: signed eBPF bytecode attestation + runtime integrity check. | Dragan Flavius (@DraganFlavius) | Tracked in #44, target: v0.2 |
+| BTF offset resolver cross-kernel coverage | Medium | Not yet validated on real 5.15/6.1 (or a true non-Azure 6.8) kernels — CI's `"5.15"`/`"6.1"` matrix labels currently both resolve to the same ~6.8-azure runner kernel. Current mitigation: CI fail-closed on GH-hosted ~6.8-azure and ~6.17-azure via the production `verify-ebpf` path; unit tests + one WSL2 5.15.167 fixture cross-checked against bpftool ground truth. Planned mitigation: scoped manual pre-release check on real target hardware for 5.15/6.1 before claiming those specific lines as validated (same disclosure pattern as `execve_stress_test`). | Unassigned | Tracked in #TBD — new issue needed |
 | CI coverage gate | Low | ≥70% line coverage on core crates; Ring 0 not measured | — | — |
 
 ---
