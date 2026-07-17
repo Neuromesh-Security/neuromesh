@@ -7,7 +7,9 @@ use agent_ebpf_sensor::monitoring::{
 use agent_ebpf_sensor::observability::{
     spawn_health_monitor, spawn_metrics_server, AgentMetrics, RATE_LIMIT_DROPS_MAP,
 };
+use agent_ebpf_sensor::path_deny::{self, PathDenyMaps};
 use agent_ebpf_sensor::pipeline::TelemetryPipeline;
+use agent_ebpf_sensor::policy_sync;
 use agent_ebpf_sensor::rules::RuleEngine;
 use agent_ebpf_sensor::telemetry_stream::{self, TelemetryStreamHandle};
 use agent_ebpf_sensor::wasm_policy::WasmPolicyEngine;
@@ -17,7 +19,10 @@ use aya::maps::{Array, MapData, PerCpuArray, RingBuf};
 use aya::programs::Lsm;
 use aya::{Btf, Ebpf, EbpfLoader};
 use log::info;
-use neuromesh_common::{SecurityTelemetryEvent, TelemetryHealthStats, TELEMETRY_STATS_INDEX};
+use neuromesh_common::{
+    PathDenyEntry, SecurityTelemetryEvent, TelemetryHealthStats, PATH_DENY_COUNT_MAP,
+    PATH_DENY_LIST_MAP, TELEMETRY_STATS_INDEX,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::unix::AsyncFd;
@@ -81,12 +86,35 @@ async fn main() -> Result<(), anyhow::Error> {
             "failed to load enforcement eBPF object with BTF-resolved offsets injected — \
              refusing to start (fail-closed)",
         )?;
+
+    // Fail-closed bootstrap: seed PATH_DENY_LIST with the historical hardcoded
+    // prefixes BEFORE attaching the LSM. An empty deny map would fail-open.
+    let deny_list = Array::<MapData, PathDenyEntry>::try_from(
+        enforcement_bpf
+            .take_map(PATH_DENY_LIST_MAP)
+            .ok_or_else(|| anyhow::anyhow!("{PATH_DENY_LIST_MAP} map missing from eBPF object"))?,
+    )?;
+    let deny_count = Array::<MapData, u32>::try_from(
+        enforcement_bpf
+            .take_map(PATH_DENY_COUNT_MAP)
+            .ok_or_else(|| anyhow::anyhow!("{PATH_DENY_COUNT_MAP} map missing from eBPF object"))?,
+    )?;
+    let mut deny_maps = PathDenyMaps {
+        list: deny_list,
+        count: deny_count,
+    };
+    let policy_state = path_deny::bootstrap_deny_maps(&mut deny_maps)
+        .context("failed to bootstrap path-prefix deny list (fail-closed)")?;
+    info!("🛡️ Path-prefix deny list bootstrapped (fail-closed): /tmp/, /dev/shm/, /var/tmp/");
+
     let lsm_program: &mut Lsm = enforcement_bpf
         .program_mut("neuromesh_lsm_exec_guard")
         .ok_or_else(|| anyhow::anyhow!("neuromesh_lsm_exec_guard program missing"))?
         .try_into()?;
     lsm_program.load("bprm_check_security", &btf)?;
     lsm_program.attach()?;
+
+    let _policy_sync = policy_sync::spawn_policy_sync(deny_maps, policy_state, shutdown.clone());
 
     let correlation_ingestion = ingestion::spawn_from_env().await;
 

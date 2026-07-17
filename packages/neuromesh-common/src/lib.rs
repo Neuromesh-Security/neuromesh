@@ -120,6 +120,77 @@ pub struct TelemetryHealthStats {
 /// Single-slot index for the `TELEMETRY_STATS` array map.
 pub const TELEMETRY_STATS_INDEX: u32 = 0;
 
+/// Max path-prefix deny entries in the LSM `PATH_DENY_LIST` BPF array.
+///
+/// Bound is fixed for the BPF verifier (compile-time-bounded loop). 64 is far
+/// above the Phase-1 bootstrap set of 3 while remaining a trivial hot-path cost.
+pub const PATH_DENY_MAX_ENTRIES: u32 = 64;
+
+/// Byte length of each deny-list prefix key — matches the LSM's
+/// `PATH_PREFIX_LEN` window used for blacklist matching.
+pub const PATH_DENY_KEY_BYTES: usize = 16;
+
+/// BPF map name for the centrally-governed path-prefix deny list (enforcement object).
+pub const PATH_DENY_LIST_MAP: &str = "PATH_DENY_LIST";
+
+/// BPF map name for the active entry count companion array (single u32 at index 0).
+pub const PATH_DENY_COUNT_MAP: &str = "PATH_DENY_COUNT";
+
+/// Bootstrap / fail-closed default deny prefixes — identical to the historical
+/// hardcoded LSM set (`/tmp/`, `/dev/shm/`, `/var/tmp/`). Must stay in sync with
+/// `zt-policy-engine`'s `/v1/policy-bundle` export.
+pub const BOOTSTRAP_PATH_DENY_PREFIXES: &[&[u8]] = &[b"/tmp/", b"/dev/shm/", b"/var/tmp/"];
+
+/// One deny-list entry stored in the `PATH_DENY_LIST` BPF array.
+///
+/// `len` is the significant byte count in `bytes` (1..=PATH_DENY_KEY_BYTES).
+/// Matching uses the same `starts_with` semantics as the former hardcoded LSM
+/// compare: the path is denied iff it begins with `bytes[..len]`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PathDenyEntry {
+    pub len: u32,
+    pub bytes: [u8; PATH_DENY_KEY_BYTES],
+}
+
+impl PathDenyEntry {
+    /// Build an entry from a path prefix. Returns `None` if empty or longer
+    /// than [`PATH_DENY_KEY_BYTES`].
+    pub fn from_prefix(prefix: &[u8]) -> Option<Self> {
+        if prefix.is_empty() || prefix.len() > PATH_DENY_KEY_BYTES {
+            return None;
+        }
+        let mut bytes = [0u8; PATH_DENY_KEY_BYTES];
+        bytes[..prefix.len()].copy_from_slice(prefix);
+        Some(Self {
+            len: prefix.len() as u32,
+            bytes,
+        })
+    }
+
+    /// True when `path` starts with this entry's significant bytes.
+    #[inline]
+    pub fn matches(&self, path: &[u8]) -> bool {
+        let len = self.len as usize;
+        if len == 0 || len > PATH_DENY_KEY_BYTES || path.len() < len {
+            return false;
+        }
+        path[..len]
+            .iter()
+            .zip(self.bytes[..len].iter())
+            .all(|(a, b)| a == b)
+    }
+}
+
+impl Default for PathDenyEntry {
+    fn default() -> Self {
+        Self {
+            len: 0,
+            bytes: [0; PATH_DENY_KEY_BYTES],
+        }
+    }
+}
+
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for ExecEvent {}
 
@@ -128,3 +199,6 @@ unsafe impl aya::Pod for SecurityTelemetryEvent {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for TelemetryHealthStats {}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for PathDenyEntry {}
