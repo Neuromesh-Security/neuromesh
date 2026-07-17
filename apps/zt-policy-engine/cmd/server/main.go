@@ -15,6 +15,7 @@ import (
 	"neuromesh/zt-policy-engine/internal/evaluator"
 	"neuromesh/zt-policy-engine/internal/identity"
 	"neuromesh/zt-policy-engine/internal/middleware"
+	"neuromesh/zt-policy-engine/internal/policybundle"
 	"neuromesh/zt-policy-engine/internal/query"
 )
 
@@ -68,6 +69,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthHandler)
 	mux.HandleFunc("POST /v1/evaluate", evaluateHandler(opa, spiffe))
+	mux.HandleFunc("GET /v1/policy-bundle", policybundle.Handler())
 	query.RegisterRoutes(mux)
 
 	port, err := parseListenPort(os.Getenv("ZT_POLICY_ENGINE_PORT"))

@@ -4,8 +4,8 @@
 
 use aya_ebpf::{
     helpers::{
-        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid,
-        bpf_ktime_get_ns, bpf_probe_read_kernel, bpf_probe_read_kernel_str_bytes,
+        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns,
+        bpf_probe_read_kernel, bpf_probe_read_kernel_str_bytes,
     },
     macros::{lsm, map},
     maps::{Array, RingBuf},
@@ -14,17 +14,19 @@ use aya_ebpf::{
 use aya_ebpf_bindings::helpers::bpf_get_current_task;
 use aya_log_ebpf::info;
 use neuromesh_common::{
-    CAPTURE_COMM, CAPTURE_CONTAINER_ID, CAPTURE_EUID, CAPTURE_FILENAME, CAPTURE_NAMESPACE_ID,
-    CAPTURE_PPID, ENFORCEMENT_BLOCKED, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE,
-    EXEC_EVENT_TYPE_EXECVE, ExecEvent, TelemetryHealthStats, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN,
-    MAX_FILENAME_LEN, TELEMETRY_STATS_INDEX, UNKNOWN_SENTINEL,
+    PathDenyEntry, CAPTURE_COMM, CAPTURE_CONTAINER_ID, CAPTURE_EUID, CAPTURE_FILENAME,
+    CAPTURE_NAMESPACE_ID, CAPTURE_PPID, ENFORCEMENT_BLOCKED, EXEC_EVENT_SCHEMA_VERSION,
+    EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE, ExecEvent, TelemetryHealthStats, MAX_COMM_LEN,
+    MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN, PATH_DENY_KEY_BYTES, PATH_DENY_MAX_ENTRIES,
+    TELEMETRY_STATS_INDEX, UNKNOWN_SENTINEL,
 };
 
 /// LSM denial code — maps to `-EPERM` in the kernel security hook contract.
 const LSM_DENY: i32 = -1;
 
-/// Prefix window used for blacklist matching without exhausting the 512-byte BPF stack.
-const PATH_PREFIX_LEN: usize = 16;
+/// Prefix window used for deny-list matching without exhausting the 512-byte BPF stack.
+/// Must equal `neuromesh_common::PATH_DENY_KEY_BYTES`.
+const PATH_PREFIX_LEN: usize = PATH_DENY_KEY_BYTES;
 
 /// `linux_binprm->filename`, `task_struct->real_parent`, and `task_struct->tgid`
 /// byte offsets.
@@ -60,6 +62,19 @@ static TELEMETRY_RINGBUF: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
 
 #[map]
 static TELEMETRY_STATS: Array<TelemetryHealthStats> = Array::with_max_entries(1, 0);
+
+/// Centrally-governed path-prefix deny list (Phase 1).
+///
+/// Userspace bootstraps this with `/tmp/`, `/dev/shm/`, `/var/tmp/` before attach
+/// and refreshes it from zt-policy-engine's `/v1/policy-bundle`. The LSM hot path
+/// only performs a bounded array scan + `starts_with` — never a network call.
+/// `PATH_DENY_COUNT[0]` is the active entry count (capped at PATH_DENY_MAX_ENTRIES).
+#[map]
+static PATH_DENY_LIST: Array<PathDenyEntry> =
+    Array::with_max_entries(PATH_DENY_MAX_ENTRIES, 0);
+
+#[map]
+static PATH_DENY_COUNT: Array<u32> = Array::with_max_entries(1, 0);
 
 #[lsm(hook = "bprm_check_security")]
 pub fn neuromesh_lsm_exec_guard(ctx: LsmContext) -> i32 {
@@ -228,19 +243,54 @@ fn emit_blocked_exec_event(ctx: &LsmContext) {
 }
 
 fn is_blacklisted_path(path: &[u8]) -> bool {
-    starts_with(path, b"/tmp/")
-        || starts_with(path, b"/dev/shm/")
-        || starts_with(path, b"/var/tmp/")
+    // Read the active count; treat missing/zero as "no deny entries".
+    // Userspace MUST bootstrap before attach so production never hits count==0.
+    let count = match PATH_DENY_COUNT.get(0) {
+        Some(c) => {
+            let c = *c;
+            if c > PATH_DENY_MAX_ENTRIES {
+                PATH_DENY_MAX_ENTRIES
+            } else {
+                c
+            }
+        }
+        None => 0,
+    };
+
+    // Compile-time-bounded loop (max 64) for the BPF verifier. Early-exit when
+    // i >= count so an empty/short list does not scan unused slots for matches.
+    let mut i: u32 = 0;
+    while i < PATH_DENY_MAX_ENTRIES {
+        if i >= count {
+            break;
+        }
+        if let Some(entry) = PATH_DENY_LIST.get(i) {
+            let len = entry.len as usize;
+            if len > 0 && len <= PATH_DENY_KEY_BYTES && path_starts_with(path, &entry.bytes, len) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
-fn starts_with(path: &[u8], prefix: &[u8]) -> bool {
-    if path.len() < prefix.len() {
+fn path_starts_with(path: &[u8], prefix: &[u8], len: usize) -> bool {
+    if path.len() < len || len == 0 || len > PATH_DENY_KEY_BYTES {
         return false;
     }
-
-    path.iter()
-        .zip(prefix.iter())
-        .all(|(left, right)| left == right)
+    // Bound the compare loop by PATH_DENY_KEY_BYTES (16) for the verifier.
+    let mut j = 0usize;
+    while j < PATH_DENY_KEY_BYTES {
+        if j >= len {
+            break;
+        }
+        if path[j] != prefix[j] {
+            return false;
+        }
+        j += 1;
+    }
+    true
 }
 
 fn record_event_submitted() {
