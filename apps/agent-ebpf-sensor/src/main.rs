@@ -1,3 +1,4 @@
+use agent_ebpf_sensor::btf_offsets::{self, ResolvedOffsets};
 use agent_ebpf_sensor::ingestion;
 use agent_ebpf_sensor::monitoring::ringbuf_decode::decode_exec_event;
 use agent_ebpf_sensor::monitoring::{
@@ -14,7 +15,7 @@ use agent_ebpf_sensor::{load_with_map_pinning, pin_root, wait_for_shutdown_signa
 use anyhow::Context;
 use aya::maps::{Array, MapData, PerCpuArray, RingBuf};
 use aya::programs::Lsm;
-use aya::{Btf, Ebpf};
+use aya::{Btf, Ebpf, EbpfLoader};
 use log::info;
 use neuromesh_common::{SecurityTelemetryEvent, TelemetryHealthStats, TELEMETRY_STATS_INDEX};
 use std::sync::Arc;
@@ -42,9 +43,44 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let enforcement_bpf_data = include_bytes!(env!("NEUROMESH_EBPF_ENFORCEMENT_BYTECODE"));
 
-    let mut enforcement_bpf = Ebpf::load(enforcement_bpf_data)?;
+    // BTF is fetched once and used for two purposes: (1) resolving the three
+    // kernel-specific struct field offsets the LSM enforcement hook needs
+    // (see `btf_offsets.rs`), injected below before the program is loaded,
+    // and (2) the LSM attach call's own BTF argument. Resolution happens
+    // strictly before `EbpfLoader::load` — if it fails for any reason, the
+    // enforcement program is never loaded and the agent aborts startup
+    // (fail-closed; there is no hardcoded fallback offset left to fall back to).
+    let btf = Btf::from_sys_fs().context(
+        "failed to load kernel BTF from /sys/kernel/btf/vmlinux — required to resolve \
+         task_struct/linux_binprm field offsets for the LSM enforcement hook; refusing to \
+         start (fail-closed)",
+    )?;
+    let resolved_offsets = resolve_enforcement_offsets(&btf)?;
+    info!(
+        "🔎 Resolved kernel-specific struct offsets via BTF: linux_binprm.filename={} \
+         task_struct.real_parent={} task_struct.tgid={}",
+        resolved_offsets.bprm_filename_offset,
+        resolved_offsets.task_real_parent_offset,
+        resolved_offsets.task_tgid_offset
+    );
 
-    let btf = Btf::from_sys_fs()?;
+    let mut enforcement_bpf = EbpfLoader::new()
+        .override_global(
+            "BPRM_FILENAME_OFFSET",
+            &resolved_offsets.bprm_filename_offset,
+            true,
+        )
+        .override_global(
+            "TASK_REAL_PARENT_OFFSET",
+            &resolved_offsets.task_real_parent_offset,
+            true,
+        )
+        .override_global("TASK_TGID_OFFSET", &resolved_offsets.task_tgid_offset, true)
+        .load(enforcement_bpf_data)
+        .context(
+            "failed to load enforcement eBPF object with BTF-resolved offsets injected — \
+             refusing to start (fail-closed)",
+        )?;
     let lsm_program: &mut Lsm = enforcement_bpf
         .program_mut("neuromesh_lsm_exec_guard")
         .ok_or_else(|| anyhow::anyhow!("neuromesh_lsm_exec_guard program missing"))?
@@ -177,6 +213,21 @@ async fn main() -> Result<(), anyhow::Error> {
     );
 
     Ok(())
+}
+
+/// Resolves the three struct field offsets the LSM enforcement hook needs from
+/// the running kernel's BTF. Fail-closed by construction: any error returned
+/// here must (and, via the `?` at the call site, does) prevent the
+/// enforcement program from ever being loaded — there is no hardcoded
+/// fallback value to substitute.
+fn resolve_enforcement_offsets(btf: &Btf) -> Result<ResolvedOffsets, anyhow::Error> {
+    let btf_bytes = btf.to_bytes();
+    btf_offsets::resolve_offsets(&btf_bytes).map_err(|error| {
+        anyhow::anyhow!(
+            "BTF-based struct offset resolution failed — refusing to load the LSM enforcement \
+             program (fail-closed): {error}"
+        )
+    })
 }
 
 fn emit_pipeline_output(
