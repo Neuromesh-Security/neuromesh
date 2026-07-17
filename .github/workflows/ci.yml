@@ -3,8 +3,19 @@ name: Production CI
 on:
   push:
     branches: [main]
+    # Non-core services (see experimental-ci.yml) have their own,
+    # independent pipeline. A push/PR that touches ONLY those paths must
+    # not trigger this core workflow at all -- if a change also touches
+    # any core path, this still runs as normal (paths-ignore only skips
+    # the run when every changed file matches the ignore list).
+    paths-ignore:
+      - apps/ai-threat-detector/**
+      - apps/security-dashboard/**
   pull_request:
     branches: [main]
+    paths-ignore:
+      - apps/ai-threat-detector/**
+      - apps/security-dashboard/**
 
 concurrency:
   group: production-ci-${{ github.workflow }}-${{ github.ref }}
@@ -278,6 +289,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: lint
+    # NOTE (CI blast-radius review, 2026-07-17): this job's script
+    # (scripts/e2e/validate_gnn_detection.sh) boots ai-threat-detector
+    # alongside zt-policy-engine to validate the full detection pipeline,
+    # so it is intentionally NOT moved to experimental-ci.yml with the
+    # rest of ai-threat-detector's checks -- doing so would remove
+    # zt-policy-engine's only E2E coverage in this workflow, which is out
+    # of scope for this change. This is a disclosed, accepted residual
+    # coupling: a flaky/slow ai-threat-detector container can still fail
+    # this one core-adjacent check.
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -296,14 +316,18 @@ jobs:
       packages: write
     strategy:
       fail-fast: false
+      # neuromesh-ai-threat-detector is intentionally NOT in this matrix.
+      # It is a non-core service (see docs/threat-model.md "Out of scope");
+      # its build/sign/verify now lives in the fully independent
+      # .github/workflows/experimental-ci.yml so a failure or slowness in
+      # that service's build can never delay or block this core job, which
+      # (via the shared `needs: build-ebpf` above) is on the critical path
+      # for agent-ebpf-sensor and zt-policy-engine.
       matrix:
         include:
           - image: neuromesh-zt-policy-engine
             context: apps/zt-policy-engine
             dockerfile: apps/zt-policy-engine/Dockerfile
-          - image: neuromesh-ai-threat-detector
-            context: apps/ai-threat-detector
-            dockerfile: apps/ai-threat-detector/Dockerfile
           - image: neuromesh-agent-ebpf-sensor
             context: .
             dockerfile: apps/agent-ebpf-sensor/Dockerfile
