@@ -46,6 +46,29 @@ obtainable as real BTF blobs in the environment this fixture was produced in:
   built into the kernel image by default. Kernels 6.1 and 6.8 ship BTF
   built-in and are consequently not archived there.
 
+### What CI actually adds (and what it does not)
+
+`ebpf-verifier-check` in `.github/workflows/ci.yml` now runs the production
+BTF resolver against each matrix runner's *live* `/sys/kernel/btf/vmlinux`
+(via `verify-ebpf` → `Btf::from_sys_fs()` → `resolve_offsets` →
+`EbpfLoader::override_global` → verifier load). That is a real, fail-closed
+gate on the highest-trust path.
+
+However, the matrix labels `"5.15"` / `"6.1"` / `"6.8+"` are **not** the
+kernels GitHub-hosted runners boot. As of mid-2026:
+
+| Matrix label | `runs-on`     | Actual booted kernel (approx.) |
+|--------------|---------------|--------------------------------|
+| `5.15`       | `ubuntu-22.04`| `6.8.0-*-azure`                |
+| `6.1`        | `ubuntu-22.04`| `6.8.0-*-azure` (same image)   |
+| `6.8+`       | `ubuntu-24.04`| `6.17.0-*-azure`               |
+
+So CI exercises **two** distinct live Azure HWE kernels (≈6.8 and ≈6.17),
+not three labeled LTS lines, and not real 5.15 / 6.1. The `"5.15"` and
+`"6.1"` cells are redundant for BTF coverage. Closing that residual gap
+requires a scoped manual pre-release check on real target hardware (same
+disclosure pattern as `execve_stress_test`), not hosted-runner matrix labels.
+
 The negative-path tests in `src/btf_offsets.rs` (malformed/truncated BTF,
 missing struct, missing member, unexpected bitfield encoding, misaligned
 offset, out-of-range offset) do not depend on kernel version and give
