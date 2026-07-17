@@ -95,7 +95,7 @@ The `sys_enter_execve` tracepoint is the highest-volume syscall surface in the a
 | **Namespace escape context** | Container breakout before agent deploy | Agent must run on host PID namespace (`hostPID: true`) |
 | **BPF hook disable** | `CAP_BPF` + `CAP_SYS_ADMIN` attacker detaches programs | No tamper-evident watchdog in open-source core |
 | **Verifier-minimal telemetry** | C tracepoint emits PID-only records | Filename/argv not available for volume path — correlation gap |
-| **Hardcoded struct offsets** | `task_struct` ppid via fixed offsets (Rust LSM) | Wrong ppid on unsupported kernels → burst detection miss |
+| **BTF offset coverage gap** | Rust LSM reads `linux_binprm` / `task_struct` fields via BTF-resolved offsets injected at load time (hardcoded offsets removed in PR #49) | Offsets are fail-closed at agent startup when BTF resolution fails; residual risk is **unvalidated kernels** (see §7) — wrong or untested ABIs are not silently papered over with guessed constants, but CI has not proven every claimed LTS line |
 | **Kprobe offset drift** | `tcp_connect` socket field offsets from minimal `vmlinux.h` | Dest IP/port read failure on kernel ABI change |
 | **RingBuf loss under load** | Legitimate high exec rate exceeds 500k/sec/CPU | Events dropped by design — attacker can hide in noise |
 | **LSM bypass paths** | Execution paths not passing `bprm_check_security` | Kernel-dependent; no agent coverage claim for all exec variants |
@@ -107,7 +107,8 @@ The `sys_enter_execve` tracepoint is the highest-volume syscall surface in the a
 | **Kernel token bucket** | `RATE_LIMIT_BUCKET` per-CPU (~500k evt/s) in `sys_exec.bpf.c` | E-01, E-08 |
 | **RingBuf backpressure** | Bounded Tokio MPSC (`NEUROMESH_PROCESS_CHANNEL_CAPACITY`, default 8192) | E-01 |
 | **BPFfs map pinning** | `PROCESS_EVENTS` + `RATE_LIMIT_BUCKET` under `/sys/fs/bpf/neuromesh` | E-04 |
-| **LSM synchronous deny** | `neuromesh_lsm_exec_guard` returns `-EPERM` for `/tmp/`, `/dev/shm/`, `/var/tmp/` | E-05 |
+| **LSM synchronous deny** | `neuromesh_lsm_exec_guard` returns `-EPERM` when the exec path matches the centrally-governed BPF path-prefix deny map (Phase 1; bootstrap defaults remain `/tmp/`, `/dev/shm/`, `/var/tmp/`) | E-05 |
+| **BTF-resolved field access** | Orchestrator resolves `BPRM_FILENAME_OFFSET` / `TASK_*` from live `/sys/kernel/btf/vmlinux` and injects globals before load (PR #49); no hardcoded `task_struct` offset fallback | E-06 (ppid lineage); removes the prior hardcoded-offset hazard |
 | **Spawn burst detection** | `DataNormalizer` — 2s window, threshold 8 spawns per `ppid` | E-01, E-06 (partial) |
 | **Path whitelist suppression** | Static whitelist: `/bin/ls`, `/bin/cat`, `/usr/bin/git`, `/usr/bin/bash` | False positive reduction |
 | **Graceful shutdown** | `CancellationToken` + 500ms drain before BPF link release | Data loss on rolling update |
@@ -139,7 +140,7 @@ False positives erode SOC trust. Neuromesh applies layered suppression:
 |-----------|---------|------------------------|--------|
 | Window | 2 seconds | Build systems spawning many short-lived children | Increase window or threshold |
 | Burst threshold | 8 spawns per `ppid` | Parallel test runners | Raise threshold via `with_config()` |
-| `ppid == 0` | Ignored | Kernel lineage read failure | Fix offsets; do not alert on orphan events |
+| `ppid == 0` | Ignored | Kernel lineage read failure (probe miss or unresolved BTF on an unsupported kernel — agent should have refused to load if BTF resolution failed at startup) | Do not alert on orphan events; expand real-kernel BTF validation (see §7) |
 
 **Operational guidance:**
 
@@ -217,11 +218,10 @@ Integration tests run via `cargo test -p neuromesh-integration-tests` **without*
 | C execve tracepoint emits PID-only | Medium | Full argv capture requires verifier-reviewed `ctx` reads. Planned mitigation: add verifier-reviewed argv capture to the C tracepoint. | Unassigned | Tracked in #TBD — new issue needed |
 | `neuromesh_exec_hook` not attached | Low | Rich passive telemetry exists but unused at runtime | — | — |
 | Per-CPU drop accounting | Low | `RATE_LIMIT_DROPS` summed across CPUs; NUMA hot spots may dominate | — | — |
-| Hardcoded `task_struct` offsets | Medium | `ppid == 0` silently excluded from burst detection. Planned mitigation: replace with CO-RE/BTF-relocatable field access, matching the C tracepoint's approach. | Unassigned | Tracked in #TBD — new issue needed |
+| BTF offset resolver — cross-kernel coverage (hardcoded offsets RESOLVED) | Medium | **Resolved (PR #49):** the Rust LSM no longer uses compile-time hardcoded `task_struct` / `linux_binprm` offsets; the orchestrator resolves them from live BTF and aborts startup on resolution failure (no guessed-offset fallback). **Still open (severity not reduced):** live validation covers only **two** distinct GitHub-hosted Azure HWE kernels (~6.8 and ~6.17 via the verifier matrix), **not** three claimed LTS lines — CI's `"5.15"`/`"6.1"` matrix labels currently both boot the same ~6.8-azure runner kernel. Unit tests + one WSL2 5.15.167 fixture are cross-checked against bpftool ground truth but do not substitute for real 5.15/6.1 (or true non-Azure 6.8) pre-release hardware checks before those lines are claimed as validated. | Unassigned | Tracked in #TBD — new issue needed |
 | No `execveat` hook | Medium | Alternative exec syscall unmonitored. Planned mitigation: add `execveat` coverage to the tracepoint hook. | Unassigned | Tracked in #TBD — new issue needed |
 | LotL single-shot from whitelisted path | Medium | Requires Slow Path / Wasm (future). Planned mitigation: Wasm policy engine + Slow Path GNN correlation (currently scaffold-only, see §3). | Unassigned | Tracked in #TBD — new issue needed |
 | Agent tampering by root | High | No open-source tamper detection. Planned mitigation: signed eBPF bytecode attestation + runtime integrity check. | Dragan Flavius (@DraganFlavius) | Tracked in #44, target: v0.2 |
-| BTF offset resolver cross-kernel coverage | Medium | Not yet validated on real 5.15/6.1 (or a true non-Azure 6.8) kernels — CI's `"5.15"`/`"6.1"` matrix labels currently both resolve to the same ~6.8-azure runner kernel. Current mitigation: CI fail-closed on GH-hosted ~6.8-azure and ~6.17-azure via the production `verify-ebpf` path; unit tests + one WSL2 5.15.167 fixture cross-checked against bpftool ground truth. Planned mitigation: scoped manual pre-release check on real target hardware for 5.15/6.1 before claiming those specific lines as validated (same disclosure pattern as `execve_stress_test`). | Unassigned | Tracked in #TBD — new issue needed |
 | CI coverage gate | Low | ≥70% line coverage on core crates; Ring 0 not measured | — | — |
 
 ---
