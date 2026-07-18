@@ -218,6 +218,9 @@ cargo +nightly-2026-07-17 build --package agent-ebpf-sensor-ebpf \
 cargo build -p agent-ebpf-sensor --features orchestrator --release
 
 # 3. Start orchestrator (root required)
+#    Optional: sync deny-list prefixes from zt-policy-engine (Phase 1).
+#    If unset, the agent enforces bootstrap defaults only (/tmp/, /dev/shm/, /var/tmp/).
+#    export NEUROMESH_ZT_POLICY_ENGINE_URL=http://127.0.0.1:8080
 RUST_LOG=info sudo -E ./target/release/agent-ebpf-sensor
 
 # 4. Validate telemetry (separate terminal)

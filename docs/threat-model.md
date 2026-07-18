@@ -2,7 +2,7 @@
 
 **Status:** Living document  
 **Release scope:** `v0.1.0-core`  
-**Last updated:** 2026-07-14  
+**Last updated:** 2026-07-18  
 **Component:** `apps/agent-ebpf-sensor` — kernel hooks, telemetry contracts, user-space detection pipeline
 
 ---
@@ -156,6 +156,46 @@ False positives erode SOC trust. Neuromesh applies layered suppression:
 | `ebpf_events_dropped_total` > 0 | Exec rate exceeds capacity | Scale agent CPU; investigate fork bomb (E-01) |
 | Log sampling every 10k events | Info-level process monitor logs | Do not treat sampled logs as security alerts |
 
+### 4.5 Phase 1 — centrally-governed path-prefix deny list (control-plane sync)
+
+Phase 1 (PR #50) replaces the LSM's compile-time hardcoded path-prefix compare with
+an in-kernel lookup against BPF arrays (`PATH_DENY_LIST` / `PATH_DENY_COUNT`) that
+userspace populates from zt-policy-engine. This matches the dual-hook split in
+[ADR-001](architecture-decision-records/adr-001-lsm-vs-tracepoint.md): **the LSM still
+decides synchronously in-kernel**; the control plane only governs *what* prefix set
+is enforced, out-of-band.
+
+#### Three planes (what is connected vs not)
+
+| Plane | Role in Phase 1 | Hot-path network? |
+|-------|-----------------|-------------------|
+| **In-kernel LSM** (`neuromesh_lsm_exec_guard`) | Per-`execve` allow/deny via bounded BPF Array scan + `starts_with` | **Never** — map lookup only |
+| **Control-plane sync** (`GET /v1/policy-bundle` → agent) | Periodically refreshes the deny-list maps | Userspace HTTP only (not in the LSM) |
+| **Slow Path** (`POST /v1/evaluate`) | OPA + SPIFFE audit/eval endpoint | **Disconnected** from enforcement — not called by the agent or LSM |
+
+#### Bundle API and agent sync (current behavior on `main`)
+
+`GET /v1/policy-bundle` (`apps/zt-policy-engine/internal/policybundle`) returns JSON:
+
+| Field | Meaning |
+|-------|---------|
+| `schema_version` | Document schema (currently `1`) |
+| `version` | Content-addressed `sha256:…` of the prefix set (changes only when prefixes change) |
+| `deny_path_prefixes` | Deny prefixes — Phase 1 set matches historical LSM defaults: `/tmp/`, `/dev/shm/`, `/var/tmp/` |
+
+Agent behavior (`apps/agent-ebpf-sensor/src/policy_sync.rs`, `path_deny.rs`):
+
+| Behavior | Detail |
+|----------|--------|
+| **Poll cadence** | Every **30 seconds** (`POLICY_SYNC_INTERVAL`) when `NEUROMESH_ZT_POLICY_ENGINE_URL` is set |
+| **HTTP timeout** | 5 seconds per request |
+| **Bootstrap (fail-closed)** | Before LSM attach, maps are seeded with `/tmp/`, `/dev/shm/`, `/var/tmp/` — never start with an empty deny map |
+| **Sync failure** | Last-known-good map contents are **retained** (not cleared); enforcement continues |
+| **STALE** | After **5 minutes** without a successful sync (`POLICY_STALE_AFTER`), state is logged as STALE — **enforcement is not disabled** |
+| **Sync disabled** | If `NEUROMESH_ZT_POLICY_ENGINE_URL` is unset, sync is off; the agent enforces the bootstrap set only |
+
+PR #56 (LSM probe-read fail-closed) and PR #57 (toolchain pins) did **not** change this sync contract — confirmed by inspecting those diffs against `path_deny.rs` / `policy_sync.rs` / `policybundle`.
+
 ---
 
 ## 5. Network telemetry (`tcp_connect`)
@@ -222,6 +262,7 @@ Integration tests run via `cargo test -p neuromesh-integration-tests` **without*
 | No `execveat` hook | Medium | Alternative exec syscall unmonitored. Planned mitigation: add `execveat` coverage to the tracepoint hook. | Unassigned | Tracked in #TBD — new issue needed |
 | LotL single-shot from whitelisted path | Medium | Requires Slow Path / Wasm (future). Planned mitigation: Wasm policy engine + Slow Path GNN correlation (currently scaffold-only, see §3). | Unassigned | Tracked in #TBD — new issue needed |
 | Agent tampering by root | High | No open-source tamper detection. Planned mitigation: signed eBPF bytecode attestation + runtime integrity check. | Dragan Flavius (@DraganFlavius) | Tracked in #44, target: v0.2 |
+| Unauthenticated `GET /v1/policy-bundle` | Low | Phase 1 endpoint has **no authentication**. Accepted for Phase 1 because the exported payload is the well-known path-prefix deny set (`/tmp/`, `/dev/shm/`, `/var/tmp/`) — not secret. **Must be authenticated before Phase 2**, when the bundle would carry SPIFFE identity allow-exceptions (sensitive). Until then, treat exposure of the endpoint as low impact but do not expand the bundle schema without auth. | Unassigned | Tracked in [#55](https://github.com/Neuromesh-Security/neuromesh/issues/55), target: before Phase 2 |
 | CI coverage gate | Low | ≥70% line coverage on core crates; Ring 0 not measured | — | — |
 
 ---
