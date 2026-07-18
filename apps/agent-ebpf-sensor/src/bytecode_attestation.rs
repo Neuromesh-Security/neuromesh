@@ -97,19 +97,49 @@ pub struct EmbeddedArtifact<'a> {
 /// Specific fail-closed failure reasons for the audit trail.
 #[derive(Debug)]
 pub enum AttestationError {
-    ManifestMissing { path: PathBuf },
-    ManifestUnreadable { path: PathBuf, source: io::Error },
-    SignatureMissing { path: PathBuf },
-    SignatureUnreadable { path: PathBuf, source: io::Error },
-    PublicKeyMissing { path: PathBuf },
-    PublicKeyUnreadable { path: PathBuf, source: io::Error },
-    PublicKeyInvalid { reason: String },
-    PathNotAbsolute { env: &'static str, path: String },
-    SignatureInvalid { reason: String },
-    ManifestParse { reason: String },
-    ManifestSchema { reason: String },
-    ArtifactMissingFromManifest { name: String },
-    UnexpectedArtifactInManifest { name: String },
+    ManifestMissing {
+        path: PathBuf,
+    },
+    ManifestUnreadable {
+        path: PathBuf,
+        source: io::Error,
+    },
+    SignatureMissing {
+        path: PathBuf,
+    },
+    SignatureUnreadable {
+        path: PathBuf,
+        source: io::Error,
+    },
+    PublicKeyMissing {
+        path: PathBuf,
+    },
+    PublicKeyUnreadable {
+        path: PathBuf,
+        source: io::Error,
+    },
+    PublicKeyInvalid {
+        reason: String,
+    },
+    PathNotAbsolute {
+        env: &'static str,
+        path: String,
+    },
+    SignatureInvalid {
+        reason: String,
+    },
+    ManifestParse {
+        reason: String,
+    },
+    ManifestSchema {
+        reason: String,
+    },
+    ArtifactMissingFromManifest {
+        name: String,
+    },
+    UnexpectedArtifactInManifest {
+        name: String,
+    },
     DigestMismatch {
         name: String,
         expected: String,
@@ -161,7 +191,10 @@ impl std::fmt::Display for AttestationError {
                 write!(f, "{env} must be an absolute path, got {path:?}")
             }
             Self::SignatureInvalid { reason } => {
-                write!(f, "bytecode manifest signature verification failed: {reason}")
+                write!(
+                    f,
+                    "bytecode manifest signature verification failed: {reason}"
+                )
             }
             Self::ManifestParse { reason } => {
                 write!(f, "bytecode manifest JSON parse failed: {reason}")
@@ -213,8 +246,10 @@ struct ManifestArtifact {
 /// Resolve attestation paths from the environment (absolute paths only).
 pub fn paths_from_env() -> Result<(PathBuf, PathBuf, PathBuf), AttestationError> {
     let manifest = env_abs_path(ENV_BYTECODE_MANIFEST_PATH, DEFAULT_BYTECODE_MANIFEST_PATH)?;
-    let signature =
-        env_abs_path(ENV_BYTECODE_MANIFEST_SIG_PATH, DEFAULT_BYTECODE_MANIFEST_SIG_PATH)?;
+    let signature = env_abs_path(
+        ENV_BYTECODE_MANIFEST_SIG_PATH,
+        DEFAULT_BYTECODE_MANIFEST_SIG_PATH,
+    )?;
     let public_key = env_abs_path(ENV_COSIGN_PUBLIC_KEY_PATH, DEFAULT_COSIGN_PUBLIC_KEY_PATH)?;
     Ok((manifest, signature, public_key))
 }
@@ -223,10 +258,7 @@ fn env_abs_path(env: &'static str, default: &str) -> Result<PathBuf, Attestation
     let raw = std::env::var(env).unwrap_or_else(|_| default.to_string());
     let path = PathBuf::from(&raw);
     if !path.is_absolute() {
-        return Err(AttestationError::PathNotAbsolute {
-            env,
-            path: raw,
-        });
+        return Err(AttestationError::PathNotAbsolute { env, path: raw });
     }
     Ok(path)
 }
@@ -273,19 +305,18 @@ pub fn verify_cosign_blob_signature(
             reason: format!("signature is not valid base64: {e}"),
         })?;
 
-    let pem_str = std::str::from_utf8(public_key_pem).map_err(|e| {
-        AttestationError::PublicKeyInvalid {
+    let pem_str =
+        std::str::from_utf8(public_key_pem).map_err(|e| AttestationError::PublicKeyInvalid {
             reason: format!("public key PEM is not UTF-8: {e}"),
-        }
-    })?;
+        })?;
 
     if let Ok(key) = P256VerifyingKey::from_public_key_pem(pem_str) {
         let signature = parse_ecdsa_signature(&sig_raw)?;
-        return key.verify(message, &signature).map_err(|e| {
-            AttestationError::SignatureInvalid {
+        return key
+            .verify(message, &signature)
+            .map_err(|e| AttestationError::SignatureInvalid {
                 reason: format!("ECDSA P-256 verification failed: {e}"),
-            }
-        });
+            });
     }
 
     if let Ok(key) = Ed25519VerifyingKey::from_public_key_pem(pem_str) {
@@ -301,11 +332,11 @@ pub fn verify_cosign_blob_signature(
         let mut sig_bytes = [0u8; ed25519_dalek::SIGNATURE_LENGTH];
         sig_bytes.copy_from_slice(&sig_raw);
         let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-        return key
-            .verify_strict(message, &signature)
-            .map_err(|e| AttestationError::SignatureInvalid {
+        return key.verify_strict(message, &signature).map_err(|e| {
+            AttestationError::SignatureInvalid {
                 reason: format!("Ed25519 verification failed: {e}"),
-            });
+            }
+        });
     }
 
     Err(AttestationError::PublicKeyInvalid {
@@ -549,10 +580,7 @@ mod tests {
                 );
                 std::env::set_var(key, value);
             }
-            Self {
-                _lock: lock,
-                saved,
-            }
+            Self { _lock: lock, saved }
         }
     }
 
@@ -616,10 +644,7 @@ mod tests {
                 .artifacts
                 .iter()
                 .map(|(name, bytes)| {
-                    format!(
-                        r#"{{"name":"{name}","digest":"{}"}}"#,
-                        sha256_digest(bytes)
-                    )
+                    format!(r#"{{"name":"{name}","digest":"{}"}}"#, sha256_digest(bytes))
                 })
                 .collect();
             format!(
@@ -648,18 +673,12 @@ mod tests {
 
         fn verify(&self) -> Result<(), AttestationError> {
             let embedded = self.embedded();
-            verify_artifacts(
-                &self.manifest,
-                &self.signature,
-                &self.public_key,
-                &embedded,
-            )
+            verify_artifacts(&self.manifest, &self.signature, &self.public_key, &embedded)
         }
 
         /// Call the real `main.rs` entrypoint with path env vars set.
         fn verify_startup_via_env(&self) -> Result<(), AttestationError> {
-            let _guard =
-                StartupEnvGuard::apply(&self.manifest, &self.signature, &self.public_key);
+            let _guard = StartupEnvGuard::apply(&self.manifest, &self.signature, &self.public_key);
             let embedded = self.embedded();
             verify_startup(&embedded)
         }
@@ -927,7 +946,8 @@ mod tests {
     fn verify_startup_signature_env_wrong_valid_file_fails_closed() {
         let f = Fixture::new();
         // Cryptographically valid ECDSA signature over a different message.
-        let other = br#"{"schema_version":1,"git_sha":"other","build_timestamp":"t","artifacts":[]}"#;
+        let other =
+            br#"{"schema_version":1,"git_sha":"other","build_timestamp":"t","artifacts":[]}"#;
         let sig: EcdsaSignature = P256EcdsaSigner::sign(&f.signing_key, other);
         let wrong = f.dir.join("wrong-but-valid.sig");
         write(
@@ -960,13 +980,17 @@ mod tests {
     fn verify_startup_pubkey_env_garbage_fails_closed() {
         let f = Fixture::new();
         let garbage = f.dir.join("garbage.pub");
-        write(&garbage, b"-----BEGIN PUBLIC KEY-----\nnot-a-real-key\n-----END PUBLIC KEY-----\n");
+        write(
+            &garbage,
+            b"-----BEGIN PUBLIC KEY-----\nnot-a-real-key\n-----END PUBLIC KEY-----\n",
+        );
         let _guard = StartupEnvGuard::apply(&f.manifest, &f.signature, &garbage);
         let err = verify_startup(&f.embedded()).expect_err("garbage pubkey");
         assert!(
             matches!(
                 err,
-                AttestationError::PublicKeyInvalid { .. } | AttestationError::SignatureInvalid { .. }
+                AttestationError::PublicKeyInvalid { .. }
+                    | AttestationError::SignatureInvalid { .. }
             ),
             "got {err}"
         );

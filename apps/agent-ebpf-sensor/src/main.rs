@@ -1,5 +1,5 @@
-use agent_ebpf_sensor::bytecode_attestation::{self, EmbeddedArtifact};
 use agent_ebpf_sensor::btf_offsets::{self, ResolvedOffsets};
+use agent_ebpf_sensor::bytecode_attestation::{self, EmbeddedArtifact};
 use agent_ebpf_sensor::ingestion;
 use agent_ebpf_sensor::monitoring::ringbuf_decode::decode_exec_event;
 use agent_ebpf_sensor::monitoring::{
