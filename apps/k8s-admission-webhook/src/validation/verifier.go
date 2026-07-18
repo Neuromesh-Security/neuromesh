@@ -51,6 +51,24 @@ import (
 // reduction above removed, for a HIGH (not CRITICAL) finding in dead code
 // that does not fail the CI Trivy gate (gate enforces CRITICAL only). This
 // is an accepted, investigated trade-off, not an oversight.
+//
+// NOTE on GO-2026-5932 / golang.org/x/crypto/openpgp (evaluated 2026-07-18):
+// govulncheck flags openpgp as reachable via cosign.VerifyImageSignatures.
+// This is NOT Cosign "PGP signature mode" as a selectable feature -- it enters
+// because cosign/v2/pkg/cosign/verify.go (same package as VerifyImageSignatures)
+// unconditionally imports github.com/sigstore/rekor/pkg/types/rekord/v0.0.1,
+// which pulls rekor/pkg/pki/pgp -> golang.org/x/crypto/openpgp. Confirmed with
+// `go list -deps` on ./src/validation: the only third-party importer of
+// openpgp* in this graph is rekor/pkg/pki/pgp; sigstore cryptoutils+signature
+// alone do not pull it. There is no narrower public Cosign API / build tag that
+// preserves OCI image verify without that package (unlike the LoadPublicKeyRaw
+// trim above, which lived in a different package). IgnoreTlog=true skips
+// runtime Rekor client use only -- it does not remove the compile-time import.
+// This webhook never exercises the PGP path (NEUROMESH_COSIGN_VERIFY_MODE=key,
+// Ed25519/ECDSA static key only). Fixed-in is N/A upstream for openpgp; clearing
+// the finding would require forking cosign/v2 or waiting for an upstream package
+// split / sigstore-go OCI verify. Accepted, investigated trade-off -- tracked in
+// https://github.com/Neuromesh-Security/neuromesh/issues/48.
 
 // Trust-root modes for image signature verification. "key" (static public key)
 // is the default, production-ready mode. "keyless" (Fulcio short-lived cert +
