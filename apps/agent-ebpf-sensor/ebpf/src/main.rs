@@ -78,9 +78,12 @@ static PATH_DENY_COUNT: Array<u32> = Array::with_max_entries(1, 0);
 
 #[lsm(hook = "bprm_check_security")]
 pub fn neuromesh_lsm_exec_guard(ctx: LsmContext) -> i32 {
+    // Decision-critical path is fail-closed (Issue #54): any error obtaining
+    // the path used for deny matching must DENY, never ALLOW. Telemetry-only
+    // probes (ppid / emit_blocked_exec_event) remain best-effort elsewhere.
     match try_neuromesh_lsm_exec_guard(ctx) {
         Ok(ret) => ret,
-        Err(_) => 0,
+        Err(_) => LSM_DENY,
     }
 }
 
@@ -196,13 +199,12 @@ fn read_ppid_best_effort(event: &mut ExecEvent) -> u32 {
 
 fn read_bprm_path_prefix(ctx: &LsmContext) -> Result<[u8; PATH_PREFIX_LEN], i64> {
     let filename_ptr = read_bprm_filename_ptr(ctx)?;
-    let mut prefix = [0u8; PATH_PREFIX_LEN];
+    // Do not swallow probe failures into a zero-filled prefix: `[0; N]` would
+    // miss every deny entry and fail-open. Propagate Err so the LSM hook denies.
     unsafe {
-        let _ = bpf_probe_read_kernel(filename_ptr as *const [u8; PATH_PREFIX_LEN]).map(|value| {
-            prefix = value;
-        });
+        bpf_probe_read_kernel(filename_ptr as *const [u8; PATH_PREFIX_LEN])
+            .map_err(|error| error as i64)
     }
-    Ok(prefix)
 }
 
 fn read_bprm_filename_ptr(ctx: &LsmContext) -> Result<*const u8, i64> {
