@@ -58,6 +58,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            # Issue #44 Phase 1: Cosign static public key (same material as the
+            # admission webhook). Manifest+sig are baked into the image; the
+            # public key is mounted so the trust root is not solely under the
+            # same writeable rootfs as the attested artifacts.
+            - name: NEUROMESH_COSIGN_PUBLIC_KEY_PATH
+              value: /etc/neuromesh/cosign/cosign.pub
+            - name: NEUROMESH_BYTECODE_MANIFEST_PATH
+              value: /etc/neuromesh/bytecode-manifest.json
+            - name: NEUROMESH_BYTECODE_MANIFEST_SIG_PATH
+              value: /etc/neuromesh/bytecode-manifest.sig
           securityContext:
             privileged: true
             runAsUser: 0
@@ -87,6 +97,9 @@ spec:
               mountPropagation: HostToContainer
             - name: tmp
               mountPath: /tmp
+            - name: cosign-pubkey
+              mountPath: /etc/neuromesh/cosign
+              readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -118,6 +131,16 @@ spec:
             type: Directory
         - name: tmp
           emptyDir: {}
+        # Provision with the Cosign static public key (same keypair used for
+        # GHCR image signing and bytecode-manifest sign-blob in CI):
+        #   kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
+        #     --from-file=cosign.pub=./cosign.pub
+        - name: cosign-pubkey
+          secret:
+            secretName: neuromesh-cosign-pubkey
+            items:
+              - key: cosign.pub
+                path: cosign.pub
 ---
 apiVersion: v1
 kind: ServiceAccount

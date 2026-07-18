@@ -442,6 +442,12 @@ jobs:
       # 401s. Every tag below is therefore explicitly ghcr.io-prefixed; none
       # are bare, so there is no tag left that can silently fall back to
       # Docker Hub.
+      # UTC timestamp embedded in the Issue #44 bytecode manifest (agent image).
+      # Harmless build-arg for images that do not declare GIT_SHA/BUILD_TIMESTAMP.
+      - name: Compute attestation build metadata
+        id: buildmeta
+        run: echo "timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$GITHUB_OUTPUT"
+
       - name: Build Docker image
         id: build
         uses: docker/build-push-action@v6
@@ -453,6 +459,17 @@ jobs:
             ${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/${{ matrix.image }}:${{ github.sha }}
           load: true
           push: ${{ steps.publish.outputs.should_publish == 'true' }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_TIMESTAMP=${{ steps.buildmeta.outputs.timestamp }}
+          # SAME Cosign static key as image signing (PR #47). Consumed only by
+          # apps/agent-ebpf-sensor/Dockerfile attestation stage via
+          # `cosign sign-blob` over bytecode-manifest.json. When the secret is
+          # unavailable (fork PRs), the Dockerfile omits .sig and the agent
+          # fail-closes at startup — never fail-open.
+          secrets: |
+            cosign_private_key=${{ secrets.COSIGN_PRIVATE_KEY }}
+            cosign_password=${{ secrets.COSIGN_PASSWORD }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
@@ -490,3 +507,24 @@ jobs:
         run: |
           cosign verify --key env://COSIGN_PUBLIC_KEY \
             "${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+
+      # Issue #44 Phase 1: fail-fast that the baked bytecode manifest was
+      # signed with the same static key and verifies via cosign verify-blob.
+      - name: Verify signed bytecode manifest (agent, fail-fast)
+        if: steps.publish.outputs.should_publish == 'true' && matrix.needs_ebpf == true
+        env:
+          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
+          IMAGE: ${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/${{ matrix.image }}:ci
+        run: |
+          cid="$(docker create "${IMAGE}")"
+          docker cp "${cid}:/etc/neuromesh/bytecode-manifest.json" ./bytecode-manifest.json
+          docker cp "${cid}:/etc/neuromesh/bytecode-manifest.sig" ./bytecode-manifest.sig
+          docker rm "${cid}"
+          test -s ./bytecode-manifest.json
+          test -s ./bytecode-manifest.sig
+          cosign verify-blob \
+            --key env://COSIGN_PUBLIC_KEY \
+            --signature ./bytecode-manifest.sig \
+            --insecure-ignore-tlog=true \
+            ./bytecode-manifest.json
+          echo "bytecode-manifest.json Cosign verify-blob OK"

@@ -1,3 +1,4 @@
+use agent_ebpf_sensor::bytecode_attestation::{self, EmbeddedArtifact};
 use agent_ebpf_sensor::btf_offsets::{self, ResolvedOffsets};
 use agent_ebpf_sensor::ingestion;
 use agent_ebpf_sensor::monitoring::ringbuf_decode::decode_exec_event;
@@ -47,6 +48,31 @@ async fn main() -> Result<(), anyhow::Error> {
     let shutdown = CancellationToken::new();
 
     let enforcement_bpf_data = include_bytes!(env!("NEUROMESH_EBPF_ENFORCEMENT_BYTECODE"));
+
+    // Issue #44 Phase 1: Cosign-signed bytecode manifest verification.
+    // Gates the *entire* BPF load sequence (C objects + LSM enforcement ELF).
+    // Must run before any EbpfLoader::load / Ebpf::load / load_with_map_pinning.
+    // Tamper-evidence only — see bytecode_attestation module docs. Fail-closed:
+    // no skip flag, no partial load, no unverified fallback.
+    bytecode_attestation::verify_startup(&[
+        EmbeddedArtifact {
+            name: "sys_exec.bpf.o",
+            bytes: SYS_EXEC_BPF,
+        },
+        EmbeddedArtifact {
+            name: "network_filter.bpf.o",
+            bytes: NETWORK_FILTER_BPF,
+        },
+        EmbeddedArtifact {
+            name: "agent-ebpf-sensor-ebpf",
+            bytes: enforcement_bpf_data,
+        },
+    ])
+    .context(
+        "bytecode attestation failed — refusing to load any eBPF object (fail-closed); \
+         see error for specific artifact/check that failed",
+    )?;
+    info!("🔏 Bytecode attestation verified (signed manifest + embedded digests match)");
 
     // BTF is fetched once and used for two purposes: (1) resolving the three
     // kernel-specific struct field offsets the LSM enforcement hook needs

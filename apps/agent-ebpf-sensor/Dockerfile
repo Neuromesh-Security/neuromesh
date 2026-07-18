@@ -82,6 +82,59 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --locked -p agent-ebpf-sensor --features orchestrator --release
 
 # ------------------------------------------------------------------------------
+# attestation — digest the exact include_bytes! inputs from this build, then
+# Cosign sign-blob with the SAME static key used for image signing (PR #47).
+# Manifest+sig are baked into the image (same trust boundary as the binary,
+# outer integrity via image Cosign signature). The public key is NOT baked —
+# it is mounted at runtime (Secret), mirroring the webhook pattern.
+# ------------------------------------------------------------------------------
+FROM agent-builder AS attestation
+
+# Pin Cosign for reproducible sign-blob encoding (ECDSA P-256 / SHA-256).
+ARG COSIGN_VERSION=2.4.3
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl -fsSL "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64" \
+         -o /usr/local/bin/cosign \
+    && chmod +x /usr/local/bin/cosign \
+    && cosign version \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG GIT_SHA=unknown
+ARG BUILD_TIMESTAMP=unknown
+
+COPY scripts/ci/generate_bytecode_manifest.sh /tmp/generate_bytecode_manifest.sh
+
+RUN mkdir -p /attestation \
+    && bash /tmp/generate_bytecode_manifest.sh \
+         --sys-exec /build/apps/agent-ebpf-sensor/target/bpf/sys_exec.bpf.o \
+         --network-filter /build/apps/agent-ebpf-sensor/target/bpf/network_filter.bpf.o \
+         --enforcement /build/apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf \
+         --git-sha "${GIT_SHA}" \
+         --build-timestamp "${BUILD_TIMESTAMP}" \
+         --out /attestation/bytecode-manifest.json
+
+# required=false: fork/PR builds without COSIGN_PRIVATE_KEY omit the signature.
+# The agent then fail-closes at startup (no unverified operation). Main publish
+# builds MUST pass the BuildKit secrets so the signature is present.
+RUN --mount=type=secret,id=cosign_private_key,required=false \
+    --mount=type=secret,id=cosign_password,required=false \
+    if [ -f /run/secrets/cosign_private_key ]; then \
+      export COSIGN_PASSWORD="$(cat /run/secrets/cosign_password 2>/dev/null || true)"; \
+      cosign sign-blob \
+        --key /run/secrets/cosign_private_key \
+        --yes \
+        --tlog-upload=false \
+        --output-signature /attestation/bytecode-manifest.sig \
+        /attestation/bytecode-manifest.json; \
+      test -s /attestation/bytecode-manifest.sig; \
+      echo "signed bytecode-manifest.json ($(wc -c < /attestation/bytecode-manifest.sig) bytes sig)"; \
+    else \
+      echo "WARNING: cosign_private_key BuildKit secret not provided — \
+bytecode-manifest.sig omitted; agent will fail-closed at startup"; \
+    fi
+
+# ------------------------------------------------------------------------------
 # runtime — debian:bookworm-slim matches builder glibc (2.36)
 # ------------------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
@@ -95,7 +148,15 @@ COPY --from=agent-builder \
     /build/target/release/agent-ebpf-sensor \
     /usr/local/bin/agent-ebpf-sensor
 
-ENV RUST_LOG=info
+# Baked manifest (+ signature when CI provided the Cosign static key).
+COPY --from=attestation /attestation/ /etc/neuromesh/
+
+# Public key is mounted at runtime (see deploy/kubernetes/neuromesh-agent.yaml).
+ENV RUST_LOG=info \
+    NEUROMESH_BYTECODE_MANIFEST_PATH=/etc/neuromesh/bytecode-manifest.json \
+    NEUROMESH_BYTECODE_MANIFEST_SIG_PATH=/etc/neuromesh/bytecode-manifest.sig \
+    NEUROMESH_COSIGN_PUBLIC_KEY_PATH=/etc/neuromesh/cosign/cosign.pub
+
 ENTRYPOINT ["/usr/local/bin/agent-ebpf-sensor"]
 
 LABEL org.opencontainers.image.source=https://github.com/Neuromesh-Security/neuromesh
