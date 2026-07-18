@@ -59,6 +59,8 @@ services:
       # internal/identity/spiffe_validator.go; this must never be set in a
       # real deployment, where NEUROMESH_SPIFFE_TRUST_BUNDLE_MODE is required.
       NEUROMESH_INSECURE_MOCK_IDENTITY: "true"
+      # Issue #55: policy-bundle requires a shared bearer token (local-dev only).
+      NEUROMESH_POLICY_BUNDLE_TOKEN: "local-dev-policy-bundle-token"
     healthcheck:
       disable: true
     networks:

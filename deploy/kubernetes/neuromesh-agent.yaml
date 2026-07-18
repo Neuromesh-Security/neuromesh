@@ -71,6 +71,9 @@ spec:
               value: /etc/neuromesh/bytecode-manifest.json
             - name: NEUROMESH_BYTECODE_MANIFEST_SIG_PATH
               value: /etc/neuromesh/bytecode-manifest.sig
+            # Issue #55: shared bearer for GET /v1/policy-bundle (Secret mount).
+            - name: NEUROMESH_POLICY_BUNDLE_TOKEN_FILE
+              value: /etc/neuromesh/policy-bundle/token
           securityContext:
             privileged: true
             runAsUser: 0
@@ -102,6 +105,9 @@ spec:
               mountPath: /tmp
             - name: cosign-pubkey
               mountPath: /etc/neuromesh/cosign
+              readOnly: true
+            - name: policy-bundle-token
+              mountPath: /etc/neuromesh/policy-bundle
               readOnly: true
           resources:
             requests:
@@ -144,6 +150,15 @@ spec:
             items:
               - key: cosign.pub
                 path: cosign.pub
+        # Issue #55: shared policy-bundle bearer token (same Secret class as Cosign):
+        #   kubectl -n neuromesh-system create secret generic neuromesh-policy-bundle-token \
+        #     --from-literal=token="$$(openssl rand -hex 32)"
+        - name: policy-bundle-token
+          secret:
+            secretName: neuromesh-policy-bundle-token
+            items:
+              - key: token
+                path: token
 ---
 apiVersion: v1
 kind: ServiceAccount
