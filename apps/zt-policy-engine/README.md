@@ -20,7 +20,20 @@ POST /v1/evaluate
 GET /v1/policy-bundle
     │
     └─► compiled path-prefix deny list for agent BPF map sync (Phase 1)
-        (no OPA / no SPIFFE on this endpoint)
+        (no OPA / no SPIFFE on this endpoint; currently unauthenticated)
+```
+
+### Operator note — agent sync (Phase 1)
+
+When `NEUROMESH_ZT_POLICY_ENGINE_URL` is set on the agent (e.g. `http://zt-policy-engine:8080`),
+`agent-ebpf-sensor` polls `GET /v1/policy-bundle` every **30s**, writes prefixes into
+BPF maps, and keeps enforcing last-known-good on failure (STALE after 5 minutes —
+enforcement is never disabled). If the URL is unset, the agent uses bootstrap
+defaults only (`/tmp/`, `/dev/shm/`, `/var/tmp/`). Full threat-model write-up:
+`docs/threat-model.md` §4.5.
+
+```bash
+curl -s http://localhost:8080/v1/policy-bundle | jq .
 ```
 
 ## Policy (Sprint)
@@ -102,6 +115,10 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
 - `/v1/evaluate` is **not** called from the eBPF LSM hot path. Phase 1 agent sync
   uses `GET /v1/policy-bundle` for path-prefix deny-list maps only; SPIFFE-based
   allow-exceptions for ephemeral paths remain a Phase 2 / Slow Path concern.
+- `GET /v1/policy-bundle` is **unauthenticated**. Accepted for Phase 1 (exported
+  prefixes are not secret); **must be authenticated before Phase 2** when the
+  bundle would include SPIFFE allow-exceptions. Tracked in
+  [#55](https://github.com/Neuromesh-Security/neuromesh/issues/55).
 - The insecure mock bypass still exists as an explicit env opt-in for local
   testing — it is fail-open for identity by design when enabled; treat enablement
   as a security incident outside developer laptops.
