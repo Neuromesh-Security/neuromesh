@@ -58,10 +58,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            # Issue #44 Phase 1: Cosign static public key (same material as the
-            # admission webhook). Manifest+sig are baked into the image; the
-            # public key is mounted so the trust root is not solely under the
-            # same writeable rootfs as the attested artifacts.
+            # Issue #44 Phase 1: Cosign static public key (same key material
+            # intended for image signing / webhook verify). Manifest+sig are
+            # baked into the image; the public key is mounted so the trust
+            # root is not solely under the same writeable rootfs as the
+            # attested artifacts. (Admission webhook enforcement of image
+            # Cosign signatures is a separate deploy dependency — not shipped
+            # under deploy/ today.)
             - name: NEUROMESH_COSIGN_PUBLIC_KEY_PATH
               value: /etc/neuromesh/cosign/cosign.pub
             - name: NEUROMESH_BYTECODE_MANIFEST_PATH

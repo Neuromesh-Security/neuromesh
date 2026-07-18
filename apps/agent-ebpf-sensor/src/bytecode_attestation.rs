@@ -23,19 +23,29 @@
 //!   JSON manifest baked into the container image at build time.
 //! - **Not covered here (by design):** the agent binary itself — embedding a
 //!   self-digest of the running executable into a manifest that is itself
-//!   packaged inside that executable is circular. The binary+image layer is
-//!   already covered by the existing Cosign image signature (PR #47 /
-//!   `k8s-admission-webhook`).
+//!   packaged inside that executable is circular.
+//! - **Binary / image layer (documented dependency, not a closed control in
+//!   this repo):** CI produces Cosign image signatures (PR #47 signing step).
+//!   Admission-time enforcement via `k8s-admission-webhook` is **not** shipped
+//!   as a deployable `ValidatingWebhookConfiguration` / Deployment / Service
+//!   under `deploy/` — only a README example exists. Until that wiring is
+//!   shipped and installed, do **not** claim the agent binary is gated by
+//!   webhook Cosign verification before the pod starts. Treat image Cosign +
+//!   webhook admission as an operational dependency to close separately.
 //! - **Public key delivery:** mounted at runtime (Secret), mirroring the
-//!   webhook's `NEUROMESH_COSIGN_PUBLIC_KEY_PATH` pattern — not baked into the
-//!   image — so the trust root is not solely under the same writeable rootfs
-//!   as the artifacts being attested.
+//!   webhook's `NEUROMESH_COSIGN_PUBLIC_KEY_PATH` *env-var name* pattern — not
+//!   baked into the image — so the trust root is not solely under the same
+//!   writeable rootfs as the artifacts being attested.
 //!
 //! # Fail-closed contract
 //!
-//! There is **no** environment variable, feature flag, or fallback that allows
-//! startup to proceed after a verification failure. Any failure aborts before
-//! `EbpfLoader::load` / `Ebpf::load` / `load_with_map_pinning`.
+//! The only environment variables consulted are absolute-path overrides for
+//! the manifest, detached signature, and Cosign public key
+//! (`NEUROMESH_BYTECODE_MANIFEST_PATH`, `NEUROMESH_BYTECODE_MANIFEST_SIG_PATH`,
+//! `NEUROMESH_COSIGN_PUBLIC_KEY_PATH`). None of them disable verification,
+//! skip checks, or fail-open. There is **no** feature flag or fallback that
+//! allows startup to proceed after a verification failure. Any failure aborts
+//! before `EbpfLoader::load` / `Ebpf::load` / `load_with_map_pinning`.
 
 use std::fs;
 use std::io;
@@ -487,6 +497,7 @@ mod tests {
     use p256::ecdsa::SigningKey as P256SigningKey;
     use p256::pkcs8::LineEnding;
     use rand_core::OsRng;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn tmp_dir() -> PathBuf {
@@ -506,7 +517,58 @@ mod tests {
         fs::write(path, bytes).expect("write");
     }
 
+    /// Serialize tests that mutate process-global attestation path env vars.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Sets the three real path env vars used by `verify_startup`, restoring
+    /// prior values on drop.
+    struct StartupEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl StartupEnvGuard {
+        fn apply(manifest: &Path, signature: &Path, public_key: &Path) -> Self {
+            let lock = env_lock().lock().expect("env lock");
+            let keys = [
+                ENV_BYTECODE_MANIFEST_PATH,
+                ENV_BYTECODE_MANIFEST_SIG_PATH,
+                ENV_COSIGN_PUBLIC_KEY_PATH,
+            ];
+            let values = [manifest, signature, public_key];
+            let mut saved = Vec::with_capacity(keys.len());
+            for (key, value) in keys.iter().zip(values.iter()) {
+                saved.push((*key, std::env::var(key).ok()));
+                assert!(
+                    value.is_absolute(),
+                    "{key} test path must be absolute: {}",
+                    value.display()
+                );
+                std::env::set_var(key, value);
+            }
+            Self {
+                _lock: lock,
+                saved,
+            }
+        }
+    }
+
+    impl Drop for StartupEnvGuard {
+        fn drop(&mut self) {
+            for (key, prev) in self.saved.drain(..) {
+                match prev {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
     struct Fixture {
+        dir: PathBuf,
         manifest: PathBuf,
         signature: PathBuf,
         public_key: PathBuf,
@@ -538,6 +600,7 @@ mod tests {
             ];
 
             let mut f = Self {
+                dir: dir.clone(),
                 manifest: dir.join("bytecode-manifest.json"),
                 signature: dir.join("bytecode-manifest.sig"),
                 public_key,
@@ -591,6 +654,14 @@ mod tests {
                 &self.public_key,
                 &embedded,
             )
+        }
+
+        /// Call the real `main.rs` entrypoint with path env vars set.
+        fn verify_startup_via_env(&self) -> Result<(), AttestationError> {
+            let _guard =
+                StartupEnvGuard::apply(&self.manifest, &self.signature, &self.public_key);
+            let embedded = self.embedded();
+            verify_startup(&embedded)
         }
     }
 
@@ -755,15 +826,198 @@ mod tests {
 
     #[test]
     fn no_skip_env_bypass_is_consulted() {
-        // Documented hard constraint: verification must not honor any skip flag.
-        // Setting a hypothetical bypass env must not change verify_artifacts behavior.
-        std::env::set_var("NEUROMESH_SKIP_BYTECODE_ATTESTATION", "1");
-        std::env::set_var("NEUROMESH_BYTECODE_ATTESTATION_FAIL_OPEN", "1");
+        // Hypothetical bypass names are never read by production code. Setting
+        // them must not change fail-closed behavior at verify_startup.
         let f = Fixture::new();
         fs::remove_file(&f.manifest).unwrap();
-        let err = f.verify().expect_err("must still fail closed");
+        let _guard = StartupEnvGuard::apply(&f.manifest, &f.signature, &f.public_key);
+        std::env::set_var("NEUROMESH_SKIP_BYTECODE_ATTESTATION", "1");
+        std::env::set_var("NEUROMESH_BYTECODE_ATTESTATION_FAIL_OPEN", "1");
+        let err = verify_startup(&f.embedded()).expect_err("must still fail closed");
         assert!(matches!(err, AttestationError::ManifestMissing { .. }));
         std::env::remove_var("NEUROMESH_SKIP_BYTECODE_ATTESTATION");
         std::env::remove_var("NEUROMESH_BYTECODE_ATTESTATION_FAIL_OPEN");
+    }
+
+    // --- verify_startup entrypoint × real path env vars -------------------
+    // These call verify_startup (same entrypoint as main.rs), not only
+    // verify_artifacts. Each of the three path env vars is broken three ways.
+
+    #[test]
+    fn verify_startup_succeeds_with_real_path_env_vars() {
+        let f = Fixture::new();
+        f.verify_startup_via_env()
+            .expect("verify_startup must succeed with valid paths via env");
+    }
+
+    #[test]
+    fn verify_startup_manifest_env_nonexistent_fails_closed() {
+        let f = Fixture::new();
+        let missing = f.dir.join("does-not-exist-manifest.json");
+        let _guard = StartupEnvGuard::apply(&missing, &f.signature, &f.public_key);
+        let err = verify_startup(&f.embedded()).expect_err("nonexistent manifest");
+        assert!(
+            matches!(err, AttestationError::ManifestMissing { .. }),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_startup_manifest_env_garbage_fails_closed() {
+        let f = Fixture::new();
+        let garbage = f.dir.join("garbage-manifest.json");
+        write(&garbage, b"{this is not valid json!!!!");
+        let _guard = StartupEnvGuard::apply(&garbage, &f.signature, &f.public_key);
+        let err = verify_startup(&f.embedded()).expect_err("garbage manifest");
+        // Signature is checked over raw bytes before JSON parse; garbage bytes
+        // with a signature for the real manifest → SignatureInvalid.
+        assert!(
+            matches!(
+                err,
+                AttestationError::SignatureInvalid { .. } | AttestationError::ManifestParse { .. }
+            ),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_startup_manifest_env_wrong_valid_file_fails_closed() {
+        let mut f = Fixture::new();
+        // Well-formed JSON that looks like a Phase 1 manifest, but is not the
+        // one matching the signature file still pointed to by SIG_PATH.
+        let wrong = f.dir.join("wrong-but-valid-manifest.json");
+        f.artifacts[0].1 = b"different-sys-exec-bytes".to_vec();
+        write(&wrong, f.manifest_json().as_bytes());
+        // Restore embedded bytes to the originals (matched by f.signature).
+        f.artifacts[0].1 = b"sys-exec-bytecode-v1".to_vec();
+        let _guard = StartupEnvGuard::apply(&wrong, &f.signature, &f.public_key);
+        let err = verify_startup(&f.embedded()).expect_err("wrong valid manifest");
+        assert!(
+            matches!(err, AttestationError::SignatureInvalid { .. }),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_startup_signature_env_nonexistent_fails_closed() {
+        let f = Fixture::new();
+        let missing = f.dir.join("does-not-exist.sig");
+        let _guard = StartupEnvGuard::apply(&f.manifest, &missing, &f.public_key);
+        let err = verify_startup(&f.embedded()).expect_err("nonexistent signature");
+        assert!(
+            matches!(err, AttestationError::SignatureMissing { .. }),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_startup_signature_env_garbage_fails_closed() {
+        let f = Fixture::new();
+        let garbage = f.dir.join("garbage.sig");
+        write(&garbage, b"%%%not-valid-base64-signature%%%");
+        let _guard = StartupEnvGuard::apply(&f.manifest, &garbage, &f.public_key);
+        let err = verify_startup(&f.embedded()).expect_err("garbage signature");
+        assert!(
+            matches!(err, AttestationError::SignatureInvalid { .. }),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_startup_signature_env_wrong_valid_file_fails_closed() {
+        let f = Fixture::new();
+        // Cryptographically valid ECDSA signature over a different message.
+        let other = br#"{"schema_version":1,"git_sha":"other","build_timestamp":"t","artifacts":[]}"#;
+        let sig: EcdsaSignature = P256EcdsaSigner::sign(&f.signing_key, other);
+        let wrong = f.dir.join("wrong-but-valid.sig");
+        write(
+            &wrong,
+            base64::engine::general_purpose::STANDARD
+                .encode(sig.to_der())
+                .as_bytes(),
+        );
+        let _guard = StartupEnvGuard::apply(&f.manifest, &wrong, &f.public_key);
+        let err = verify_startup(&f.embedded()).expect_err("wrong valid signature");
+        assert!(
+            matches!(err, AttestationError::SignatureInvalid { .. }),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_startup_pubkey_env_nonexistent_fails_closed() {
+        let f = Fixture::new();
+        let missing = f.dir.join("does-not-exist.pub");
+        let _guard = StartupEnvGuard::apply(&f.manifest, &f.signature, &missing);
+        let err = verify_startup(&f.embedded()).expect_err("nonexistent pubkey");
+        assert!(
+            matches!(err, AttestationError::PublicKeyMissing { .. }),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_startup_pubkey_env_garbage_fails_closed() {
+        let f = Fixture::new();
+        let garbage = f.dir.join("garbage.pub");
+        write(&garbage, b"-----BEGIN PUBLIC KEY-----\nnot-a-real-key\n-----END PUBLIC KEY-----\n");
+        let _guard = StartupEnvGuard::apply(&f.manifest, &f.signature, &garbage);
+        let err = verify_startup(&f.embedded()).expect_err("garbage pubkey");
+        assert!(
+            matches!(
+                err,
+                AttestationError::PublicKeyInvalid { .. } | AttestationError::SignatureInvalid { .. }
+            ),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_startup_pubkey_env_wrong_valid_file_fails_closed() {
+        let f = Fixture::new();
+        // Different valid Cosign-style P-256 PEM (not the signing key).
+        let other_key = P256SigningKey::random(&mut OsRng);
+        let wrong_pem = other_key
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .expect("pem");
+        let wrong = f.dir.join("wrong-but-valid.pub");
+        write(&wrong, wrong_pem.as_bytes());
+        let _guard = StartupEnvGuard::apply(&f.manifest, &f.signature, &wrong);
+        let err = verify_startup(&f.embedded()).expect_err("wrong valid pubkey");
+        assert!(
+            matches!(err, AttestationError::SignatureInvalid { .. }),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_startup_manifest_env_wrong_digests_signed_fails_closed() {
+        // Alternate "wrong valid file": re-signed manifest with wrong digests
+        // (signature verifies; digest compare fails). Exercises DigestMismatch
+        // through verify_startup + env paths.
+        let mut f = Fixture::new();
+        let wrong = f.dir.join("wrong-digests-manifest.json");
+        let wrong_sig = f.dir.join("wrong-digests.sig");
+        f.artifacts[1].1 = b"network-filter-WRONG".to_vec();
+        let wrong_json = f.manifest_json();
+        let sig: EcdsaSignature = P256EcdsaSigner::sign(&f.signing_key, wrong_json.as_bytes());
+        write(&wrong, wrong_json.as_bytes());
+        write(
+            &wrong_sig,
+            base64::engine::general_purpose::STANDARD
+                .encode(sig.to_der())
+                .as_bytes(),
+        );
+        // Restore embedded bytes to originals so digests disagree with wrong manifest.
+        f.artifacts[1].1 = b"network-filter-bytecode-v1".to_vec();
+        let _guard = StartupEnvGuard::apply(&wrong, &wrong_sig, &f.public_key);
+        let err = verify_startup(&f.embedded()).expect_err("digest mismatch via env");
+        match err {
+            AttestationError::DigestMismatch { name, .. } => {
+                assert_eq!(name, "network_filter.bpf.o");
+            }
+            other => panic!("expected DigestMismatch, got {other}"),
+        }
     }
 }

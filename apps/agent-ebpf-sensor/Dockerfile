@@ -84,9 +84,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ------------------------------------------------------------------------------
 # attestation — digest the exact include_bytes! inputs from this build, then
 # Cosign sign-blob with the SAME static key used for image signing (PR #47).
-# Manifest+sig are baked into the image (same trust boundary as the binary,
-# outer integrity via image Cosign signature). The public key is NOT baked —
-# it is mounted at runtime (Secret), mirroring the webhook pattern.
+# Manifest+sig are baked into the image (same build trust boundary as the
+# binary). CI also Cosign-signs the image digest; admission-time webhook
+# enforcement of that signature is a separate deploy dependency (not shipped
+# under deploy/ today — see tracked security issue). The public key is NOT
+# baked — it is mounted at runtime (Secret), same env-var pattern as the
+# webhook.
 # ------------------------------------------------------------------------------
 FROM agent-builder AS attestation
 
