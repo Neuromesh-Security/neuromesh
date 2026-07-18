@@ -312,7 +312,8 @@ cargo test -p agent-ebpf-sensor --test execve_stress_test --no-run   # compile-o
 cargo bench -p agent-ebpf-sensor --no-run                            # benchmark compile gate
 ```
 
-eBPF verifier matrix (kernels `5.15`, `6.1`, `6.8+`) re-runs suites per kernel runner.
+eBPF verifier matrix re-runs suites on two honest runner/kernel cells:
+`ubuntu-22.04 / ~6.8-azure` and `ubuntu-24.04 / ~6.17-azure` (not three LTS lines).
 
 Stress and live kernel benchmarks are **`#[ignore]`** — not executed in GitHub Actions due to runner variance. Numeric gates are populated via manual pre-release validation on Linux hardware.
 

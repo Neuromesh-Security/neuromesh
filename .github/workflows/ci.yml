@@ -115,7 +115,7 @@ jobs:
       - name: Download eBPF bytecode (orchestrator compile gate)
         uses: actions/download-artifact@v4
         with:
-          name: ebpf-bytecode-6.8+
+          name: ebpf-bytecode-ubuntu-24.04-6.17-azure
           path: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release
 
       - name: Export eBPF bytecode path for orchestrator builds
@@ -146,6 +146,13 @@ jobs:
       - name: Verify benchmark harness compiles
         run: cargo bench -p agent-ebpf-sensor --no-run
 
+  # Honest matrix: two GitHub-hosted runners ⇒ two distinct Azure HWE kernels.
+  # Labels name the runner image and the approximate booted kernel (not LTS
+  # version claims). The former aspirational "5.15" / "6.1" cells both used
+  # ubuntu-22.04 with identical steps/flags — they were collapsed (Issue #52);
+  # real coverage is unchanged (still ≈6.8-azure + ≈6.17-azure). Real 5.15 /
+  # 6.1 LTS validation remains a manual pre-release gap (threat-model §7).
+  # `artifact_key` is slash-free for GitHub Actions artifact name rules.
   build-ebpf:
     name: Build eBPF (${{ matrix.kernel }})
     runs-on: ${{ matrix.runner }}
@@ -155,18 +162,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - kernel: "5.15"
+          - kernel: "ubuntu-22.04 / ~6.8-azure"
+            artifact_key: ubuntu-22.04-6.8-azure
             runner: ubuntu-22.04
-          - kernel: "6.1"
-            runner: ubuntu-22.04
-          - kernel: "6.8+"
+          - kernel: "ubuntu-24.04 / ~6.17-azure"
+            artifact_key: ubuntu-24.04-6.17-azure
             runner: ubuntu-24.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Report runner kernel
-        run: uname -r
+        run: |
+          echo "matrix.kernel: ${{ matrix.kernel }}"
+          echo "uname -r:      $(uname -r)"
 
       # Pinned toolchain — see apps/agent-ebpf-sensor/ebpf/rust-toolchain.toml
       # and Issue #53. Do not float back to `@nightly` / unpinned bpf-linker.
@@ -180,7 +189,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/agent-ebpf-sensor/ebpf
-          shared-key: ebpf-${{ matrix.kernel }}
+          shared-key: ebpf-${{ matrix.artifact_key }}
           cache-on-failure: true
 
       - name: Install bpf-linker
@@ -201,48 +210,36 @@ jobs:
       - name: Upload eBPF bytecode artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ebpf-bytecode-${{ matrix.kernel }}
+          name: ebpf-bytecode-${{ matrix.artifact_key }}
           path: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
           retention-days: 14
           if-no-files-found: error
 
-  # IMPORTANT — matrix `kernel` labels vs. actual booted kernels:
-  # The labels "5.15" / "6.1" / "6.8+" are historical aspirational tags, NOT
-  # the kernel versions GitHub-hosted runners actually boot. As of 2026-07
-  # (actions/runner-images Ubuntu2204/Ubuntu2404 readmes + prior GH issues):
-  #   - "5.15" and "6.1" both run on ubuntu-22.04 → ~6.8.0-*-azure (same image)
-  #   - "6.8+" runs on ubuntu-24.04 → ~6.17.0-*-azure
-  # So this job gives live-kernel BTF + verifier coverage on *two* distinct
-  # Azure HWE kernels (≈6.8 and ≈6.17), NOT three labeled LTS lines and NOT
-  # real 5.15 / 6.1. The "Verify Rust enforcement + live BTF offsets" step
-  # below makes that residual gap visible in CI logs (uname -r + resolved
-  # offsets) rather than claiming cross-kernel coverage the runners cannot
-  # provide. See PR discussion for the recommended manual 5.15/6.1 pre-release
-  # check path (same disclosure pattern as execve_stress_test).
   ebpf-verifier-check:
     name: eBPF Verifier (${{ matrix.kernel }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     needs: build-ebpf
     env:
-      NEUROMESH_VERIFY_CARGO_TARGET_DIR: target/ebpf-verifier-sudo-${{ matrix.kernel }}
+      NEUROMESH_VERIFY_CARGO_TARGET_DIR: target/ebpf-verifier-sudo-${{ matrix.artifact_key }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - kernel: "5.15"
+          - kernel: "ubuntu-22.04 / ~6.8-azure"
+            artifact_key: ubuntu-22.04-6.8-azure
             runner: ubuntu-22.04
-          - kernel: "6.1"
-            runner: ubuntu-22.04
-          - kernel: "6.8+"
+          - kernel: "ubuntu-24.04 / ~6.17-azure"
+            artifact_key: ubuntu-24.04-6.17-azure
             runner: ubuntu-24.04
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Report runner kernel (actual booted version, not matrix label)
+      - name: Report runner kernel (actual booted version)
         run: |
-          echo "matrix.kernel label: ${{ matrix.kernel }}"
+          echo "matrix.kernel:       ${{ matrix.kernel }}"
+          echo "matrix.artifact_key: ${{ matrix.artifact_key }}"
           echo "matrix.runner:       ${{ matrix.runner }}"
           echo "uname -r:            $(uname -r)"
           echo "--- /proc/version ---"
@@ -250,10 +247,10 @@ jobs:
           echo "--- BTF present? ---"
           ls -la /sys/kernel/btf/vmlinux
 
-      - name: Download eBPF bytecode (${{ matrix.kernel }})
+      - name: Download eBPF bytecode (${{ matrix.artifact_key }})
         uses: actions/download-artifact@v4
         with:
-          name: ebpf-bytecode-${{ matrix.kernel }}
+          name: ebpf-bytecode-${{ matrix.artifact_key }}
           path: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release
 
       - name: Install Rust Stable
@@ -268,7 +265,7 @@ jobs:
           workspaces: |
             .
             apps/agent-ebpf-sensor
-          shared-key: ebpf-verifier-${{ matrix.runner }}-${{ matrix.kernel }}
+          shared-key: ebpf-verifier-${{ matrix.artifact_key }}
 
       - name: Build C visibility bytecode
         working-directory: apps/agent-ebpf-sensor
@@ -367,11 +364,11 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Download eBPF bytecode (6.8+ matrix artifact)
+      - name: Download eBPF bytecode (ubuntu-24.04 / ~6.17-azure artifact)
         if: matrix.needs_ebpf == true
         uses: actions/download-artifact@v4
         with:
-          name: ebpf-bytecode-6.8+
+          name: ebpf-bytecode-ubuntu-24.04-6.17-azure
           path: apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release
 
       - name: Install Rust Stable
