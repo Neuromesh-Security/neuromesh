@@ -58,6 +58,15 @@ rskafka = { version = "0.6", optional = true }
 tokio-util = "0.7"
 prometheus = { version = "0.14", optional = true }
 axum = { version = "0.7", optional = true }
+# Narrow crypto for Issue #44 Phase 1 bytecode attestation:
+# verify Cosign static-key detached signatures (sign-blob) over the manifest.
+# ECDSA P-256 is Cosign's default key type; Ed25519 matches the webhook's
+# LoadVerifier key-type surface. Intentionally NOT pulling sigstore/cosign
+# crates — verify-only, same dependency-minimalism bar as PR #47 on the Go side.
+sha2 = "0.10"
+base64 = "0.22"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"] }
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "pkcs8", "pem", "rand_core"] }
 
 [package.metadata.coverage]
 minimum-line-coverage = 70
@@ -66,6 +75,7 @@ minimum-line-coverage = 70
 criterion = { workspace = true }
 tokio = { version = "1.36", features = ["macros", "rt-multi-thread", "time", "sync"] }
 tokio-util = "0.7"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [[test]]
 name = "chaos_engineering_test"
