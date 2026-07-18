@@ -6,7 +6,7 @@ Automated chaos test for validating the user-space **RuleEngine** and SIEM JSON 
 
 - Linux host with eBPF support (kernel ≥ 5.x recommended)
 - Root privileges (required to load eBPF programs and attach tracepoints)
-- Rust toolchain (stable + nightly) and `bpf-linker` — same as CI
+- Rust toolchain (stable + **nightly-2026-07-17**) and `bpf-linker` **0.10.4** — same pins as CI (Issue #53)
 
 ## Live Fire Test
 
@@ -16,7 +16,7 @@ Automated chaos test for validating the user-space **RuleEngine** and SIEM JSON 
 # Build Ring 0 kernel object
 cd apps/agent-ebpf-sensor/ebpf
 export CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=bpf-linker
-cargo +nightly build --package agent-ebpf-sensor-ebpf \
+cargo +nightly-2026-07-17 build --package agent-ebpf-sensor-ebpf \
   --target bpfel-unknown-none -Z build-std=core --release
 
 # Build and run user-space orchestrator (requires root)
