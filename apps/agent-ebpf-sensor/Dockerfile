@@ -105,6 +105,9 @@ RUN apt-get update \
 
 ARG GIT_SHA=unknown
 ARG BUILD_TIMESTAMP=unknown
+# When true (CI publish on main), a missing/failed sign-blob MUST fail the
+# image build — never ship an agent image without bytecode-manifest.sig.
+ARG REQUIRE_BYTECODE_SIGNATURE=false
 
 COPY scripts/ci/generate_bytecode_manifest.sh /tmp/generate_bytecode_manifest.sh
 
@@ -118,11 +121,17 @@ RUN mkdir -p /attestation \
          --out /attestation/bytecode-manifest.json
 
 # required=false: fork/PR builds without COSIGN_PRIVATE_KEY omit the signature.
-# The agent then fail-closes at startup (no unverified operation). Main publish
-# builds MUST pass the BuildKit secrets so the signature is present.
+# The agent then fail-closes at startup (no unverified operation).
+#
+# IMPORTANT: Cosign PEM keys are multiline. CI must inject them via
+# `secret-envs` (or `secret-files`), NOT via build-push-action's line-oriented
+# `secrets: key=${{ secrets.PEM }}` form — that truncates/corrupts the PEM
+# ("invalid pem block") and previously allowed a successful image build with
+# no .sig because this shell lacked `set -e`.
 RUN --mount=type=secret,id=cosign_private_key,required=false \
     --mount=type=secret,id=cosign_password,required=false \
-    if [ -f /run/secrets/cosign_private_key ]; then \
+    set -eu; \
+    if [ -f /run/secrets/cosign_private_key ] && [ -s /run/secrets/cosign_private_key ]; then \
       export COSIGN_PASSWORD="$(cat /run/secrets/cosign_password 2>/dev/null || true)"; \
       cosign sign-blob \
         --key /run/secrets/cosign_private_key \
@@ -133,8 +142,14 @@ RUN --mount=type=secret,id=cosign_private_key,required=false \
       test -s /attestation/bytecode-manifest.sig; \
       echo "signed bytecode-manifest.json ($(wc -c < /attestation/bytecode-manifest.sig) bytes sig)"; \
     else \
-      echo "WARNING: cosign_private_key BuildKit secret not provided — \
+      echo "WARNING: cosign_private_key BuildKit secret not provided or empty — \
 bytecode-manifest.sig omitted; agent will fail-closed at startup"; \
+    fi; \
+    if [ "${REQUIRE_BYTECODE_SIGNATURE}" = "true" ]; then \
+      test -s /attestation/bytecode-manifest.sig || { \
+        echo "ERROR: REQUIRE_BYTECODE_SIGNATURE=true but /attestation/bytecode-manifest.sig is missing or empty"; \
+        exit 1; \
+      }; \
     fi
 
 # ------------------------------------------------------------------------------
