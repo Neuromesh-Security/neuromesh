@@ -3,6 +3,7 @@
 pub mod bpf_pin;
 pub mod btf_offsets;
 pub mod ingestion;
+pub mod lsm_decision;
 pub mod mocks;
 pub mod normalizer;
 pub mod path_deny;
