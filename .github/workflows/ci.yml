@@ -448,9 +448,17 @@ jobs:
         id: buildmeta
         run: echo "timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$GITHUB_OUTPUT"
 
+      # Multiline Cosign PEM keys MUST NOT be passed through build-push-action's
+      # line-oriented `secrets: key=${{ secrets.PEM }}` form — each PEM line is
+      # parsed as a separate invalid secret entry, the mounted key becomes
+      # corrupt ("invalid pem block"), and sign-blob fails. Pass via env +
+      # `secret-envs` instead (same material as image `cosign sign --key env://`).
       - name: Build Docker image
         id: build
         uses: docker/build-push-action@v6
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
@@ -462,14 +470,17 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
             BUILD_TIMESTAMP=${{ steps.buildmeta.outputs.timestamp }}
+            REQUIRE_BYTECODE_SIGNATURE=${{ steps.publish.outputs.should_publish == 'true' && matrix.needs_ebpf == true }}
           # SAME Cosign static key as image signing (PR #47). Consumed only by
           # apps/agent-ebpf-sensor/Dockerfile attestation stage via
-          # `cosign sign-blob` over bytecode-manifest.json. When the secret is
-          # unavailable (fork PRs), the Dockerfile omits .sig and the agent
-          # fail-closes at startup — never fail-open.
-          secrets: |
-            cosign_private_key=${{ secrets.COSIGN_PRIVATE_KEY }}
-            cosign_password=${{ secrets.COSIGN_PASSWORD }}
+          # `cosign sign-blob` over bytecode-manifest.json. When the env is
+          # empty (fork PRs), the Dockerfile omits .sig and the agent
+          # fail-closes at startup — never fail-open. On main publish for the
+          # agent image, REQUIRE_BYTECODE_SIGNATURE=true fails the build if
+          # .sig is missing.
+          secret-envs: |
+            cosign_private_key=COSIGN_PRIVATE_KEY
+            cosign_password=COSIGN_PASSWORD
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
