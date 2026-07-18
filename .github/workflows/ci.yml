@@ -168,9 +168,12 @@ jobs:
       - name: Report runner kernel
         run: uname -r
 
+      # Pinned toolchain — see apps/agent-ebpf-sensor/ebpf/rust-toolchain.toml
+      # and Issue #53. Do not float back to `@nightly` / unpinned bpf-linker.
       - name: Install Rust Nightly (eBPF prerequisite)
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-07-17
           components: rust-src
 
       - name: Cache Rust dependencies (BPF)
@@ -181,14 +184,14 @@ jobs:
           cache-on-failure: true
 
       - name: Install bpf-linker
-        run: cargo install bpf-linker --locked
+        run: cargo install bpf-linker --version 0.10.4 --locked
 
       - name: Build eBPF kernel space
         working-directory: apps/agent-ebpf-sensor/ebpf
         env:
           CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
         run: |
-          cargo +nightly build \
+          cargo +nightly-2026-07-17 build \
             --package agent-ebpf-sensor-ebpf \
             --target bpfel-unknown-none \
             -Z build-std=core \

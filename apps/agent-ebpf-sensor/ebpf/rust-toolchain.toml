@@ -1,0 +1,16 @@
+# Pins the eBPF enforcement crate toolchain only.
+#
+# This directory is its own Cargo workspace (`[workspace]` in Cargo.toml) and is
+# excluded from the repository-root workspace. A root-level nightly pin would
+# force userspace crates (agent-ebpf-sensor orchestrator, neuromesh-common,
+# integration tests) onto nightly and fight CI's `dtolnay/rust-toolchain@stable`
+# jobs — do not move this file to the repo root without revisiting that split.
+#
+# Channel `nightly-2026-07-17` is the rustup dated pin from the Issue #53
+# baseline day. It resolves to rustc 1.99.0-nightly (3d50c25bc, commit-date
+# 2026-07-16) with LLVM 22.1.8, and builds successfully with bpf-linker 0.10.4
+# (crates.io newest/max as of that investigation). Goal: freeze that working
+# combination — not an upgrade to a newer nightly or linker.
+[toolchain]
+channel = "nightly-2026-07-17"
+components = ["rust-src"]

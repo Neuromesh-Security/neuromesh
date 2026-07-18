@@ -194,7 +194,7 @@ Neuromesh follows an **Open Core** strategy: the runtime sensor and deterministi
 |-------------|---------|-------|
 | OS | Linux kernel **5.8+** | RingBuf, BPF map pinning, LSM eBPF |
 | Architecture | x86_64 | Primary target; ARM64 planned |
-| Rust | **nightly** + `bpf-linker` | Required for Rust eBPF enforcement object |
+| Rust | **nightly-2026-07-17** + `bpf-linker` **0.10.4** | Required for Rust eBPF enforcement object (pinned; see `apps/agent-ebpf-sensor/ebpf/rust-toolchain.toml`, Issue #53) |
 | Clang | 14+ | C visibility bytecode (`-target bpf`) |
 | Privileges | root or `CAP_BPF` + `CAP_PERFMON` + `CAP_SYS_ADMIN` | LSM attach requires BTF from `/sys/kernel/btf/vmlinux` |
 
@@ -205,11 +205,14 @@ Neuromesh follows an **Open Core** strategy: the runtime sensor and deterministi
 cargo test -p neuromesh-integration-tests
 cargo test -p agent-ebpf-sensor --lib
 
-# 1. Install eBPF linker
-cargo install bpf-linker
+# 1. Install pinned eBPF toolchain + linker (matches CI / Issue #53)
+rustup toolchain install nightly-2026-07-17 --component rust-src
+cargo install bpf-linker --version 0.10.4 --locked
 
 # 2. Build Rust enforcement bytecode + user-space orchestrator
-cargo +nightly build --package agent-ebpf-sensor-ebpf \
+#    (rust-toolchain.toml under apps/agent-ebpf-sensor/ebpf also selects this nightly)
+cargo +nightly-2026-07-17 build --package agent-ebpf-sensor-ebpf \
+  --manifest-path apps/agent-ebpf-sensor/ebpf/Cargo.toml \
   --target bpfel-unknown-none -Z build-std=core --release
 
 cargo build -p agent-ebpf-sensor --features orchestrator --release

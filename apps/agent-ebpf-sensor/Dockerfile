@@ -45,8 +45,11 @@ RUN cargo init --name rdkafka-probe --bin \
 # ------------------------------------------------------------------------------
 FROM rust:1-bookworm AS ebpf-builder
 
-RUN rustup toolchain install nightly --component rust-src \
-    && cargo install bpf-linker --locked
+# Pinned to the Issue #53 baseline (see ebpf/rust-toolchain.toml). Floating
+# `nightly` + unpinned bpf-linker previously made the enforcement object
+# non-reproducible across CI runs.
+RUN rustup toolchain install nightly-2026-07-17 --component rust-src \
+    && cargo install bpf-linker --version 0.10.4 --locked
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -56,7 +59,7 @@ COPY apps/agent-ebpf-sensor/ebpf apps/agent-ebpf-sensor/ebpf
 
 WORKDIR /build/apps/agent-ebpf-sensor/ebpf
 ENV CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=bpf-linker
-RUN cargo +nightly build --package agent-ebpf-sensor-ebpf \
+RUN cargo +nightly-2026-07-17 build --package agent-ebpf-sensor-ebpf \
     --target bpfel-unknown-none -Z build-std=core --release
 
 # ------------------------------------------------------------------------------

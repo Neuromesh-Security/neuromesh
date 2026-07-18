@@ -170,13 +170,13 @@ build_sensor() {
 
     if ! command -v bpf-linker >/dev/null 2>&1; then
         log_warn "bpf-linker not found — installing via cargo (may take a minute)..."
-        cargo install bpf-linker --locked
+        cargo install bpf-linker --version 0.10.4 --locked
     fi
 
     log_info "Building Rust enforcement bytecode (agent-ebpf-sensor-ebpf)..."
     (
-        cd "${REPO_ROOT}"
-        cargo +nightly build --package agent-ebpf-sensor-ebpf \
+        cd "${REPO_ROOT}/apps/agent-ebpf-sensor/ebpf"
+        cargo +nightly-2026-07-17 build --package agent-ebpf-sensor-ebpf \
             --target bpfel-unknown-none -Z build-std=core --release
     )
 
