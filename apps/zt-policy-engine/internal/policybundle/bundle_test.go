@@ -113,7 +113,11 @@ func TestLoadTokenFromEnvFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("  file-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(EnvPolicyBundleTokenFile, path)
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvPolicyBundleTokenFile, abs)
 	t.Setenv(EnvPolicyBundleToken, "")
 	got, err := LoadTokenFromEnv()
 	if err != nil {
@@ -121,6 +125,14 @@ func TestLoadTokenFromEnvFile(t *testing.T) {
 	}
 	if got != "file-token" {
 		t.Fatalf("got %q want file-token", got)
+	}
+}
+
+func TestLoadTokenFromEnvFileRejectsRelativePath(t *testing.T) {
+	t.Setenv(EnvPolicyBundleTokenFile, "relative/token")
+	t.Setenv(EnvPolicyBundleToken, "")
+	if _, err := LoadTokenFromEnv(); err == nil {
+		t.Fatal("expected error for relative token file path")
 	}
 }
 

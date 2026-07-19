@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -39,6 +40,14 @@ const (
 // the server must fail closed rather than serve the bundle without auth.
 func LoadTokenFromEnv() (string, error) {
 	if path := strings.TrimSpace(os.Getenv(EnvPolicyBundleTokenFile)); path != "" {
+		// Clean + require absolute path (same pattern as Cosign pubkey load in
+		// k8s-admission-webhook verifier.go). filepath.Clean is what gosec G304
+		// recognizes as sanitization for operator-configured file paths; relative
+		// / traversal-style env values must not be accepted.
+		path = filepath.Clean(path)
+		if !filepath.IsAbs(path) {
+			return "", fmt.Errorf("%s must be an absolute path, got %q", EnvPolicyBundleTokenFile, path)
+		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("read %s (%q): %w", EnvPolicyBundleTokenFile, path, err)
