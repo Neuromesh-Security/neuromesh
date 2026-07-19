@@ -175,7 +175,12 @@ is enforced, out-of-band.
 
 #### Bundle API and agent sync (current behavior on `main`)
 
-`GET /v1/policy-bundle` (`apps/zt-policy-engine/internal/policybundle`) returns JSON:
+`GET /v1/policy-bundle` (`apps/zt-policy-engine/internal/policybundle`) returns JSON
+and **requires** `Authorization: Bearer <token>` (Issue [#55](https://github.com/Neuromesh-Security/neuromesh/issues/55)).
+Unauthenticated or invalid credentials receive **401**. Mechanism: shared bearer
+token via `NEUROMESH_POLICY_BUNDLE_TOKEN` or Secret-mounted
+`NEUROMESH_POLICY_BUNDLE_TOKEN_FILE` (same delivery class as Cosign pubkey mounts).
+SPIFFE mTLS was evaluated and deferred: this repo does not ship SPIRE on nodes today.
 
 | Field | Meaning |
 |-------|---------|
@@ -189,13 +194,28 @@ Agent behavior (`apps/agent-ebpf-sensor/src/policy_sync.rs`, `path_deny.rs`):
 |----------|--------|
 | **Poll cadence** | Every **30 seconds** (`POLICY_SYNC_INTERVAL`) when `NEUROMESH_ZT_POLICY_ENGINE_URL` is set |
 | **HTTP timeout** | 5 seconds per request |
+| **Authentication** | Bearer token required on every sync; **no** unauthenticated fallback |
 | **Bootstrap (fail-closed)** | Before LSM attach, maps are seeded with `/tmp/`, `/dev/shm/`, `/var/tmp/` — never start with an empty deny map |
-| **Sync failure** | Last-known-good map contents are **retained** (not cleared); enforcement continues |
+| **Sync failure (incl. auth rejection)** | Last-known-good map contents are **retained** (not cleared); enforcement continues |
 | **STALE** | After **5 minutes** without a successful sync (`POLICY_STALE_AFTER`), state is logged as STALE — **enforcement is not disabled** |
-| **Sync disabled** | If `NEUROMESH_ZT_POLICY_ENGINE_URL` is unset, sync is off; the agent enforces the bootstrap set only |
+| **Sync disabled** | If `NEUROMESH_ZT_POLICY_ENGINE_URL` is unset, sync is off; the agent enforces the bootstrap set only. If URL is set but the token is missing, sync stays off and **does not** send unauthenticated requests |
 
-PR #56 (LSM probe-read fail-closed) and PR #57 (toolchain pins) did **not** change this sync contract — confirmed by inspecting those diffs against `path_deny.rs` / `policy_sync.rs` / `policybundle`.
+#### Phase 2 identity exceptions — locked scope decisions (Slice 0)
 
+These are **policy decisions**, not implementation details, recorded before Slice 2a/2b:
+
+1. **`/tmp/`-only exception scope:** When identity exceptions are eventually wired into
+   the LSM, they apply **only** to `/tmp/` (matching `execution.rego` today).
+   `/dev/shm/` and `/var/tmp/` remain **hard-denied for every workload**, identity
+   irrelevant. Widening that set requires an explicit Rego + threat-model change —
+   not an accidental side effect of Phase 2 plumbing.
+2. **`cgroup_id` recycling (Slice 2b risk — tracked, not implemented here):** Kernel
+   cgroup IDs can be reused after a pod/container is deleted and a new one is
+   scheduled. Any future `cgroup_id → identity-allow` map **must** invalidate entries
+   on pod-deletion (e.g. Kubernetes watch/informer on the agent), **not** rely on TTL
+   expiry alone. A stale allow entry surviving until TTL could let a newly scheduled
+   untrusted pod transiently inherit a deleted trusted pod’s recycled `cgroup_id` and
+   its allow status.
 ---
 
 ## 5. Network telemetry (`tcp_connect`)
@@ -262,7 +282,8 @@ Integration tests run via `cargo test -p neuromesh-integration-tests` **without*
 | No `execveat` hook | Medium | Alternative exec syscall unmonitored. Planned mitigation: add `execveat` coverage to the tracepoint hook. | Unassigned | Tracked in #TBD — new issue needed |
 | LotL single-shot from whitelisted path | Medium | Requires Slow Path / Wasm (future). Planned mitigation: Wasm policy engine + Slow Path GNN correlation (currently scaffold-only, see §3). | Unassigned | Tracked in #TBD — new issue needed |
 | Agent tampering by root | High | **Phase 1 (this release):** Cosign-static-key signed bytecode manifest verified fail-closed at agent startup *before* any BPF load — covers the three embedded objects (`sys_exec.bpf.o`, `network_filter.bpf.o`, LSM enforcement ELF). Manifest+sig baked into the image; public key mounted via Secret (same `NEUROMESH_COSIGN_PUBLIC_KEY_PATH` env name as the webhook). This is **tamper evidence / detection** of silent supply-chain or scripted artifact swap — it does **not** prevent a fully determined root attacker who also controls the alert channel, re-signs with a stolen key, or attacks in-kernel/direct memory after load. **Agent binary:** not in the bytecode manifest (circular). CI produces image-level Cosign signatures (PR #47), but admission-time enforcement via `k8s-admission-webhook` is a **documented deploy dependency**, not a closed control in this repo (no shipped ValidatingWebhookConfiguration / webhook Deployment under `deploy/` — only a README example). **Out of scope here (Phase 2):** periodic runtime re-hash / attach-point checks and `agent_integrity_failure_total`. | Dragan Flavius (@DraganFlavius) | Tracked in [#44](https://github.com/Neuromesh-Security/neuromesh/issues/44) |
-| Unauthenticated `GET /v1/policy-bundle` | Low | Phase 1 endpoint has **no authentication**. Accepted for Phase 1 because the exported payload is the well-known path-prefix deny set (`/tmp/`, `/dev/shm/`, `/var/tmp/`) — not secret. **Must be authenticated before Phase 2**, when the bundle would carry SPIFFE identity allow-exceptions (sensitive). Until then, treat exposure of the endpoint as low impact but do not expand the bundle schema without auth. | Unassigned | Tracked in [#55](https://github.com/Neuromesh-Security/neuromesh/issues/55), target: before Phase 2 |
+| Unauthenticated `GET /v1/policy-bundle` | Low → **Mitigated (Slice 0)** | **Resolved for auth:** endpoint requires shared Bearer token (`NEUROMESH_POLICY_BUNDLE_TOKEN` / `_FILE`); agent never falls back to unauthenticated sync; auth failure retains last-known-good deny maps. Residual: static shared secret must be provisioned/rotated (same class as Cosign static keys) until SPIRE-based mTLS is operable in deploy. Identity allowlist content still **must not** ship until Slice 2a. | Dragan Flavius (@DraganFlavius) | Tracked in [#55](https://github.com/Neuromesh-Security/neuromesh/issues/55) |
+| Phase 2 `cgroup_id` recycling | Medium | Future Slice 2b identity maps keyed by `cgroup_id` must invalidate on pod delete (K8s watch), not TTL alone — recycled IDs could otherwise inherit stale allow. Documented in §4.5; **not implemented** in Slice 0. | Unassigned | Before Slice 2b |
 | CI coverage gate | Low | ≥70% line coverage on core crates; Ring 0 not measured | — | — |
 
 ---

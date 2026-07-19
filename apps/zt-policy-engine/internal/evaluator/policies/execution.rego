@@ -7,6 +7,10 @@ import future.keywords.in
 default allow := false
 
 # Internal Neuromesh workloads permitted to stage artifacts in /tmp/.
+# Phase 2 kernel identity exceptions (when wired) match this scope ONLY:
+# /tmp/ may be excepted for whitelisted SPIFFE IDs; /dev/shm/ and /var/tmp/
+# remain hard-denied in the LSM regardless of identity. Widening that set is
+# a deliberate Rego + threat-model policy change — not an implementation side effect.
 whitelist := {
 	"spiffe://neuromesh.security/agent-ebpf-sensor",
 	"spiffe://neuromesh.security/zt-policy-engine",

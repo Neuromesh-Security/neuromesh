@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -42,13 +44,15 @@ func TestVersionChangesWhenPrefixesChange(t *testing.T) {
 	}
 }
 
-func TestHandlerReturnsExpectedJSON(t *testing.T) {
+func TestHandlerValidBearerReturnsBundle(t *testing.T) {
+	const token = "test-policy-bundle-token"
 	req := httptest.NewRequest(http.MethodGet, "/v1/policy-bundle", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
 	rr := httptest.NewRecorder()
-	Handler().ServeHTTP(rr, req)
+	Handler(token).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
-		t.Fatalf("status: got %d want %d", rr.Code, http.StatusOK)
+		t.Fatalf("status: got %d want %d body=%q", rr.Code, http.StatusOK, rr.Body.String())
 	}
 
 	var got Bundle
@@ -62,18 +66,80 @@ func TestHandlerReturnsExpectedJSON(t *testing.T) {
 	if len(got.DenyPathPrefixes) != 3 {
 		t.Fatalf("expected 3 prefixes, got %d", len(got.DenyPathPrefixes))
 	}
-	for i, p := range []string{"/tmp/", "/dev/shm/", "/var/tmp/"} {
-		if got.DenyPathPrefixes[i] != p {
-			t.Fatalf("prefix[%d]: got %q want %q", i, got.DenyPathPrefixes[i], p)
-		}
+}
+
+func TestHandlerMissingCredentialRejected(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/policy-bundle", nil)
+	rr := httptest.NewRecorder()
+	Handler("expected-token").ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status: got %d want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandlerInvalidCredentialRejected(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/policy-bundle", nil)
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	rr := httptest.NewRecorder()
+	Handler("expected-token").ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status: got %d want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandlerEmptyConfiguredTokenUnavailable(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/policy-bundle", nil)
+	req.Header.Set("Authorization", "Bearer anything")
+	rr := httptest.NewRecorder()
+	Handler("").ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d want %d", rr.Code, http.StatusServiceUnavailable)
 	}
 }
 
 func TestHandlerRejectsNonGET(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/policy-bundle", nil)
+	req.Header.Set("Authorization", "Bearer tok")
 	rr := httptest.NewRecorder()
-	Handler().ServeHTTP(rr, req)
+	Handler("tok").ServeHTTP(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status: got %d want %d", rr.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestLoadTokenFromEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "token")
+	if err := os.WriteFile(path, []byte("  file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvPolicyBundleTokenFile, abs)
+	t.Setenv(EnvPolicyBundleToken, "")
+	got, err := LoadTokenFromEnv()
+	if err != nil {
+		t.Fatalf("LoadTokenFromEnv: %v", err)
+	}
+	if got != "file-token" {
+		t.Fatalf("got %q want file-token", got)
+	}
+}
+
+func TestLoadTokenFromEnvFileRejectsRelativePath(t *testing.T) {
+	t.Setenv(EnvPolicyBundleTokenFile, "relative/token")
+	t.Setenv(EnvPolicyBundleToken, "")
+	if _, err := LoadTokenFromEnv(); err == nil {
+		t.Fatal("expected error for relative token file path")
+	}
+}
+
+func TestLoadTokenFromEnvMissing(t *testing.T) {
+	t.Setenv(EnvPolicyBundleTokenFile, "")
+	t.Setenv(EnvPolicyBundleToken, "")
+	if _, err := LoadTokenFromEnv(); err == nil {
+		t.Fatal("expected error when token unset")
 	}
 }

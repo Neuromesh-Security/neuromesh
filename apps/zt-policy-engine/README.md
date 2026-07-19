@@ -19,21 +19,23 @@ POST /v1/evaluate
 
 GET /v1/policy-bundle
     │
-    └─► compiled path-prefix deny list for agent BPF map sync (Phase 1)
-        (no OPA / no SPIFFE on this endpoint; currently unauthenticated)
+    └─► Bearer token check (Issue #55) → compiled path-prefix deny list
+        for agent BPF map sync (Phase 1; no OPA / no SPIFFE on this path)
 ```
 
 ### Operator note — agent sync (Phase 1)
 
 When `NEUROMESH_ZT_POLICY_ENGINE_URL` is set on the agent (e.g. `http://zt-policy-engine:8080`),
-`agent-ebpf-sensor` polls `GET /v1/policy-bundle` every **30s**, writes prefixes into
-BPF maps, and keeps enforcing last-known-good on failure (STALE after 5 minutes —
-enforcement is never disabled). If the URL is unset, the agent uses bootstrap
-defaults only (`/tmp/`, `/dev/shm/`, `/var/tmp/`). Full threat-model write-up:
-`docs/threat-model.md` §4.5.
+`agent-ebpf-sensor` polls authenticated `GET /v1/policy-bundle` every **30s** (shared
+Bearer via `NEUROMESH_POLICY_BUNDLE_TOKEN` / `_FILE`), writes prefixes into BPF maps,
+and keeps enforcing last-known-good on failure including auth rejection (STALE after
+5 minutes — enforcement is never disabled). If the URL is unset, the agent uses
+bootstrap defaults only (`/tmp/`, `/dev/shm/`, `/var/tmp/`). Full threat-model
+write-up: `docs/threat-model.md` §4.5.
 
 ```bash
-curl -s http://localhost:8080/v1/policy-bundle | jq .
+curl -s -H "Authorization: Bearer $NEUROMESH_POLICY_BUNDLE_TOKEN" \
+  http://localhost:8080/v1/policy-bundle | jq .
 ```
 
 ## Policy (Sprint)
@@ -53,6 +55,8 @@ export ZT_POLICY_ENGINE_PORT=8080
 export NEUROMESH_SPIFFE_TRUST_DOMAIN=neuromesh.security
 export NEUROMESH_SPIFFE_TRUST_BUNDLE_MODE=static_file
 export NEUROMESH_SPIFFE_BUNDLE_PATH=/path/to/spiffe-trust-bundle.pem
+# Issue #55: required for GET /v1/policy-bundle (prefer Secret-mounted file in prod).
+export NEUROMESH_POLICY_BUNDLE_TOKEN=replace-me
 ./bin/zt-policy-engine
 ```
 
@@ -109,16 +113,17 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
 | `NEUROMESH_SPIFFE_WORKLOAD_API_ADDR` | — | Optional Workload API socket override |
 | `NEUROMESH_SPIFFE_EXPECTED_ID_PATTERN` | — | Optional regexp on SPIFFE ID path |
 | `NEUROMESH_INSECURE_MOCK_IDENTITY` | unset / false | Exact value `true` enables insecure mock bypass |
+| `NEUROMESH_POLICY_BUNDLE_TOKEN` | _(required)_ | Shared Bearer token for `GET /v1/policy-bundle` (Issue #55) |
+| `NEUROMESH_POLICY_BUNDLE_TOKEN_FILE` | — | Preferred: absolute path to token file (Kubernetes Secret mount) |
 
 ## Current limitations (honest)
 
 - `/v1/evaluate` is **not** called from the eBPF LSM hot path. Phase 1 agent sync
-  uses `GET /v1/policy-bundle` for path-prefix deny-list maps only; SPIFFE-based
-  allow-exceptions for ephemeral paths remain a Phase 2 / Slow Path concern.
-- `GET /v1/policy-bundle` is **unauthenticated**. Accepted for Phase 1 (exported
-  prefixes are not secret); **must be authenticated before Phase 2** when the
-  bundle would include SPIFFE allow-exceptions. Tracked in
-  [#55](https://github.com/Neuromesh-Security/neuromesh/issues/55).
+  uses authenticated `GET /v1/policy-bundle` for path-prefix deny-list maps only;
+  SPIFFE-based allow-exceptions for ephemeral paths remain Phase 2 (and will apply
+  to `/tmp/` only — `/dev/shm/` and `/var/tmp/` stay hard-denied).
+- `GET /v1/policy-bundle` requires a shared Bearer token (Issue #55). SPIFFE mTLS
+  was not chosen for Slice 0 because this repo does not yet deploy SPIRE on nodes.
 - The insecure mock bypass still exists as an explicit env opt-in for local
   testing — it is fail-open for identity by design when enabled; treat enablement
   as a security incident outside developer laptops.

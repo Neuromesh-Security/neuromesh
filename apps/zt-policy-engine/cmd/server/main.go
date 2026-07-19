@@ -69,7 +69,12 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthHandler)
 	mux.HandleFunc("POST /v1/evaluate", evaluateHandler(opa, spiffe))
-	mux.HandleFunc("GET /v1/policy-bundle", policybundle.Handler())
+
+	bundleToken, err := policybundle.LoadTokenFromEnv()
+	if err != nil {
+		log.Fatalf("policy-bundle authentication misconfigured (Issue #55): %v", err)
+	}
+	mux.HandleFunc("GET /v1/policy-bundle", policybundle.Handler(bundleToken))
 	query.RegisterRoutes(mux)
 
 	port, err := parseListenPort(os.Getenv("ZT_POLICY_ENGINE_PORT"))
