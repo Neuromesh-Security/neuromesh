@@ -188,35 +188,33 @@ jobs:
   # sast-bandit (Python/bandit SAST for apps/ai-threat-detector) moved to
   # .github/workflows/experimental-ci.yml (2026-07-17 CI blast-radius
   # review): this job used to be a hard `needs:` prerequisite for the
-  # `supply-chain` job below, meaning a bandit finding in this non-core
+  # supply-chain SBOM jobs below, meaning a bandit finding in this non-core
   # service could prevent agent-ebpf-sensor's and zt-policy-engine's own
   # SBOM/Trivy container scans from ever running. It now runs
   # independently, gated only on apps/ai-threat-detector/** changes, with
   # identical rigor (same bandit invocation, same severity flags).
 
-  supply-chain:
-    name: SBOM & Container Scan (${{ matrix.image }})
+  # Honest job naming (Issue #67 / same class as #52 / PR #59): do NOT put
+  # `${{ matrix.image }}` in `name:`. When a matrix job is skipped because a
+  # `needs:` dependency failed, GitHub cannot expand matrix context and
+  # renders the expression literally in the Checks UI. Split into two
+  # discrete jobs with hardcoded names (same pattern as
+  # experimental-ci.yml's `SBOM & Container Scan (neuromesh-ai-threat-detector)`
+  # and the static `SAST — Go (gosec)` name above). Names stay correct when
+  # skipped and when executed; coverage unchanged.
+  supply-chain-zt-policy-engine:
+    name: SBOM & Container Scan (neuromesh-zt-policy-engine)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # neuromesh-ai-threat-detector intentionally NOT in this matrix -- see
-    # the sast-bandit note above. Its SBOM/Trivy container scan now runs
-    # in experimental-ci.yml, independent of these core-only prerequisites.
+    # neuromesh-ai-threat-detector intentionally NOT here — see the
+    # sast-bandit note above. Its SBOM/Trivy container scan runs in
+    # experimental-ci.yml, independent of these core-only prerequisites.
     needs:
       - filesystem-trivy
       - semgrep
       - sast-gosec
       - sast-cargo-audit
       - sast-cargo-deny
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - image: neuromesh-zt-policy-engine
-            context: apps/zt-policy-engine
-            dockerfile: apps/zt-policy-engine/Dockerfile
-          - image: neuromesh-agent-ebpf-sensor
-            context: .
-            dockerfile: apps/agent-ebpf-sensor/Dockerfile
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -227,43 +225,43 @@ jobs:
       - name: Build Docker image
         uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          tags: ${{ matrix.image }}:ci
+          context: apps/zt-policy-engine
+          file: apps/zt-policy-engine/Dockerfile
+          tags: neuromesh-zt-policy-engine:ci
           load: true
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          cache-from: type=gha,scope=neuromesh-zt-policy-engine
+          cache-to: type=gha,mode=max,scope=neuromesh-zt-policy-engine
 
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@v0
         with:
-          image: ${{ matrix.image }}:ci
+          image: neuromesh-zt-policy-engine:ci
           format: spdx-json
-          output-file: ${{ matrix.image }}-sbom.spdx.json
+          output-file: neuromesh-zt-policy-engine-sbom.spdx.json
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sbom-${{ matrix.image }}
-          path: ${{ matrix.image }}-sbom.spdx.json
+          name: sbom-neuromesh-zt-policy-engine
+          path: neuromesh-zt-policy-engine-sbom.spdx.json
           retention-days: 30
 
       - name: Scan image for CVEs (Trivy report)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ matrix.image }}:ci
+          image-ref: neuromesh-zt-policy-engine:ci
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: 0
           format: sarif
-          output: trivy-${{ matrix.image }}.sarif
+          output: trivy-neuromesh-zt-policy-engine.sarif
 
       - name: Enforce Trivy container gate (CRITICAL only)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ matrix.image }}:ci
+          image-ref: neuromesh-zt-policy-engine:ci
           severity: CRITICAL
           ignore-unfixed: true
           exit-code: 1
@@ -274,5 +272,75 @@ jobs:
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: trivy-${{ matrix.image }}.sarif
-          category: trivy-${{ matrix.image }}
+          sarif_file: trivy-neuromesh-zt-policy-engine.sarif
+          category: trivy-neuromesh-zt-policy-engine
+
+  supply-chain-agent-ebpf-sensor:
+    name: SBOM & Container Scan (neuromesh-agent-ebpf-sensor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - filesystem-trivy
+      - semgrep
+      - sast-gosec
+      - sast-cargo-audit
+      - sast-cargo-deny
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/agent-ebpf-sensor/Dockerfile
+          tags: neuromesh-agent-ebpf-sensor:ci
+          load: true
+          cache-from: type=gha,scope=neuromesh-agent-ebpf-sensor
+          cache-to: type=gha,mode=max,scope=neuromesh-agent-ebpf-sensor
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: neuromesh-agent-ebpf-sensor:ci
+          format: spdx-json
+          output-file: neuromesh-agent-ebpf-sensor-sbom.spdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-neuromesh-agent-ebpf-sensor
+          path: neuromesh-agent-ebpf-sensor-sbom.spdx.json
+          retention-days: 30
+
+      - name: Scan image for CVEs (Trivy report)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: neuromesh-agent-ebpf-sensor:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: 0
+          format: sarif
+          output: trivy-neuromesh-agent-ebpf-sensor.sarif
+
+      - name: Enforce Trivy container gate (CRITICAL only)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: neuromesh-agent-ebpf-sensor:ci
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+          format: table
+          skip-setup-trivy: true
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-neuromesh-agent-ebpf-sensor.sarif
+          category: trivy-neuromesh-agent-ebpf-sensor
