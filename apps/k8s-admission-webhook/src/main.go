@@ -53,9 +53,12 @@ func main() {
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		// Align with ValidatingWebhookConfiguration timeoutSeconds (15) so the
+		// HTTP server does not close the connection before the API server's
+		// webhook call budget expires (Issue #63 Phase A design).
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	go func() {

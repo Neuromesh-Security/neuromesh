@@ -1,0 +1,52 @@
+# Phase A ValidatingWebhookConfiguration (Issue #63).
+#
+# BEFORE applying: replace REPLACE_WITH_BASE64_CA_BUNDLE with the base64-encoded
+# PEM of the CA that signed the webhook TLS certificate (see README.md).
+#
+# failurePolicy: Ignore — Phase A only. Graduate to Fail only after the operator
+# checklist in README.md is satisfied. Do not change selectors or timeoutSeconds
+# without an explicit design revision.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: neuromesh-validate-pods
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/part-of: neuromesh
+webhooks:
+  - name: neuromesh.security.validate-pods
+    clientConfig:
+      service:
+        name: neuromesh-admission-webhook
+        namespace: neuromesh-system
+        path: /validate
+        port: 443
+      caBundle: REPLACE_WITH_BASE64_CA_BUNDLE
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    timeoutSeconds: 15
+    # Exclude control-plane namespaces so a webhook outage / misconfig cannot
+    # brick kube-system (and related) admission.
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-public
+            - kube-node-lease
+    # Exclude the webhook Deployment's own pods so upgrades are not blocked by
+    # a dead webhook under a future Fail policy. Do NOT exclude neuromesh-system
+    # as a whole — neuromesh-agent DaemonSet pods in that namespace MUST be gated.
+    objectSelector:
+      matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: NotIn
+          values:
+            - neuromesh-admission-webhook

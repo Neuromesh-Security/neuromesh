@@ -56,3 +56,9 @@ webhooks:
     admissionReviewVersions: ["v1"]
     sideEffects: None
 ```
+
+## Production deploy (Phase A — Issue #63)
+
+Shipped manifests, TLS/openssl runbook, install order, and Ignore→Fail graduation
+checklist live under [`deploy/kubernetes/admission/`](../../deploy/kubernetes/admission/README.md).
+Do not use the snippet above as the sole deploy source — use that directory.
