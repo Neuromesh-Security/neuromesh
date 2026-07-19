@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: neuromesh-admission-webhook
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP

@@ -1,0 +1,126 @@
+# Neuromesh admission webhook — Phase A (Issue #63)
+#
+# Install order (do not reorder):
+#   1. Namespace neuromesh-system (see ../neuromesh-agent.yaml or create it)
+#   2. Secrets: Cosign pubkey + webhook TLS (see README.md in this directory)
+#   3. This Deployment + Service
+#   4. Wait until Ready
+#   5. Apply neuromesh-admission-validating-webhook.yaml (with caBundle filled in)
+#
+# failurePolicy on the VWC is Ignore for Phase A — see README graduation checklist.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neuromesh-admission-webhook
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook
+    app.kubernetes.io/part-of: neuromesh
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: neuromesh-admission-webhook
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: neuromesh-admission-webhook
+        app.kubernetes.io/component: admission-webhook
+        app.kubernetes.io/part-of: neuromesh
+    spec:
+      serviceAccountName: neuromesh-admission-webhook
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: webhook
+          image: ghcr.io/neuromesh-security/neuromesh-k8s-admission-webhook:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          env:
+            - name: WEBHOOK_LISTEN_ADDR
+              value: ":8443"
+            - name: WEBHOOK_TLS_CERT_FILE
+              value: /etc/webhook/certs/tls.crt
+            - name: WEBHOOK_TLS_KEY_FILE
+              value: /etc/webhook/certs/tls.key
+            # Same Cosign static public key Secret class as the agent DaemonSet
+            # and image signing (NEUROMESH_COSIGN_PUBLIC_KEY_PATH).
+            - name: NEUROMESH_COSIGN_PUBLIC_KEY_PATH
+              value: /etc/webhook/cosign/cosign.pub
+            - name: NEUROMESH_COSIGN_VERIFY_MODE
+              value: key
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /etc/webhook/certs
+              readOnly: true
+            - name: cosign-pubkey
+              mountPath: /etc/webhook/cosign
+              readOnly: true
+          # Server is TLS-only; kubelet HTTPS probes do not verify the cert by default.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        # kubectl -n neuromesh-system create secret tls neuromesh-admission-webhook-tls \
+        #   --cert=tls.crt --key=tls.key
+        - name: webhook-tls
+          secret:
+            secretName: neuromesh-admission-webhook-tls
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        # Same Secret as agent / CI Cosign static key:
+        #   kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
+        #     --from-file=cosign.pub=./cosign.pub
+        - name: cosign-pubkey
+          secret:
+            secretName: neuromesh-cosign-pubkey
+            items:
+              - key: cosign.pub
+                path: cosign.pub
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: neuromesh-admission-webhook
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/part-of: neuromesh
