@@ -37,7 +37,7 @@ func TestNewCosignKeyVerifier_LoadsRealPublicKeyMaterial(t *testing.T) {
 
 	pubPEM := generateTestECDSAPublicKeyPEM(t)
 
-	verifier, err := NewCosignKeyVerifier(pubPEM, false, time.Second)
+	verifier, err := NewCosignKeyVerifier(pubPEM, false, time.Second, false)
 	if err != nil {
 		t.Fatalf("NewCosignKeyVerifier: %v", err)
 	}
@@ -46,6 +46,9 @@ func TestNewCosignKeyVerifier_LoadsRealPublicKeyMaterial(t *testing.T) {
 	}
 	if verifier.keyFingerprint == "" {
 		t.Fatal("expected a non-empty key fingerprint to be computed for audit logging")
+	}
+	if verifier.insecure {
+		t.Fatal("expected insecure registry flag to default to false")
 	}
 
 	// The verifier's own PublicKey() must round-trip to a usable crypto key
@@ -62,9 +65,22 @@ func TestNewCosignKeyVerifier_LoadsRealPublicKeyMaterial(t *testing.T) {
 func TestNewCosignKeyVerifier_RejectsInvalidPEM(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewCosignKeyVerifier([]byte("not a pem encoded key"), false, time.Second)
+	_, err := NewCosignKeyVerifier([]byte("not a pem encoded key"), false, time.Second, false)
 	if err == nil {
 		t.Fatal("expected an error for invalid/garbage public key material")
+	}
+}
+
+func TestNewCosignKeyVerifier_InsecureRegistryFlag(t *testing.T) {
+	t.Parallel()
+
+	pubPEM := generateTestECDSAPublicKeyPEM(t)
+	verifier, err := NewCosignKeyVerifier(pubPEM, false, time.Second, true)
+	if err != nil {
+		t.Fatalf("NewCosignKeyVerifier: %v", err)
+	}
+	if !verifier.insecure {
+		t.Fatal("expected insecure registry flag to be true when requested")
 	}
 }
 
@@ -73,11 +89,11 @@ func TestNewCosignKeyVerifier_FingerprintIsDeterministicPerKey(t *testing.T) {
 
 	pubPEM := generateTestECDSAPublicKeyPEM(t)
 
-	v1, err := NewCosignKeyVerifier(pubPEM, false, time.Second)
+	v1, err := NewCosignKeyVerifier(pubPEM, false, time.Second, false)
 	if err != nil {
 		t.Fatalf("NewCosignKeyVerifier: %v", err)
 	}
-	v2, err := NewCosignKeyVerifier(pubPEM, false, time.Second)
+	v2, err := NewCosignKeyVerifier(pubPEM, false, time.Second, false)
 	if err != nil {
 		t.Fatalf("NewCosignKeyVerifier: %v", err)
 	}
@@ -87,7 +103,7 @@ func TestNewCosignKeyVerifier_FingerprintIsDeterministicPerKey(t *testing.T) {
 	}
 
 	otherPubPEM := generateTestECDSAPublicKeyPEM(t)
-	v3, err := NewCosignKeyVerifier(otherPubPEM, false, time.Second)
+	v3, err := NewCosignKeyVerifier(otherPubPEM, false, time.Second, false)
 	if err != nil {
 		t.Fatalf("NewCosignKeyVerifier: %v", err)
 	}
@@ -105,7 +121,7 @@ func TestResolveImageDigest_AlreadyDigestPinnedSkipsRegistryLookup(t *testing.T)
 	// example.invalid is unresolvable; if resolveImageDigest tried to reach
 	// the registry for an already-digest-pinned reference, this would hang
 	// or fail on DNS. It must return immediately using the embedded digest.
-	digestRef, err := resolveImageDigest(context.Background(), pinned)
+	digestRef, err := resolveImageDigest(context.Background(), pinned, false)
 	if err != nil {
 		t.Fatalf("expected already-pinned digest reference to resolve without network access, got error: %v", err)
 	}
@@ -117,9 +133,30 @@ func TestResolveImageDigest_AlreadyDigestPinnedSkipsRegistryLookup(t *testing.T)
 func TestResolveImageDigest_RejectsMalformedReference(t *testing.T) {
 	t.Parallel()
 
-	_, err := resolveImageDigest(context.Background(), "not a valid image reference!!")
+	_, err := resolveImageDigest(context.Background(), "not a valid image reference!!", false)
 	if err == nil {
 		t.Fatal("expected an error for a malformed image reference")
+	}
+}
+
+func TestResolveImageDigest_InsecureAllowsHTTPSchemeHost(t *testing.T) {
+	t.Parallel()
+
+	wantDigest := "sha256:" + strings.Repeat("a", 64)
+	pinned := "kind-registry:5000/repo@" + wantDigest
+
+	// With insecure=true, a non-localhost HTTP registry hostname parses as an
+	// insecure digest ref (scheme http). Without it, ParseReference still
+	// succeeds for digest-pinned refs, but registry transport would use HTTPS.
+	digestRef, err := resolveImageDigest(context.Background(), pinned, true)
+	if err != nil {
+		t.Fatalf("resolveImageDigest insecure: %v", err)
+	}
+	if digestRef.DigestStr() != wantDigest {
+		t.Fatalf("expected digest %q, got %q", wantDigest, digestRef.DigestStr())
+	}
+	if digestRef.Context().Registry.Scheme() != "http" {
+		t.Fatalf("expected http scheme for insecure registry ref, got %q", digestRef.Context().Registry.Scheme())
 	}
 }
 

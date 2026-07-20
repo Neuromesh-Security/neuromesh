@@ -81,6 +81,12 @@ kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
 Use the **same** Cosign public key that verifies GHCR image signatures for
 `agent-ebpf-sensor` / webhook images (CI Cosign static key).
 
+For **kind / air-gapped lab registries that speak plain HTTP**, set
+`NEUROMESH_COSIGN_REGISTRY_INSECURE=true` on the Deployment (see
+`neuromesh-admission-webhook-deployment.yaml`). Leave `false` for production
+HTTPS registries. This does **not** change `failurePolicy`, selectors, or
+timeouts.
+
 ### 3. Inject `caBundle` into the ValidatingWebhookConfiguration
 
 `caBundle` must be the **base64-encoded PEM of the CA** that signed `tls.crt`
