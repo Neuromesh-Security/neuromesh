@@ -8,6 +8,11 @@ use agent_ebpf_sensor::monitoring::{
 use agent_ebpf_sensor::observability::{
     spawn_health_monitor, spawn_metrics_server, AgentMetrics, RATE_LIMIT_DROPS_MAP,
 };
+use agent_ebpf_sensor::lsm_pin::{
+    self, attach_and_pin_lsm_fail_closed, classify_enforcement_pins, deny_map_seed_plan,
+    enforcement_pin_paths, policy_state_for_pinned_resume, DenyMapSeedPlan, EnforcementPinState,
+    PINNED_ENFORCEMENT_MAPS,
+};
 use agent_ebpf_sensor::path_deny::{self, PathDenyMaps};
 use agent_ebpf_sensor::pipeline::TelemetryPipeline;
 use agent_ebpf_sensor::policy_sync;
@@ -95,7 +100,28 @@ async fn main() -> Result<(), anyhow::Error> {
         resolved_offsets.task_tgid_offset
     );
 
-    let mut enforcement_bpf = EbpfLoader::new()
+    // Issue #44 PR A: pin LSM link + PATH_DENY_* so enforcement survives agent exit.
+    // Fail-closed if bpffs/pins are unavailable — never boot with ephemeral-only attach.
+    let bpf_pin_root = pin_root();
+    agent_ebpf_sensor::bpf_pin::prepare_pin_directory(&bpf_pin_root).context(
+        "bpffs pin directory unavailable — refusing to start without ability to pin LSM \
+         enforcement (fail-closed; see Issue #44)",
+    )?;
+    let pin_state = classify_enforcement_pins(&bpf_pin_root);
+    if matches!(pin_state, EnforcementPinState::InconsistentLinkWithoutMaps) {
+        anyhow::bail!(
+            "inconsistent enforcement pins under {}: LSM link pin exists without \
+             {PATH_DENY_LIST_MAP}/{PATH_DENY_COUNT_MAP} — refuse start (fail-closed); \
+             remove {LSM} or restore deny-map pins",
+            bpf_pin_root.display(),
+            LSM = lsm_pin::LSM_LINK_PIN_NAME,
+        );
+    }
+    let maps_preexisted = matches!(pin_state, EnforcementPinState::MapsReady { .. });
+    let enf_paths = enforcement_pin_paths(&bpf_pin_root);
+
+    let mut enforcement_loader = EbpfLoader::new();
+    enforcement_loader
         .override_global(
             "BPRM_FILENAME_OFFSET",
             &resolved_offsets.bprm_filename_offset,
@@ -106,15 +132,15 @@ async fn main() -> Result<(), anyhow::Error> {
             &resolved_offsets.task_real_parent_offset,
             true,
         )
-        .override_global("TASK_TGID_OFFSET", &resolved_offsets.task_tgid_offset, true)
-        .load(enforcement_bpf_data)
-        .context(
-            "failed to load enforcement eBPF object with BTF-resolved offsets injected — \
-             refusing to start (fail-closed)",
-        )?;
+        .override_global("TASK_TGID_OFFSET", &resolved_offsets.task_tgid_offset, true);
+    for map_name in PINNED_ENFORCEMENT_MAPS {
+        enforcement_loader.map_pin_path(*map_name, bpf_pin_root.join(map_name));
+    }
+    let mut enforcement_bpf = enforcement_loader.load(enforcement_bpf_data).context(
+        "failed to load enforcement eBPF object with BTF-resolved offsets injected — \
+         refusing to start (fail-closed)",
+    )?;
 
-    // Fail-closed bootstrap: seed PATH_DENY_LIST with the historical hardcoded
-    // prefixes BEFORE attaching the LSM. An empty deny map would fail-open.
     let deny_list = Array::<MapData, PathDenyEntry>::try_from(
         enforcement_bpf
             .take_map(PATH_DENY_LIST_MAP)
@@ -129,22 +155,42 @@ async fn main() -> Result<(), anyhow::Error> {
         list: deny_list,
         count: deny_count,
     };
-    let policy_state = path_deny::bootstrap_deny_maps(&mut deny_maps)
-        .context("failed to bootstrap path-prefix deny list (fail-closed)")?;
-    info!("🛡️ Path-prefix deny list bootstrapped (fail-closed): /tmp/, /dev/shm/, /var/tmp/");
+
+    let active_count = lsm_pin::active_deny_count(&deny_maps)?;
+    let seed_plan = deny_map_seed_plan(maps_preexisted, active_count)?;
+    let policy_state = match seed_plan {
+        DenyMapSeedPlan::Bootstrap => {
+            info!("🛡️ Path-prefix deny list: cold bootstrap (fail-closed defaults)");
+            path_deny::bootstrap_deny_maps(&mut deny_maps)
+                .context("failed to bootstrap path-prefix deny list (fail-closed)")?
+        }
+        DenyMapSeedPlan::ResumePinned { count } => {
+            info!(
+                "🛡️ Path-prefix deny list: resuming {} pinned entries (skip bootstrap; \
+                 STALE until policy sync)",
+                count
+            );
+            policy_state_for_pinned_resume()
+        }
+    };
 
     let lsm_program: &mut Lsm = enforcement_bpf
         .program_mut("neuromesh_lsm_exec_guard")
         .ok_or_else(|| anyhow::anyhow!("neuromesh_lsm_exec_guard program missing"))?
         .try_into()?;
     lsm_program.load("bprm_check_security", &btf)?;
-    lsm_program.attach()?;
+    // Keep pinned link FD alive for process lifetime (pin file is the survival
+    // mechanism across kill -9; holding FD is belt-and-suspenders while running).
+    let _lsm_link_pin = attach_and_pin_lsm_fail_closed(lsm_program, &bpf_pin_root)?;
+    info!(
+        "📌 LSM link pinned at {} (enforcement survives agent process exit)",
+        enf_paths.link.display()
+    );
 
     let _policy_sync = policy_sync::spawn_policy_sync(deny_maps, policy_state, shutdown.clone());
 
     let correlation_ingestion = ingestion::spawn_from_env().await;
 
-    let bpf_pin_root = pin_root();
     let mut process_bpf = load_with_map_pinning(SYS_EXEC_BPF, &bpf_pin_root)?;
 
     let metrics = AgentMetrics::new()?;

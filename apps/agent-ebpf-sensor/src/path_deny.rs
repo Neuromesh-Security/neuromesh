@@ -53,6 +53,9 @@ impl PolicySyncState {
     }
 }
 
+// `policy_state_for_pinned_resume` in `lsm_pin` constructs this with a past
+// `last_success` so resumed pins start STALE until PE sync — keep fields pub.
+
 /// Legacy hardcoded deny logic — frozen for equivalence tests.
 pub fn legacy_hardcoded_is_blacklisted(path: &[u8]) -> bool {
     path_starts_with(path, b"/tmp/")
