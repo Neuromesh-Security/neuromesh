@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -108,10 +109,12 @@ const (
 	// verification) may take before it is treated as a fail-closed denial.
 	EnvCosignVerifyTimeoutSeconds = "NEUROMESH_COSIGN_VERIFY_TIMEOUT_SECONDS"
 
-	// EnvCosignRegistryInsecure, when "true", allows HTTP (non-TLS) access to
-	// container registries via go-containerregistry's name.Insecure option.
-	// Required for kind / air-gapped lab registries that serve plain HTTP.
-	// Defaults to false — production registries must use HTTPS.
+	// EnvCosignRegistryInsecure ("NEUROMESH_COSIGN_REGISTRY_INSECURE=true")
+	// allows HTTP (non-TLS) registry access via name.Insecure. Explicit, loud
+	// opt-in only — required for kind / air-gapped lab registries that speak
+	// plain HTTP. Must never be set in a real deployment (absent from every
+	// deploy/kubernetes/ manifest); activation logs a SECURITY WARNING at
+	// startup. Defaults to unset / false — production registries must use HTTPS.
 	EnvCosignRegistryInsecure = "NEUROMESH_COSIGN_REGISTRY_INSECURE"
 )
 
@@ -187,6 +190,9 @@ func NewVerifierFromEnv() (ImageVerifier, error) {
 		}
 		requireTlog := strings.EqualFold(strings.TrimSpace(os.Getenv(EnvCosignRequireTlog)), "true")
 		insecureRegistry := strings.EqualFold(strings.TrimSpace(os.Getenv(EnvCosignRegistryInsecure)), "true")
+		if insecureRegistry {
+			log.Printf("SECURITY WARNING: %s=true -- Cosign will accept plain-HTTP registry access (name.Insecure). Lab/kind only; never enable in production.", EnvCosignRegistryInsecure)
+		}
 		return NewCosignKeyVerifier(pemBytes, requireTlog, timeout, insecureRegistry)
 	case VerifyModeKeyless:
 		return NewCosignKeylessVerifier(

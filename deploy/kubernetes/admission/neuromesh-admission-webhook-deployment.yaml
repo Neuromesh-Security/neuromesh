@@ -58,10 +58,8 @@ spec:
               value: /etc/webhook/cosign/cosign.pub
             - name: NEUROMESH_COSIGN_VERIFY_MODE
               value: key
-            # Set "true" only for kind/lab plain-HTTP registries (Issue #63 E2E).
-            # Production default remains HTTPS (omit or set "false").
-            - name: NEUROMESH_COSIGN_REGISTRY_INSECURE
-              value: "false"
+            # NEUROMESH_COSIGN_REGISTRY_INSECURE must NEVER appear in this
+            # production Deployment. Lab/kind-only opt-in — see README.md.
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
