@@ -81,6 +81,26 @@ kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
 Use the **same** Cosign public key that verifies GHCR image signatures for
 `agent-ebpf-sensor` / webhook images (CI Cosign static key).
 
+### Local/lab-only HTTP registry bypass (insecure)
+
+`NEUROMESH_COSIGN_REGISTRY_INSECURE=true` allows Cosign verification against
+**plain-HTTP** registries (`name.Insecure`). It emits a loud `SECURITY WARNING`
+at webhook startup. Use only for kind / air-gapped lab plumbing — **never** in
+shared or production environments. Production registries must use HTTPS.
+
+This variable is **intentionally absent** from every file under
+`deploy/kubernetes/` (including `neuromesh-admission-webhook-deployment.yaml`).
+Do not add it to those manifests. For a local kind E2E only, patch the running
+Deployment (or set the env on a throwaway override), e.g.:
+
+```bash
+# LAB ONLY — never commit this into deploy/kubernetes/
+kubectl -n neuromesh-system set env deployment/neuromesh-admission-webhook \
+  NEUROMESH_COSIGN_REGISTRY_INSECURE=true
+```
+
+This does **not** change `failurePolicy`, selectors, or `timeoutSeconds`.
+
 ### 3. Inject `caBundle` into the ValidatingWebhookConfiguration
 
 `caBundle` must be the **base64-encoded PEM of the CA** that signed `tls.crt`

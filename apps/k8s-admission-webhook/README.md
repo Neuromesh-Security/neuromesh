@@ -19,6 +19,9 @@ Kubernetes requires webhooks over TLS. Mount certificates and configure:
 | `WEBHOOK_LISTEN_ADDR` | `:8443` | HTTPS listen address |
 | `WEBHOOK_TLS_CERT_FILE` | `/etc/webhook/certs/tls.crt` | Server certificate |
 | `WEBHOOK_TLS_KEY_FILE` | `/etc/webhook/certs/tls.key` | Server private key |
+| `NEUROMESH_COSIGN_PUBLIC_KEY_PATH` | `/etc/webhook/cosign/cosign.pub` | Static Cosign public key PEM |
+| `NEUROMESH_COSIGN_VERIFY_MODE` | `key` | Trust-root mode (`key` or `keyless`) |
+| `NEUROMESH_COSIGN_REGISTRY_INSECURE` | unset / false | Exact value `true` enables plain-HTTP registry access (lab/kind only; loud `SECURITY WARNING` at startup; **never** set in `deploy/kubernetes/`) |
 
 Generate dev certs with cert-manager, `openssl`, or your cluster CSR flow.
 

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -107,6 +108,14 @@ const (
 	// verification (registry digest resolution + signature fetch + crypto
 	// verification) may take before it is treated as a fail-closed denial.
 	EnvCosignVerifyTimeoutSeconds = "NEUROMESH_COSIGN_VERIFY_TIMEOUT_SECONDS"
+
+	// EnvCosignRegistryInsecure ("NEUROMESH_COSIGN_REGISTRY_INSECURE=true")
+	// allows HTTP (non-TLS) registry access via name.Insecure. Explicit, loud
+	// opt-in only — required for kind / air-gapped lab registries that speak
+	// plain HTTP. Must never be set in a real deployment (absent from every
+	// deploy/kubernetes/ manifest); activation logs a SECURITY WARNING at
+	// startup. Defaults to unset / false — production registries must use HTTPS.
+	EnvCosignRegistryInsecure = "NEUROMESH_COSIGN_REGISTRY_INSECURE"
 )
 
 const (
@@ -180,7 +189,11 @@ func NewVerifierFromEnv() (ImageVerifier, error) {
 			return nil, fmt.Errorf("read cosign public key from %q: %w", keyPath, err)
 		}
 		requireTlog := strings.EqualFold(strings.TrimSpace(os.Getenv(EnvCosignRequireTlog)), "true")
-		return NewCosignKeyVerifier(pemBytes, requireTlog, timeout)
+		insecureRegistry := strings.EqualFold(strings.TrimSpace(os.Getenv(EnvCosignRegistryInsecure)), "true")
+		if insecureRegistry {
+			log.Printf("SECURITY WARNING: %s=true -- Cosign will accept plain-HTTP registry access (name.Insecure). Lab/kind only; never enable in production.", EnvCosignRegistryInsecure)
+		}
+		return NewCosignKeyVerifier(pemBytes, requireTlog, timeout, insecureRegistry)
 	case VerifyModeKeyless:
 		return NewCosignKeylessVerifier(
 			strings.TrimSpace(os.Getenv(EnvCosignKeylessIssuer)),
@@ -200,13 +213,17 @@ type CosignKeyVerifier struct {
 	keyFingerprint string
 	requireTlog    bool
 	timeout        time.Duration
+	insecure       bool
 	registryOpts   []remote.Option
 }
 
 // NewCosignKeyVerifier constructs a CosignKeyVerifier from a PEM-encoded
 // public key. The key is parsed once up front so misconfiguration is caught
 // at startup rather than on the first admission request.
-func NewCosignKeyVerifier(publicKeyPEM []byte, requireTlog bool, timeout time.Duration) (*CosignKeyVerifier, error) {
+//
+// insecureRegistry enables HTTP registry access (name.Insecure). Leave false
+// for production HTTPS registries; set true only for kind/lab HTTP registries.
+func NewCosignKeyVerifier(publicKeyPEM []byte, requireTlog bool, timeout time.Duration, insecureRegistry bool) (*CosignKeyVerifier, error) {
 	// Equivalent to cosign/v2/pkg/signature.LoadPublicKeyRaw, called directly
 	// against the lower-level sigstore/sigstore packages -- see the NOTE
 	// above the import block for why.
@@ -226,6 +243,7 @@ func NewCosignKeyVerifier(publicKeyPEM []byte, requireTlog bool, timeout time.Du
 		keyFingerprint: hex.EncodeToString(fingerprint[:]),
 		requireTlog:    requireTlog,
 		timeout:        timeout,
+		insecure:       insecureRegistry,
 		registryOpts:   []remote.Option{remote.WithAuthFromKeychain(authn.DefaultKeychain)},
 	}, nil
 }
@@ -239,7 +257,7 @@ func (v *CosignKeyVerifier) VerifyImage(ctx context.Context, imageRef string) (*
 	ctx, cancel := context.WithTimeout(ctx, v.timeout)
 	defer cancel()
 
-	digestRef, err := resolveImageDigest(ctx, imageRef, v.registryOpts...)
+	digestRef, err := resolveImageDigest(ctx, imageRef, v.insecure, v.registryOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("resolve image digest: %w", err)
 	}
@@ -316,8 +334,12 @@ func (v *CosignKeylessVerifier) VerifyImage(_ context.Context, imageRef string) 
 // re-tagging the same tag to a different, unsigned/malicious image after the
 // fact. If imageRef already carries a digest (repo@sha256:...), it is used
 // as-is; otherwise the digest is resolved live from the registry.
-func resolveImageDigest(ctx context.Context, imageRef string, opts ...remote.Option) (name.Digest, error) {
-	ref, err := name.ParseReference(imageRef)
+//
+// When insecure is true, references are parsed with name.Insecure so plain
+// HTTP registries (kind/lab) are reachable; production must keep this false.
+func resolveImageDigest(ctx context.Context, imageRef string, insecure bool, opts ...remote.Option) (name.Digest, error) {
+	nameOpts := registryNameOptions(insecure)
+	ref, err := name.ParseReference(imageRef, nameOpts...)
 	if err != nil {
 		return name.Digest{}, fmt.Errorf("parse image reference %q: %w", imageRef, err)
 	}
@@ -332,10 +354,17 @@ func resolveImageDigest(ctx context.Context, imageRef string, opts ...remote.Opt
 		return name.Digest{}, fmt.Errorf("resolve digest for %q from registry: %w", imageRef, err)
 	}
 
-	digestRef, err := name.NewDigest(fmt.Sprintf("%s@%s", ref.Context().Name(), descriptor.Digest.String()))
+	digestRef, err := name.NewDigest(fmt.Sprintf("%s@%s", ref.Context().Name(), descriptor.Digest.String()), nameOpts...)
 	if err != nil {
 		return name.Digest{}, fmt.Errorf("build digest reference for %q: %w", imageRef, err)
 	}
 
 	return digestRef, nil
+}
+
+func registryNameOptions(insecure bool) []name.Option {
+	if !insecure {
+		return nil
+	}
+	return []name.Option{name.Insecure}
 }
