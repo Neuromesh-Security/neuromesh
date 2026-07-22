@@ -43,10 +43,13 @@ const SHUTDOWN_DRAIN_MS: u64 = 500;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    // Single global logger init. `tracing-subscriber`'s default features include
+    // `tracing-log`, so `fmt().init()` installs both the tracing subscriber and
+    // a `log` crate bridge (LogTracer). A second `env_logger::init()` would
+    // panic with SetLoggerError — do not reintroduce it.
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    env_logger::init();
 
     info!("🚀 [Neuromesh] Initializing Enterprise Agent...");
 
