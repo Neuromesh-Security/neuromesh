@@ -1,17 +1,17 @@
 use agent_ebpf_sensor::btf_offsets::{self, ResolvedOffsets};
 use agent_ebpf_sensor::bytecode_attestation::{self, EmbeddedArtifact};
 use agent_ebpf_sensor::ingestion;
+use agent_ebpf_sensor::lsm_pin::{
+    self, attach_and_pin_lsm_fail_closed, classify_enforcement_pins, deny_map_seed_plan,
+    enforcement_pin_paths, policy_state_for_pinned_resume, DenyMapSeedPlan, EnforcementPinState,
+    PINNED_ENFORCEMENT_MAPS,
+};
 use agent_ebpf_sensor::monitoring::ringbuf_decode::decode_exec_event;
 use agent_ebpf_sensor::monitoring::{
     exec_event_to_security_telemetry, start_network_monitor, start_process_monitor,
 };
 use agent_ebpf_sensor::observability::{
     spawn_health_monitor, spawn_metrics_server, AgentMetrics, RATE_LIMIT_DROPS_MAP,
-};
-use agent_ebpf_sensor::lsm_pin::{
-    self, attach_and_pin_lsm_fail_closed, classify_enforcement_pins, deny_map_seed_plan,
-    enforcement_pin_paths, policy_state_for_pinned_resume, DenyMapSeedPlan, EnforcementPinState,
-    PINNED_ENFORCEMENT_MAPS,
 };
 use agent_ebpf_sensor::path_deny::{self, PathDenyMaps};
 use agent_ebpf_sensor::pipeline::TelemetryPipeline;

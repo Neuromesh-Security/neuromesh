@@ -108,7 +108,9 @@ pub fn deny_map_seed_plan(pinned_maps_reused: bool, active_count: u32) -> Result
 pub fn policy_state_for_pinned_resume() -> PolicySyncState {
     PolicySyncState {
         // Force STALE on first refresh_stale_flag / immediate warn path awareness.
-        last_success: std::time::Instant::now() - POLICY_STALE_AFTER - std::time::Duration::from_secs(1),
+        last_success: std::time::Instant::now()
+            - POLICY_STALE_AFTER
+            - std::time::Duration::from_secs(1),
         last_version: "pinned-resume".to_string(),
         stale: true,
     }
@@ -215,10 +217,7 @@ mod tests {
     #[test]
     fn classify_cold_when_nothing_pinned() {
         let dir = tempfile_dir();
-        assert_eq!(
-            classify_enforcement_pins(&dir),
-            EnforcementPinState::Cold
-        );
+        assert_eq!(classify_enforcement_pins(&dir), EnforcementPinState::Cold);
     }
 
     #[test]
@@ -228,9 +227,7 @@ mod tests {
         touch(&dir.join(PATH_DENY_COUNT_MAP));
         assert_eq!(
             classify_enforcement_pins(&dir),
-            EnforcementPinState::MapsReady {
-                link_pinned: false
-            }
+            EnforcementPinState::MapsReady { link_pinned: false }
         );
         touch(&dir.join(LSM_LINK_PIN_NAME));
         assert_eq!(
