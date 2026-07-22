@@ -19,7 +19,7 @@ echo "== start agent =="
 AGENT_PID=$!
 sleep 3
 kill -0 "$AGENT_PID"
-test -f "$PIN_ROOT/neuromesh_lsm_exec_guard.link"
+test -f "$PIN_ROOT/neuromesh_lsm_exec_guard_link"
 test -f "$PIN_ROOT/PATH_DENY_LIST"
 test -f "$PIN_ROOT/PATH_DENY_COUNT"
 echo "pins present under $PIN_ROOT"
@@ -41,7 +41,7 @@ if kill -0 "$AGENT_PID" 2>/dev/null; then
   echo "FAIL: agent still running" >&2
   exit 1
 fi
-test -f "$PIN_ROOT/neuromesh_lsm_exec_guard.link"
+test -f "$PIN_ROOT/neuromesh_lsm_exec_guard_link"
 if "$DENY_PROBE"; then
   echo "FAIL: blacklisted path executed AFTER kill -9 (enforcement died with process)" >&2
   exit 1

@@ -40,10 +40,12 @@ use crate::bpf_pin::prepare_pin_directory;
 use crate::path_deny::{PathDenyMaps, PolicySyncState, POLICY_STALE_AFTER};
 
 /// bpffs filename for the pinned LSM link (under [`crate::bpf_pin::pin_root`]).
-pub const LSM_LINK_PIN_NAME: &str = "neuromesh_lsm_exec_guard.link";
+///
+/// Must not contain `.` — kernel `bpf_lookup` rejects dotted basenames with
+/// `-EPERM` (reserved for bpffs extensions).
+pub const LSM_LINK_PIN_NAME: &str = "neuromesh_lsm_exec_guard_link";
 
-const LSM_LINK_PIN_TMP_NAME: &str = "neuromesh_lsm_exec_guard.link.tmp";
-
+const LSM_LINK_PIN_TMP_NAME: &str = "neuromesh_lsm_exec_guard_link_tmp";
 /// Deny-list maps that must be pinned with the LSM link for safe handoff.
 pub const PINNED_ENFORCEMENT_MAPS: &[&str] = &[PATH_DENY_LIST_MAP, PATH_DENY_COUNT_MAP];
 
@@ -136,8 +138,8 @@ pub struct EnforcementPinPaths {
 
 /// Attach `neuromesh_lsm_exec_guard` and pin the link under `pin_root` (fail-closed).
 ///
-/// Handoff: pin to `.tmp`, remove prior `.link` if present (old attach drops),
-/// rename `.tmp` → `.link`, then reopen. While both old and new programs may
+/// Handoff: pin to `*_link_tmp`, remove prior `*_link` if present (old attach
+/// drops), rename tmp → final, then reopen. While both old and new programs may
 /// briefly be attached before the old pin is removed, deny never goes to zero
 /// attaches if an old pin existed.
 pub fn attach_and_pin_lsm_fail_closed(program: &mut Lsm, pin_root: &Path) -> Result<PinnedLink> {
