@@ -1,7 +1,7 @@
 //! Shared agent counters surfaced to Prometheus and periodic health logs.
 
 use anyhow::{Context, Result};
-use prometheus::{Counter, Gauge, Opts, Registry};
+use prometheus::{Counter, CounterVec, Gauge, Opts, Registry};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -17,6 +17,8 @@ pub struct AgentMetrics {
     pub events_processed: Counter,
     pub events_dropped: Counter,
     pub uptime_seconds: Gauge,
+    /// Issue #44 Phase 2 — labeled by `reason` (`exe_digest`|`lsm_link`|`pinned_map`).
+    pub integrity_failures: CounterVec,
     userspace_drops: AtomicU64,
     started_at: Instant,
 }
@@ -43,6 +45,15 @@ impl AgentMetrics {
         ))
         .context("failed to create agent_uptime_seconds gauge")?;
 
+        let integrity_failures = CounterVec::new(
+            Opts::new(
+                "agent_integrity_failure_total",
+                "Runtime integrity check failures (Issue #44 Phase 2); label reason=exe_digest|lsm_link|pinned_map",
+            ),
+            &["reason"],
+        )
+        .context("failed to create agent_integrity_failure_total counter")?;
+
         registry
             .register(Box::new(events_processed.clone()))
             .context("failed to register ebpf_events_processed_total")?;
@@ -52,12 +63,16 @@ impl AgentMetrics {
         registry
             .register(Box::new(uptime_seconds.clone()))
             .context("failed to register agent_uptime_seconds")?;
+        registry
+            .register(Box::new(integrity_failures.clone()))
+            .context("failed to register agent_integrity_failure_total")?;
 
         Ok(Arc::new(Self {
             registry,
             events_processed,
             events_dropped,
             uptime_seconds,
+            integrity_failures,
             userspace_drops: AtomicU64::new(0),
             started_at: Instant::now(),
         }))
@@ -99,5 +114,13 @@ impl AgentMetrics {
 
     pub fn dropped_total(&self) -> f64 {
         self.events_dropped.get()
+    }
+
+    pub fn record_integrity_failure(&self, reason: &str) {
+        self.integrity_failures.with_label_values(&[reason]).inc();
+    }
+
+    pub fn integrity_failure_total(&self, reason: &str) -> f64 {
+        self.integrity_failures.with_label_values(&[reason]).get()
     }
 }

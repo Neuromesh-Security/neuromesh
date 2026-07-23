@@ -4,6 +4,7 @@ pub mod bpf_pin;
 pub mod btf_offsets;
 pub mod bytecode_attestation;
 pub mod ingestion;
+pub mod integrity;
 pub mod lsm_decision;
 pub mod lsm_pin;
 pub mod mocks;
