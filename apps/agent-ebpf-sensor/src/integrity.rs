@@ -115,10 +115,10 @@ fn interval_from_env() -> Duration {
 
 fn exit_on_failure_from_env() -> bool {
     match std::env::var(ENV_INTEGRITY_EXIT_ON_FAILURE) {
-        Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "0" | "false" | "no" | "off" => false,
-            _ => true,
-        },
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
         Err(_) => true,
     }
 }
