@@ -29,6 +29,7 @@ use neuromesh_common::{
     PathDenyEntry, SecurityTelemetryEvent, TelemetryHealthStats, PATH_DENY_COUNT_MAP,
     PATH_DENY_LIST_MAP, TELEMETRY_STATS_INDEX,
 };
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::unix::AsyncFd;
@@ -204,6 +205,19 @@ async fn main() -> Result<(), anyhow::Error> {
                 format!("BPF map `{RATE_LIMIT_DROPS_MAP}` missing from object file")
             })?,
     )?;
+
+    // Issue #44 Phase 2: periodic runtime integrity (exe digest + pin liveness).
+    // Additive after successful pin/attestation — does not alter Phase 1 or PR #72.
+    let integrity_cfg = agent_ebpf_sensor::integrity::IntegrityConfig::from_env(
+        &bpf_pin_root,
+        PathBuf::from("/proc/self/exe"),
+    )
+    .context("failed to initialize runtime integrity monitor (Issue #44 Phase 2)")?;
+    let _integrity = agent_ebpf_sensor::integrity::spawn_integrity_monitor(
+        integrity_cfg,
+        Arc::clone(&metrics),
+        shutdown.clone(),
+    );
 
     let (detection_tx, mut detection_rx) =
         tokio::sync::mpsc::channel::<SecurityTelemetryEvent>(4096);
