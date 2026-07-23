@@ -8,6 +8,14 @@
 //!    (agent binary is intentionally absent from the Phase 1 bytecode
 //!    manifest — embedding a self-digest is circular; see
 //!    `bytecode_attestation` module docs).
+//!
+//!    **Limitation:** this opens `/proc/self/exe` only — the running (exec’d)
+//!    inode. An `unlink`+replace of the on-disk install path is **not**
+//!    detected while this process lives, because `/proc/self/exe` keeps
+//!    pointing at the original (often `(deleted)`) inode. The Phase 2 design
+//!    report recommended a dual check (running inode **and** resolved install
+//!    path for “next restart” integrity); only the `/proc/self/exe` half is
+//!    implemented here.
 //! 2. Pinned LSM link still present and openable (`PinnedLink::from_pin` +
 //!    `FdLink::info()`).
 //! 3. Pinned `PATH_DENY_LIST` / `PATH_DENY_COUNT` still present under the pin root.
