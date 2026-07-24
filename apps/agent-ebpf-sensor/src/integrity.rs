@@ -41,8 +41,14 @@ pub const ENV_INTEGRITY_INTERVAL_SECS: &str = "NEUROMESH_INTEGRITY_INTERVAL_SECS
 pub const ENV_INTEGRITY_EXIT_ON_FAILURE: &str = "NEUROMESH_INTEGRITY_EXIT_ON_FAILURE";
 
 /// Optional override for the expected agent digest (`sha256:<hex>`), shared by
-/// the `/proc/self/exe` and on-disk install-path checks. When unset, the
-/// monitor captures a baseline from `/proc/self/exe` at spawn time.
+/// the `/proc/self/exe` and on-disk install-path checks. When unset (the
+/// production default), the monitor **self-hashes** `/proc/self/exe` once at
+/// arm time and remembers that baseline for the process lifetime.
+///
+/// That default is **not** an independent operator-published trust root: it
+/// detects only *later* drift, not day-zero compromise (binary already wrong
+/// before first start). There is no README/runbook today that publishes a
+/// Cosign-adjacent agent-binary digest for operators to set here.
 ///
 /// **Not** sourced from the Phase 1 bytecode manifest — the agent binary was
 /// deliberately excluded there (circular self-digest / TCB; PR #62).
