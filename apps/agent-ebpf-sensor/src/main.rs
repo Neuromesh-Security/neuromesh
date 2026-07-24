@@ -206,7 +206,7 @@ async fn main() -> Result<(), anyhow::Error> {
             })?,
     )?;
 
-    // Issue #44 Phase 2: periodic runtime integrity (exe digest + pin liveness).
+    // Issue #44 Phase 2 + #75: periodic runtime integrity (exe + on-disk + pins).
     // Additive after successful pin/attestation — does not alter Phase 1 or PR #72.
     let integrity_cfg = agent_ebpf_sensor::integrity::IntegrityConfig::from_env(
         &bpf_pin_root,
