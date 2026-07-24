@@ -17,7 +17,8 @@ pub struct AgentMetrics {
     pub events_processed: Counter,
     pub events_dropped: Counter,
     pub uptime_seconds: Gauge,
-    /// Issue #44 Phase 2 — labeled by `reason` (`exe_digest`|`lsm_link`|`pinned_map`).
+    /// Issue #44 Phase 2 / #75 — labeled by `reason`
+    /// (`exe_digest`|`on_disk_binary`|`lsm_link`|`pinned_map`).
     pub integrity_failures: CounterVec,
     userspace_drops: AtomicU64,
     started_at: Instant,
@@ -48,7 +49,7 @@ impl AgentMetrics {
         let integrity_failures = CounterVec::new(
             Opts::new(
                 "agent_integrity_failure_total",
-                "Runtime integrity check failures (Issue #44 Phase 2); label reason=exe_digest|lsm_link|pinned_map",
+                "Runtime integrity check failures (Issue #44 Phase 2 / #75); label reason=exe_digest|on_disk_binary|lsm_link|pinned_map",
             ),
             &["reason"],
         )

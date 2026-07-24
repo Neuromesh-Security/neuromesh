@@ -1,4 +1,4 @@
-//! Periodic runtime integrity checks (Issue #44 Phase 2).
+//! Periodic runtime integrity checks (Issue #44 Phase 2 + Issue #75).
 //!
 //! Runs on a background timer after successful startup — **not** on the LSM
 //! hot path. Detects post-start node-local tampering Phase 1 attestation and
@@ -7,18 +7,16 @@
 //! 1. `/proc/self/exe` digest drift vs the baseline captured at monitor start
 //!    (agent binary is intentionally absent from the Phase 1 bytecode
 //!    manifest — embedding a self-digest is circular; see
-//!    `bytecode_attestation` module docs).
-//!
-//!    **Limitation:** this opens `/proc/self/exe` only — the running (exec’d)
-//!    inode. An `unlink`+replace of the on-disk install path is **not**
-//!    detected while this process lives, because `/proc/self/exe` keeps
-//!    pointing at the original (often `(deleted)`) inode. The Phase 2 design
-//!    report recommended a dual check (running inode **and** resolved install
-//!    path for “next restart” integrity); only the `/proc/self/exe` half is
-//!    implemented here.
-//! 2. Pinned LSM link still present and openable (`PinnedLink::from_pin` +
+//!    `bytecode_attestation` module docs). Hashes the **running (exec’d) inode**.
+//! 2. On-disk install-path digest (Issue #75): open the install path **by name**
+//!    and compare to the same expected digest. Detects `unlink`+replace while
+//!    `/proc/self/exe` still matches the original inode. Path resolved at arm
+//!    time via `readlink("/proc/self/exe")` (strip Linux ` (deleted)`), or
+//!    `NEUROMESH_AGENT_ON_DISK_PATH` override — not a hardcoded Dockerfile
+//!    string that can silently drift.
+//! 3. Pinned LSM link still present and openable (`PinnedLink::from_pin` +
 //!    `FdLink::info()`).
-//! 3. Pinned `PATH_DENY_LIST` / `PATH_DENY_COUNT` still present under the pin root.
+//! 4. Pinned `PATH_DENY_LIST` / `PATH_DENY_COUNT` still present under the pin root.
 //!
 //! On failure: `agent_integrity_failure_total{reason=…}` + `tracing::error!`.
 //! Default: also exit the process (`NEUROMESH_INTEGRITY_EXIT_ON_FAILURE`,
@@ -42,9 +40,23 @@ pub const ENV_INTEGRITY_INTERVAL_SECS: &str = "NEUROMESH_INTEGRITY_INTERVAL_SECS
 /// after alerting. Set `false`/`0`/`no` for alert-only.
 pub const ENV_INTEGRITY_EXIT_ON_FAILURE: &str = "NEUROMESH_INTEGRITY_EXIT_ON_FAILURE";
 
-/// Optional override for the expected `/proc/self/exe` digest (`sha256:<hex>`).
-/// When unset, the monitor captures a baseline at spawn time.
+/// Optional override for the expected agent digest (`sha256:<hex>`), shared by
+/// the `/proc/self/exe` and on-disk install-path checks. When unset (the
+/// production default), the monitor **self-hashes** `/proc/self/exe` once at
+/// arm time and remembers that baseline for the process lifetime.
+///
+/// That default is **not** an independent operator-published trust root: it
+/// detects only *later* drift, not day-zero compromise (binary already wrong
+/// before first start). There is no README/runbook today that publishes a
+/// Cosign-adjacent agent-binary digest for operators to set here.
+///
+/// **Not** sourced from the Phase 1 bytecode manifest — the agent binary was
+/// deliberately excluded there (circular self-digest / TCB; PR #62).
 pub const ENV_AGENT_EXE_DIGEST: &str = "NEUROMESH_AGENT_EXE_DIGEST";
+
+/// Optional absolute path of the on-disk install binary for “next restart”
+/// integrity. When unset, resolved once at arm time via `readlink("/proc/self/exe")`.
+pub const ENV_AGENT_ON_DISK_PATH: &str = "NEUROMESH_AGENT_ON_DISK_PATH";
 
 const DEFAULT_INTERVAL_SECS: u64 = 45;
 const MIN_INTERVAL_SECS: u64 = 30;
@@ -52,6 +64,7 @@ const MAX_INTERVAL_SECS: u64 = 60;
 
 /// Prometheus `reason` label values (stable API).
 pub const REASON_EXE_DIGEST: &str = "exe_digest";
+pub const REASON_ON_DISK_BINARY: &str = "on_disk_binary";
 pub const REASON_LSM_LINK: &str = "lsm_link";
 pub const REASON_PINNED_MAP: &str = "pinned_map";
 
@@ -67,20 +80,25 @@ pub struct IntegrityFailure {
 pub struct IntegrityConfig {
     pub interval: Duration,
     pub exit_on_failure: bool,
-    /// File hashed for the exe identity check (production: `/proc/self/exe`).
+    /// File hashed for the running-inode check (production: `/proc/self/exe`).
     pub exe_path: PathBuf,
-    /// Expected digest in `sha256:<64 lowercase hex>` form.
+    /// Install path opened **by name** each tick (next-restart integrity).
+    pub on_disk_path: PathBuf,
+    /// Expected digest in `sha256:<64 lowercase hex>` form (shared by both
+    /// exe and on-disk checks — startup baseline, not Phase 1 manifest).
     pub expected_exe_digest: String,
     pub pin_paths: EnforcementPinPaths,
 }
 
 impl IntegrityConfig {
     /// Build config from environment and a pin root. Hashes `exe_path` for the
-    /// baseline when `NEUROMESH_AGENT_EXE_DIGEST` is unset.
+    /// baseline when `NEUROMESH_AGENT_EXE_DIGEST` is unset. Resolves
+    /// `on_disk_path` via [`resolve_on_disk_path`].
     pub fn from_env(pin_root: &Path, exe_path: impl Into<PathBuf>) -> Result<Self> {
         let exe_path = exe_path.into();
         let interval = interval_from_env();
         let exit_on_failure = exit_on_failure_from_env();
+        let on_disk_path = resolve_on_disk_path().context("resolve on-disk install path")?;
         let expected_exe_digest = match std::env::var(ENV_AGENT_EXE_DIGEST) {
             Ok(v) if !v.trim().is_empty() => {
                 let v = v.trim().to_string();
@@ -98,9 +116,60 @@ impl IntegrityConfig {
             interval,
             exit_on_failure,
             exe_path,
+            on_disk_path,
             expected_exe_digest,
             pin_paths: enforcement_pin_paths(pin_root),
         })
+    }
+}
+
+/// Resolve the path a future restart would load from.
+///
+/// Preference order:
+/// 1. `NEUROMESH_AGENT_ON_DISK_PATH` (absolute path override — operators /
+///    unusual layouts; also used by manual unlink+replace verification).
+/// 2. `readlink("/proc/self/exe")` at arm time, with Linux's ` (deleted)`
+///    suffix stripped if present.
+///
+/// Production images install at `/usr/local/bin/agent-ebpf-sensor` (Dockerfile
+/// `COPY` + `ENTRYPOINT`, matching `deploy/kubernetes/neuromesh-agent.yaml`
+/// `command`). That string is **not** hardcoded here so local/dev binaries and
+/// Dockerfile path changes cannot silently diverge from the check.
+///
+/// **Symlinks:** `/proc/self/exe` reflects the executable path recorded at
+/// exec; we re-open that path by name each tick (no extra `canonicalize` pass
+/// that could chase a different tree than restart would use).
+///
+/// **TOCTOU:** evidence-only — a swap between hash and process exit is possible;
+/// we do not claim prevention.
+pub fn resolve_on_disk_path() -> Result<PathBuf> {
+    match std::env::var(ENV_AGENT_ON_DISK_PATH) {
+        Ok(v) if !v.trim().is_empty() => {
+            let p = PathBuf::from(v.trim());
+            if !p.is_absolute() {
+                anyhow::bail!(
+                    "{ENV_AGENT_ON_DISK_PATH} must be an absolute path, got {}",
+                    p.display()
+                );
+            }
+            Ok(p)
+        }
+        _ => {
+            let link = fs::read_link("/proc/self/exe").context(
+                "failed to readlink /proc/self/exe for on-disk install path \
+                 (set NEUROMESH_AGENT_ON_DISK_PATH to override)",
+            )?;
+            Ok(strip_linux_deleted_suffix(link))
+        }
+    }
+}
+
+/// Linux appends ` (deleted)` to `readlink(/proc/self/exe)` after unlink.
+pub fn strip_linux_deleted_suffix(path: PathBuf) -> PathBuf {
+    let lossy = path.to_string_lossy();
+    match lossy.strip_suffix(" (deleted)") {
+        Some(stripped) => PathBuf::from(stripped),
+        None => path,
     }
 }
 
@@ -152,6 +221,30 @@ pub fn check_exe_digest(exe_path: &Path, expected: &str) -> Result<(), Integrity
             detail: format!(
                 "exe digest mismatch at {}: expected={expected} actual={actual}",
                 exe_path.display()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Hash the install path **by name** (next-restart integrity; Issue #75).
+///
+/// Independent of [`check_exe_digest`]: after unlink+replace, `/proc/self/exe`
+/// still hashes the old inode while this path yields the replacement bytes.
+pub fn check_on_disk_binary(on_disk_path: &Path, expected: &str) -> Result<(), IntegrityFailure> {
+    let actual = hash_file(on_disk_path).map_err(|e| IntegrityFailure {
+        reason: REASON_ON_DISK_BINARY,
+        detail: format!(
+            "failed to hash on-disk install path {}: {e:#}",
+            on_disk_path.display()
+        ),
+    })?;
+    if actual != expected {
+        return Err(IntegrityFailure {
+            reason: REASON_ON_DISK_BINARY,
+            detail: format!(
+                "on-disk binary digest mismatch at {}: expected={expected} actual={actual}",
+                on_disk_path.display()
             ),
         });
     }
@@ -213,6 +306,9 @@ pub fn run_integrity_checks(cfg: &IntegrityConfig) -> Vec<IntegrityFailure> {
     if let Err(f) = check_exe_digest(&cfg.exe_path, &cfg.expected_exe_digest) {
         failures.push(f);
     }
+    if let Err(f) = check_on_disk_binary(&cfg.on_disk_path, &cfg.expected_exe_digest) {
+        failures.push(f);
+    }
     if let Err(f) = check_lsm_link_pin(&cfg.pin_paths.link) {
         failures.push(f);
     }
@@ -260,8 +356,9 @@ pub fn spawn_integrity_monitor(
             interval_secs = cfg.interval.as_secs(),
             exit_on_failure = cfg.exit_on_failure,
             exe = %cfg.exe_path.display(),
+            on_disk = %cfg.on_disk_path.display(),
             link = %cfg.pin_paths.link.display(),
-            "runtime integrity monitor armed (Issue #44 Phase 2)"
+            "runtime integrity monitor armed (Issue #44 Phase 2 + Issue #75)"
         );
 
         let mut interval = tokio::time::interval(cfg.interval);
@@ -356,21 +453,78 @@ mod tests {
     }
 
     #[test]
+    fn strip_deleted_suffix_for_linux_proc_exe() {
+        assert_eq!(
+            strip_linux_deleted_suffix(PathBuf::from("/usr/local/bin/agent-ebpf-sensor (deleted)")),
+            PathBuf::from("/usr/local/bin/agent-ebpf-sensor")
+        );
+        assert_eq!(
+            strip_linux_deleted_suffix(PathBuf::from("/usr/local/bin/agent-ebpf-sensor")),
+            PathBuf::from("/usr/local/bin/agent-ebpf-sensor")
+        );
+    }
+
+    #[test]
+    fn on_disk_swap_detected_while_running_inode_unchanged() {
+        // Simulate unlink+replace: running inode file stays baseline; install
+        // path (opened by name) is replaced — only on_disk_binary must fire.
+        let dir = tmp_dir();
+        let running = dir.join("running-inode.bin");
+        let install = dir.join("install-path.bin");
+        write_file(&running, b"neuromesh-agent-v1");
+        write_file(&install, b"neuromesh-agent-v1");
+        let expected = hash_file(&running).unwrap();
+
+        assert!(check_exe_digest(&running, &expected).is_ok());
+        assert!(check_on_disk_binary(&install, &expected).is_ok());
+
+        write_file(&install, b"neuromesh-agent-TAMPERED-NEXT-RESTART");
+        assert!(check_exe_digest(&running, &expected).is_ok());
+        let err = check_on_disk_binary(&install, &expected).unwrap_err();
+        assert_eq!(err.reason, REASON_ON_DISK_BINARY);
+
+        let cfg = IntegrityConfig {
+            interval: Duration::from_secs(45),
+            exit_on_failure: true,
+            exe_path: running,
+            on_disk_path: install,
+            expected_exe_digest: expected,
+            pin_paths: enforcement_pin_paths(&dir),
+        };
+        let failures = run_integrity_checks(&cfg);
+        let reasons: Vec<_> = failures.iter().map(|f| f.reason).collect();
+        assert!(
+            reasons.contains(&REASON_ON_DISK_BINARY),
+            "expected on_disk_binary in {reasons:?}"
+        );
+        assert!(
+            !reasons.contains(&REASON_EXE_DIGEST),
+            "running inode must still match; got {reasons:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn run_checks_collects_multiple_failures() {
         let dir = tmp_dir();
         let exe = dir.join("agent.bin");
+        let on_disk = dir.join("install.bin");
         write_file(&exe, b"baseline");
+        write_file(&on_disk, b"baseline");
         let cfg = IntegrityConfig {
             interval: Duration::from_secs(45),
             exit_on_failure: true,
             exe_path: exe.clone(),
+            on_disk_path: on_disk.clone(),
             expected_exe_digest: hash_file(&exe).unwrap(),
             pin_paths: enforcement_pin_paths(&dir),
         };
         write_file(&exe, b"swapped");
+        write_file(&on_disk, b"swapped-disk");
         let failures = run_integrity_checks(&cfg);
         let reasons: Vec<_> = failures.iter().map(|f| f.reason).collect();
         assert!(reasons.contains(&REASON_EXE_DIGEST));
+        assert!(reasons.contains(&REASON_ON_DISK_BINARY));
         assert!(reasons.contains(&REASON_LSM_LINK));
         assert!(reasons.contains(&REASON_PINNED_MAP));
         let _ = fs::remove_dir_all(&dir);
