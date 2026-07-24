@@ -21,8 +21,18 @@ mkdir -p "$PIN_ROOT"
 
 # Writable install path for unlink+replace (DaemonSet uses readOnlyRootFilesystem;
 # production path is /usr/local/bin/agent-ebpf-sensor — we override for evidence).
-INSTALL_DIR="$(mktemp -d /tmp/neuromesh-integrity-install.XXXXXX)"
+# MUST NOT stage under PATH_DENY_LIST prefixes (/tmp/, /dev/shm/, /var/tmp/) —
+# otherwise the LSM correctly blocks exec of the harness copy with EPERM.
+INSTALL_ROOT="${NEUROMESH_INTEGRITY_TEST_ROOT:-/opt/neuromesh-test}"
+mkdir -p "$INSTALL_ROOT"
+INSTALL_DIR="$(mktemp -d "${INSTALL_ROOT}/integrity-install.XXXXXX")"
 INSTALL_BIN="${INSTALL_DIR}/agent-ebpf-sensor"
+case "$INSTALL_BIN" in
+  /tmp/*|/dev/shm/*|/var/tmp/*)
+    echo "FAIL: install path ${INSTALL_BIN} is under a PATH_DENY_LIST prefix" >&2
+    exit 1
+    ;;
+esac
 cp -a "$AGENT_BIN" "$INSTALL_BIN"
 chmod +x "$INSTALL_BIN"
 
