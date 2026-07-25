@@ -58,6 +58,11 @@ pub const CAPTURE_ARGV: u16 = 1 << 12;
 /// Sentinel written by the kernel when a string field cannot be captured.
 pub const UNKNOWN_SENTINEL: &[u8] = b"UNKNOWN";
 
+/// Argv argc overflow: more than [`MAX_ARGS_CAPTURE`] pointers were present.
+pub const ARGV_FLAG_ARGC_TRUNCATED: u8 = 1 << 0;
+/// Argv probe fault (null argv / read error) distinct from length truncation.
+pub const ARGV_FLAG_PROBE_FAULT: u8 = 1 << 1;
+
 /// Enterprise exec visibility record — shared between C BPF and user-space consumers.
 ///
 /// `schema_version` is written last in the kernel hot path so partially-written
@@ -80,13 +85,14 @@ pub struct ExecEvent {
     pub comm: [u8; MAX_COMM_LEN],
     pub filename: [u8; MAX_FILENAME_LEN],
     pub args_count: u32,
-    /// Bytes of significant data in `argv` — for v2 slot layout this is the
-    /// number of filled slots (0..=[`MAX_ARGS_CAPTURE`]).
+    /// Number of successfully copied argv slots (0..=[`MAX_ARGS_CAPTURE`]).
     pub argv_len: u16,
-    pub argv_pad: u16,
+    /// Bit `i` set when slot `i` filled the 32-byte buffer (argument may be truncated).
+    pub argv_trunc_mask: u8,
+    /// [`ARGV_FLAG_ARGC_TRUNCATED`] / [`ARGV_FLAG_PROBE_FAULT`].
+    pub argv_flags: u8,
     /// Argv storage: [`MAX_ARGS_CAPTURE`] × [`MAX_ARG_STR_LEN`] fixed slots
-    /// (flat `[u8; MAX_ARGV_LEN]`). Each slot is an independent NUL-terminated
-    /// string; see `format_argv_cmdline` in the agent.
+    /// (flat `[u8; MAX_ARGV_LEN]`).
     pub argv: [u8; MAX_ARGV_LEN],
     pub container_id: [u8; MAX_CONTAINER_ID_LEN],
     pub align_pad: [u8; 4],
@@ -127,6 +133,9 @@ pub struct SecurityTelemetryEvent {
     pub comm: [u8; MAX_COMM_LEN],
     pub filename: [u8; MAX_FILENAME_LEN],
     pub argv_len: u16,
+    /// True when any argv slot was buffer-full / argc overflowed / probe faulted.
+    pub argv_truncated: bool,
+    pub argv_trunc_mask: u8,
     pub argv: [u8; MAX_ARGV_LEN],
 }
 

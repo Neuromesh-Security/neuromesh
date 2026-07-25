@@ -36,6 +36,8 @@ pub struct SiemAlert {
     pub comm: String,
     pub binary_path: String,
     pub argv: String,
+    pub argv_truncated: bool,
+    pub argv_trunc_mask: u8,
     pub matched_pattern: String,
 }
 
@@ -69,6 +71,8 @@ impl RuleEngine {
                 comm: extract_comm(event),
                 binary_path: path.into_owned(),
                 argv: format_argv_cmdline(&event.argv, event.argv_len),
+                argv_truncated: event.argv_truncated,
+                argv_trunc_mask: event.argv_trunc_mask,
                 matched_pattern: prefix.to_string(),
             }));
         }
@@ -159,6 +163,8 @@ mod tests {
             comm: [0u8; MAX_COMM_LEN],
             filename,
             argv_len: 0,
+            argv_truncated: false,
+            argv_trunc_mask: 0,
             argv: [0; MAX_ARGV_LEN],
         }
     }
@@ -168,14 +174,20 @@ mod tests {
 
         let mut event = event_with_path(path);
         let mut slots = 0usize;
+        let mut trunc_mask = 0u8;
         for (i, part) in argv_parts.iter().take(MAX_ARGS_CAPTURE).enumerate() {
             let start = i * MAX_ARG_STR_LEN;
             let bytes = part.as_bytes();
             let n = bytes.len().min(MAX_ARG_STR_LEN.saturating_sub(1));
+            if bytes.len() >= MAX_ARG_STR_LEN.saturating_sub(1) {
+                trunc_mask |= 1 << i;
+            }
             event.argv[start..start + n].copy_from_slice(&bytes[..n]);
             slots += 1;
         }
         event.argv_len = slots as u16;
+        event.argv_truncated = trunc_mask != 0;
+        event.argv_trunc_mask = trunc_mask;
         event
     }
 
@@ -220,5 +232,30 @@ mod tests {
         let json_a = RuleEngine::format_json(&alert_a).expect("json");
         assert!(json_a.contains("http://evil.example/payload"));
         assert!(json_a.contains("\"argv\""));
+    }
+
+    #[test]
+    fn critical_alert_json_flags_argv_truncation_for_long_slot() {
+        use neuromesh_common::MAX_ARG_STR_LEN;
+
+        let engine = RuleEngine::new();
+        let long_url = "http://evil.example/very/long/path/that-exceeds";
+        let mut event = event_with_argv("/tmp/x", &["curl", long_url]);
+        event.argv_truncated = true;
+        event.argv_trunc_mask = 1 << 1;
+
+        let verdict = engine.evaluate(&event);
+        let RuleVerdict::Alert(alert) = verdict else {
+            panic!("expected CRITICAL_ALERT for staging path with truncated argv");
+        };
+
+        let truncated = &long_url[..MAX_ARG_STR_LEN.saturating_sub(1)];
+        assert!(alert.argv_truncated);
+        assert_eq!(alert.argv_trunc_mask, 1 << 1);
+        assert!(alert.argv.contains(truncated));
+
+        let json = RuleEngine::format_json(&alert).expect("json");
+        assert!(json.contains("\"argv_truncated\":true"));
+        assert!(json.contains(truncated));
     }
 }

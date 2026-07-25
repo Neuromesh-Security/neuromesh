@@ -328,10 +328,13 @@ static __always_inline void capture_argv(struct exec_event_t *event,
 
 	__builtin_memset(event->argv, 0, sizeof(event->argv));
 	event->argv_len = 0;
+	event->argv_trunc_mask = 0;
+	event->argv_flags = 0;
 	event->args_count = 0;
 
 	if (!argv) {
 		event->capture_status |= CAPTURE_ARGS_COUNT | CAPTURE_ARGV;
+		event->argv_flags |= ARGV_FLAG_PROBE_FAULT;
 		return;
 	}
 
@@ -339,6 +342,7 @@ static __always_inline void capture_argv(struct exec_event_t *event,
 	for (i = 0; i < MAX_ARGS_CAPTURE; i++) {
 		if (bpf_probe_read_user(&arg_ptr, sizeof(arg_ptr), &argv[i]) < 0) {
 			event->capture_status |= CAPTURE_ARGS_COUNT | CAPTURE_ARGV;
+			event->argv_flags |= ARGV_FLAG_PROBE_FAULT;
 			break;
 		}
 		if (!arg_ptr)
@@ -348,23 +352,35 @@ static __always_inline void capture_argv(struct exec_event_t *event,
 					      arg_ptr);
 		if (ret <= 0) {
 			event->capture_status |= CAPTURE_ARGV;
+			event->argv_flags |= ARGV_FLAG_PROBE_FAULT;
 			break;
+		}
+		/*
+		 * bpf_probe_read_user_str returns `size` when the destination is
+		 * filled (exact fit of size-1 chars + NUL, OR longer string
+		 * truncated). Either way the analyst must not treat the slot as
+		 * a proven complete argument — flag per-slot + event.
+		 */
+		if (ret >= (long)sizeof(event->argv[i])) {
+			event->argv_trunc_mask |= (__u8)(1U << i);
+			event->capture_status |= CAPTURE_ARGV;
 		}
 		count++;
 	}
 
 	event->args_count = count;
-	/* argv_len = number of successfully copied slots (0..=MAX_ARGS_CAPTURE). */
 	event->argv_len = (__u16)count;
 
-	/* More argv pointers remain beyond the slot cap → truncated. */
+	/* More argv pointers remain beyond the slot cap → argc truncated. */
 	if (count == MAX_ARGS_CAPTURE && argv) {
 		const char __user *extra = 0;
 
 		if (bpf_probe_read_user(&extra, sizeof(extra), &argv[MAX_ARGS_CAPTURE]) ==
 			    0 &&
-		    extra)
+		    extra) {
 			event->capture_status |= CAPTURE_ARGV;
+			event->argv_flags |= ARGV_FLAG_ARGC_TRUNCATED;
+		}
 	}
 }
 

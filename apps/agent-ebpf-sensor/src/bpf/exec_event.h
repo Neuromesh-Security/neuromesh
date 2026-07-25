@@ -42,6 +42,10 @@
 #define MAX_ARG_STR_LEN   32U
 #define MAX_ARGS_PROBE    MAX_ARGS_CAPTURE
 
+/* argv_flags bits (Issue #46 truncation / fault signaling). */
+#define ARGV_FLAG_ARGC_TRUNCATED (1U << 0)
+#define ARGV_FLAG_PROBE_FAULT    (1U << 1)
+
 #define UNKNOWN_LITERAL "UNKNOWN"
 
 struct exec_event_t {
@@ -63,7 +67,10 @@ struct exec_event_t {
 	char filename[EXEC_FILENAME_LEN];
 	__u32 args_count;
 	__u16 argv_len;
-	__u16 argv_pad;
+	/* Bit i set when slot i filled the 32-byte buffer (string may be truncated). */
+	__u8 argv_trunc_mask;
+	/* ARGV_FLAG_* — argc overflow / probe fault beyond per-slot mask. */
+	__u8 argv_flags;
 	char argv[MAX_ARGS_CAPTURE][MAX_ARG_STR_LEN];
 
 	char container_id[EXEC_CONTAINER_ID_LEN];

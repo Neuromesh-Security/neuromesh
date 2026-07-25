@@ -94,7 +94,7 @@ Kernel eBPF capture latency is measured separately (Section 2).
 
 | Hook | Program | RingBuf | Backpressure mechanism |
 |------|---------|---------|------------------------|
-| `sys_enter_execve` | `neuromesh_process_events` | `PROCESS_EVENTS` (256 KiB) | Per-CPU token bucket (~500k/sec) → `RATE_LIMIT_DROPS` |
+| `sys_enter_execve` | `neuromesh_process_events` | `PROCESS_EVENTS` (**1 MiB** in `sys_exec.bpf.c`) | Per-CPU token bucket (~500k/sec) → `RATE_LIMIT_DROPS` |
 | `tcp_connect` | `neuromesh_tcp_connect` | `NETWORK_EVENTS` (256 KiB) | RingBuf reserve failure → `DROPPED_EVENTS` |
 | `bprm_check_security` | `neuromesh_lsm_exec_guard` | `TELEMETRY_RINGBUF` (256 KiB) | Reserve failure → `TELEMETRY_STATS.lost_events_count` |
 
@@ -125,6 +125,17 @@ sudo perf stat -e syscalls:sys_enter_execve,cycles,instructions \
 > **Graph placeholder:** `docs/assets/perf-execve-latency-overhead.svg` — plot p50/p99 execve latency delta (agent attached vs detached) across EPS tiers. Generate from `perf stat` JSON export after CI run.
 
 ### 2.3 RingBuf drop rates
+
+#### Capacity impact of ExecEvent v2 (Issue #46 argv)
+
+`PROCESS_EVENTS` is sized at **1 MiB** (`max_entries = 1024 * 1024` in `sys_exec.bpf.c` — not 256 KiB). Approximate in-flight slots if the consumer stalls:
+
+| Schema | `sizeof(ExecEvent)` | ≈ events fitting in 1 MiB | Fill time at 500k EPS (rate-limit ceiling) |
+|--------|---------------------|---------------------------|---------------------------------------------|
+| v1 (pre-#46) | 408 B | ≈ **2570** | ≈ **5.1 ms** |
+| v2 (with 256 B argv) | 668 B | ≈ **1569** | ≈ **3.1 ms** |
+
+That is a **~39% reduction** in ringbuf depth (668/408 ≈ 1.64× bytes/event). Under a real execve burst (the same class of load that drives `DataNormalizer` spawn-burst `BEHAVIOR_ALERT`s), `bpf_ringbuf_reserve` failures become **more likely** if userspace drain lags — this is a real increase in drop risk, not negligible. Primary backpressure remains the per-CPU **500k EPS token bucket** (`RATE_LIMIT_DROPS`); ringbuf depth is the secondary cushion. Operators should watch `ebpf_events_dropped_total` and `PROCESS_EVENTS backpressure` logs after deploying v2.
 
 #### Kernel-side drops
 

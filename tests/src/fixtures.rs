@@ -25,6 +25,8 @@ pub fn telemetry_event(
         comm: comm_buf,
         filename,
         argv_len: 0,
+        argv_truncated: false,
+        argv_trunc_mask: 0,
         argv: [0; MAX_ARGV_LEN],
     }
 }

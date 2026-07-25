@@ -89,6 +89,8 @@ mod tests {
                 comm: [0; 16],
                 filename: [0; 256],
                 argv_len: 0,
+                argv_truncated: false,
+                argv_trunc_mask: 0,
                 argv: [0; neuromesh_common::MAX_ARGV_LEN],
             }),
             PolicyVerdict::Allow

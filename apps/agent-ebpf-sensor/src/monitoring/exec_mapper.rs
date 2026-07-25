@@ -1,11 +1,11 @@
 //! ExecEvent v1 decode, SecurityTelemetryEvent mapping, and OTel attribute export.
 
 use neuromesh_common::{
-    ExecEvent, SecurityTelemetryEvent, CAPTURE_ARGS_COUNT, CAPTURE_ARGV, CAPTURE_COMM,
-    CAPTURE_CONTAINER_ID, CAPTURE_EUID, CAPTURE_FILENAME, CAPTURE_GID, CAPTURE_NAMESPACE_ID,
-    CAPTURE_PPID, CAPTURE_TGID, CAPTURE_TIMESTAMP, CAPTURE_UID, ENFORCEMENT_ALLOWED,
-    ENFORCEMENT_BLOCKED, ENFORCEMENT_UNKNOWN, EXEC_EVENT_STRUCT_SIZE, MAX_ARGV_LEN,
-    UNKNOWN_SENTINEL,
+    ExecEvent, SecurityTelemetryEvent, ARGV_FLAG_ARGC_TRUNCATED, ARGV_FLAG_PROBE_FAULT,
+    CAPTURE_ARGS_COUNT, CAPTURE_ARGV, CAPTURE_COMM, CAPTURE_CONTAINER_ID, CAPTURE_EUID,
+    CAPTURE_FILENAME, CAPTURE_GID, CAPTURE_NAMESPACE_ID, CAPTURE_PPID, CAPTURE_TGID,
+    CAPTURE_TIMESTAMP, CAPTURE_UID, ENFORCEMENT_ALLOWED, ENFORCEMENT_BLOCKED, ENFORCEMENT_UNKNOWN,
+    EXEC_EVENT_STRUCT_SIZE, MAX_ARGV_LEN, UNKNOWN_SENTINEL,
 };
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -75,6 +75,10 @@ pub fn exec_event_to_security_telemetry(event: &ExecEvent) -> SecurityTelemetryE
         comm: string_field(&event.comm, CAPTURE_COMM, event.capture_status),
         filename: string_field(&event.filename, CAPTURE_FILENAME, event.capture_status),
         argv_len,
+        argv_truncated: event.argv_trunc_mask != 0
+            || (event.argv_flags & (ARGV_FLAG_ARGC_TRUNCATED | ARGV_FLAG_PROBE_FAULT)) != 0
+            || event.field_unknown(CAPTURE_ARGV),
+        argv_trunc_mask: event.argv_trunc_mask,
         argv,
     }
 }
@@ -127,6 +131,17 @@ pub fn exec_event_otel_attributes(event: &ExecEvent) -> OtelExecAttributes {
         display_scalar(event.args_count, CAPTURE_ARGS_COUNT, event.capture_status),
     );
     attributes.insert("neuromesh.argv".into(), display_argv(event));
+    let argv_truncated = event.argv_trunc_mask != 0
+        || (event.argv_flags & (ARGV_FLAG_ARGC_TRUNCATED | ARGV_FLAG_PROBE_FAULT)) != 0
+        || event.field_unknown(CAPTURE_ARGV);
+    attributes.insert(
+        "neuromesh.argv_truncated".into(),
+        argv_truncated.to_string(),
+    );
+    attributes.insert(
+        "neuromesh.argv_trunc_mask".into(),
+        format!("0x{:02x}", event.argv_trunc_mask),
+    );
     attributes.insert(
         "neuromesh.container_id".into(),
         display_string(
@@ -311,7 +326,8 @@ mod tests {
             filename: bytes_with_prefix::<MAX_FILENAME_LEN>(b"/usr/bin/curl"),
             args_count: 2,
             argv_len: 0,
-            argv_pad: 0,
+            argv_trunc_mask: 0,
+            argv_flags: 0,
             argv: [0; MAX_ARGV_LEN],
             container_id: bytes_with_prefix::<MAX_CONTAINER_ID_LEN>(b"neuromesh-agent"),
             align_pad: [0; 4],
