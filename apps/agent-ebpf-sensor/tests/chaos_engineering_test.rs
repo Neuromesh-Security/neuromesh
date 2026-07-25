@@ -8,7 +8,7 @@ use agent_ebpf_sensor::monitoring::network_event::{NetworkEvent, NetworkEventHan
 use agent_ebpf_sensor::observability::metrics::AgentMetrics;
 use neuromesh_common::{
     ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
-    MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
+    MAX_ARGV_LEN, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
 };
 use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
@@ -34,6 +34,9 @@ fn sample_process_event(pid: u32) -> ProcessEvent {
             path
         },
         args_count: 1,
+        argv_len: 0,
+        argv_pad: 0,
+        argv: [0; MAX_ARGV_LEN],
         container_id: [0; MAX_CONTAINER_ID_LEN],
         align_pad: [0; 4],
         namespace_id: 1,

@@ -6,7 +6,7 @@ use agent_ebpf_sensor::monitoring::ringbuf_decode::{decode_exec_event, decode_ne
 use core::mem::size_of;
 use neuromesh_common::{
     ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
-    MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
+    MAX_ARGV_LEN, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
 };
 
 const DEFAULT_ITERATIONS: usize = 50_000;
@@ -44,6 +44,9 @@ fn sample_valid_event() -> ProcessEvent {
         comm: [0; MAX_COMM_LEN],
         filename: [0; MAX_FILENAME_LEN],
         args_count: 0,
+        argv_len: 0,
+        argv_pad: 0,
+        argv: [0; MAX_ARGV_LEN],
         container_id: [0; MAX_CONTAINER_ID_LEN],
         align_pad: [0; 4],
         namespace_id: 0,

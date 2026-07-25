@@ -97,7 +97,7 @@ mod tests {
     use core::mem::{offset_of, size_of};
     use neuromesh_common::{
         ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
-        MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
+        MAX_ARGV_LEN, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
     };
 
     fn bytes_with_prefix<const N: usize>(prefix: &[u8]) -> [u8; N] {
@@ -124,6 +124,9 @@ mod tests {
             comm: bytes_with_prefix::<MAX_COMM_LEN>(b"ls"),
             filename: bytes_with_prefix::<MAX_FILENAME_LEN>(b"/bin/ls"),
             args_count: 1,
+            argv_len: 0,
+            argv_pad: 0,
+            argv: [0; MAX_ARGV_LEN],
             container_id: bytes_with_prefix::<MAX_CONTAINER_ID_LEN>(b"host"),
             align_pad: [0; 4],
             namespace_id: 1,
@@ -139,7 +142,9 @@ mod tests {
         assert_eq!(size_of::<ExecEvent>(), EXEC_EVENT_STRUCT_SIZE as usize);
         assert_eq!(offset_of!(ExecEvent, comm), 40);
         assert_eq!(offset_of!(ExecEvent, filename), 56);
-        assert_eq!(offset_of!(ExecEvent, timestamp_ns), 392);
+        assert_eq!(offset_of!(ExecEvent, argv), 320);
+        assert_eq!(offset_of!(ExecEvent, namespace_id), 644);
+        assert_eq!(offset_of!(ExecEvent, timestamp_ns), 652);
     }
 
     #[test]
