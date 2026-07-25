@@ -15,8 +15,7 @@ use crate::identity_allow::{
     IdentitySectionValidity,
 };
 use crate::path_deny::{
-    self, apply_deny_entries, PathDenyMaps, PolicySyncState, POLICY_STALE_AFTER,
-    POLICY_SYNC_INTERVAL,
+    apply_deny_entries, PathDenyMaps, PolicySyncState, POLICY_STALE_AFTER, POLICY_SYNC_INTERVAL,
 };
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
@@ -390,7 +389,7 @@ mod tests {
             .await
             .expect("fetch");
         assert!(body.contains("deny_path_prefixes"));
-        let (version, entries) = path_deny::entries_from_bundle_json(&body).unwrap();
+        let (version, entries) = crate::path_deny::entries_from_bundle_json(&body).unwrap();
         assert_eq!(version, "sha256:abad1dea");
         assert_eq!(entries.len(), 3);
         join.join().unwrap();
