@@ -139,9 +139,8 @@ pub async fn sync_once(
 
     let mut entries = Vec::with_capacity(parsed.deny_path_prefixes.len());
     for prefix in &parsed.deny_path_prefixes {
-        let entry = neuromesh_common::PathDenyEntry::from_prefix(prefix.as_bytes()).ok_or_else(
-            || anyhow::anyhow!("bundle prefix {prefix:?} empty or too long"),
-        )?;
+        let entry = neuromesh_common::PathDenyEntry::from_prefix(prefix.as_bytes())
+            .ok_or_else(|| anyhow::anyhow!("bundle prefix {prefix:?} empty or too long"))?;
         entries.push(entry);
     }
     apply_deny_entries(deny_maps, &entries).context("failed to apply policy bundle to BPF maps")?;

@@ -156,13 +156,7 @@ pub fn parse_policy_bundle_json_at(body: &str, now: SystemTime) -> Result<Parsed
         (2, Some(ie)) => {
             let issued = parse_rfc3339(&ie.issued_at)?;
             let expires = parse_rfc3339(&ie.expires_at)?;
-            evaluate_identity_section(
-                &ie.scope_path_prefix,
-                ie.spiffe_ids,
-                issued,
-                expires,
-                now,
-            )
+            evaluate_identity_section(&ie.scope_path_prefix, ie.spiffe_ids, issued, expires, now)
         }
         (2, None) => IdentitySectionValidity::Invalid {
             reason: "schema_version 2 missing identity_allow_exceptions".into(),
@@ -212,9 +206,9 @@ pub fn parse_manual_cgroup_ids(raw: &str) -> Result<Vec<u64>> {
         if part.is_empty() {
             continue;
         }
-        let id: u64 = part
-            .parse()
-            .with_context(|| format!("invalid cgroup_id in {IDENTITY_ALLOW_CGROUP_IDS_ENV}: {part:?}"))?;
+        let id: u64 = part.parse().with_context(|| {
+            format!("invalid cgroup_id in {IDENTITY_ALLOW_CGROUP_IDS_ENV}: {part:?}")
+        })?;
         out.push(id);
     }
     if out.len() as u32 > IDENTITY_ALLOW_CGROUPS_MAX_ENTRIES {
@@ -322,10 +316,7 @@ mod tests {
         );
         match v {
             IdentitySectionValidity::Invalid { reason } => {
-                assert!(
-                    reason.contains("scope_path_prefix"),
-                    "got {reason}"
-                );
+                assert!(reason.contains("scope_path_prefix"), "got {reason}");
             }
             IdentitySectionValidity::Fresh(_) => panic!("must reject non-/tmp/ scope"),
         }
