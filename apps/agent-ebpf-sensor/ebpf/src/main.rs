@@ -14,12 +14,13 @@ use aya_ebpf::{
 use aya_ebpf_bindings::helpers::{bpf_get_current_cgroup_id, bpf_get_current_task};
 use aya_log_ebpf::info;
 use neuromesh_common::{
-    PathDenyEntry, CAPTURE_COMM, CAPTURE_CONTAINER_ID, CAPTURE_EUID, CAPTURE_FILENAME,
-    CAPTURE_NAMESPACE_ID, CAPTURE_PPID, ENFORCEMENT_BLOCKED, EXEC_EVENT_SCHEMA_VERSION,
-    EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE, ExecEvent, TelemetryHealthStats, MAX_ARGV_LEN,
-    MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN, IDENTITY_ALLOW_CGROUPS_MAX_ENTRIES,
-    IDENTITY_ALLOW_VALUE, IDENTITY_EXCEPTIONS_VALID_FRESH, IDENTITY_EXCEPTION_SCOPE_PREFIX,
-    PATH_DENY_KEY_BYTES, PATH_DENY_MAX_ENTRIES, TELEMETRY_STATS_INDEX, UNKNOWN_SENTINEL,
+    ExecEvent, PathDenyEntry, TelemetryHealthStats, CAPTURE_COMM, CAPTURE_CONTAINER_ID,
+    CAPTURE_EUID, CAPTURE_FILENAME, CAPTURE_NAMESPACE_ID, CAPTURE_PPID, ENFORCEMENT_BLOCKED,
+    EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
+    IDENTITY_ALLOW_CGROUPS_MAX_ENTRIES, IDENTITY_ALLOW_VALUE, IDENTITY_EXCEPTIONS_VALID_FRESH,
+    IDENTITY_EXCEPTION_SCOPE_PREFIX, MAX_ARGV_LEN, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN,
+    MAX_FILENAME_LEN, PATH_DENY_KEY_BYTES, PATH_DENY_MAX_ENTRIES, TELEMETRY_STATS_INDEX,
+    UNKNOWN_SENTINEL,
 };
 
 /// LSM denial code — maps to `-EPERM` in the kernel security hook contract.
@@ -71,8 +72,7 @@ static TELEMETRY_STATS: Array<TelemetryHealthStats> = Array::with_max_entries(1,
 /// only performs a bounded array scan + `starts_with` — never a network call.
 /// `PATH_DENY_COUNT[0]` is the active entry count (capped at PATH_DENY_MAX_ENTRIES).
 #[map]
-static PATH_DENY_LIST: Array<PathDenyEntry> =
-    Array::with_max_entries(PATH_DENY_MAX_ENTRIES, 0);
+static PATH_DENY_LIST: Array<PathDenyEntry> = Array::with_max_entries(PATH_DENY_MAX_ENTRIES, 0);
 
 #[map]
 static PATH_DENY_COUNT: Array<u32> = Array::with_max_entries(1, 0);
@@ -118,7 +118,10 @@ fn try_neuromesh_lsm_exec_guard(ctx: LsmContext) -> Result<i32, i64> {
     }
 
     emit_blocked_exec_event(&ctx);
-    info!(&ctx, "Neuromesh XDR: blocked execution from blacklisted path");
+    info!(
+        &ctx,
+        "Neuromesh XDR: blocked execution from blacklisted path"
+    );
 
     Ok(LSM_DENY)
 }
