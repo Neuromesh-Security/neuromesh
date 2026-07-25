@@ -1,4 +1,4 @@
-use neuromesh_common::{SecurityTelemetryEvent, MAX_COMM_LEN, MAX_FILENAME_LEN};
+use neuromesh_common::{SecurityTelemetryEvent, MAX_ARGV_LEN, MAX_COMM_LEN, MAX_FILENAME_LEN};
 
 /// Build a C-compatible telemetry record for offline pipeline tests.
 pub fn telemetry_event(
@@ -24,6 +24,10 @@ pub fn telemetry_event(
         euid: uid,
         comm: comm_buf,
         filename,
+        argv_len: 0,
+        argv_truncated: false,
+        argv_trunc_mask: 0,
+        argv: [0; MAX_ARGV_LEN],
     }
 }
 

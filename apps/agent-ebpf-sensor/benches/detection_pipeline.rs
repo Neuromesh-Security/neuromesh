@@ -23,6 +23,10 @@ fn telemetry_event(pid: u32, ppid: u32, path: &str, comm: &str) -> SecurityTelem
         euid: 1000,
         comm: comm_buf,
         filename,
+        argv_len: 0,
+        argv_truncated: false,
+        argv_trunc_mask: 0,
+        argv: [0; neuromesh_common::MAX_ARGV_LEN],
     }
 }
 

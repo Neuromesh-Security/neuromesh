@@ -106,9 +106,9 @@ The following limitations are **known and documented** — not bugs filed under 
 
 ### C execve tracepoint is a verifier-safe skeleton
 
-`neuromesh_process_events` (`sys_exec.bpf.c`) currently emits **PID only**. Fields for uid, ppid, comm, filename, and timestamp are reserved in `process_event_t` but zeroed at runtime. Full argv/path capture requires a separate verifier-reviewed change to read tracepoint context safely.
+`neuromesh_process_events` (`sys_exec.bpf.c`) emits enriched `ExecEvent` v2 records: pid/tgid/uid/euid/gid, ppid, comm, filename, capped argv (256-byte NUL-separated payload, Issue #46), container/namespace ids, and timestamp. Env capture remains out of scope.
 
-**Impact:** High-volume exec visibility exists; correlation registers mostly empty filenames until enrichment lands.
+**Impact:** High-volume exec visibility includes command-line correlation for incident review (within the argv byte cap).
 
 ### Rust passive tracepoint not attached
 
@@ -130,7 +130,7 @@ User-space micro-benchmarks are measured. Kernel syscall latency delta, burst CP
 
 | Item | Target |
 |------|--------|
-| Enriched C tracepoint (comm, filename, argv) | v0.1.1 |
+| Enriched C tracepoint (comm, filename, capped argv) | **Landed (argv via [#46](https://github.com/Neuromesh-Security/neuromesh/issues/46))** |
 | Attach Rust `neuromesh_exec_hook` or consolidate dual tracepoint | v0.1.1 |
 | `execveat` tracepoint hook | v0.2.0 |
 | Wasm policy hot-path evaluation | v0.2.0 |

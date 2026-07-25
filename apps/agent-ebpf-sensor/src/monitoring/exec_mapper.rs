@@ -1,10 +1,11 @@
 //! ExecEvent v1 decode, SecurityTelemetryEvent mapping, and OTel attribute export.
 
 use neuromesh_common::{
-    ExecEvent, SecurityTelemetryEvent, CAPTURE_ARGS_COUNT, CAPTURE_COMM, CAPTURE_CONTAINER_ID,
-    CAPTURE_EUID, CAPTURE_FILENAME, CAPTURE_GID, CAPTURE_NAMESPACE_ID, CAPTURE_PPID, CAPTURE_TGID,
+    ExecEvent, SecurityTelemetryEvent, ARGV_FLAG_ARGC_TRUNCATED, ARGV_FLAG_PROBE_FAULT,
+    CAPTURE_ARGS_COUNT, CAPTURE_ARGV, CAPTURE_COMM, CAPTURE_CONTAINER_ID, CAPTURE_EUID,
+    CAPTURE_FILENAME, CAPTURE_GID, CAPTURE_NAMESPACE_ID, CAPTURE_PPID, CAPTURE_TGID,
     CAPTURE_TIMESTAMP, CAPTURE_UID, ENFORCEMENT_ALLOWED, ENFORCEMENT_BLOCKED, ENFORCEMENT_UNKNOWN,
-    EXEC_EVENT_STRUCT_SIZE, UNKNOWN_SENTINEL,
+    EXEC_EVENT_STRUCT_SIZE, MAX_ARGV_LEN, UNKNOWN_SENTINEL,
 };
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -31,8 +32,41 @@ pub fn decode_exec_event(bytes: &[u8]) -> Option<ExecEvent> {
     Some(event)
 }
 
+/// Join fixed argv slots (`MAX_ARGS_CAPTURE` × `MAX_ARG_STR_LEN`) into a
+/// space-delimited command line for SIEM / OTel export. `argv_len` is the
+/// number of filled slots (Issue #46).
+pub fn format_argv_cmdline(argv: &[u8], argv_len: u16) -> String {
+    use neuromesh_common::{MAX_ARGS_CAPTURE, MAX_ARGV_LEN, MAX_ARG_STR_LEN};
+
+    let slots = (argv_len as usize).min(MAX_ARGS_CAPTURE);
+    let buf = if argv.len() >= MAX_ARGV_LEN {
+        &argv[..MAX_ARGV_LEN]
+    } else {
+        argv
+    };
+    let mut out = String::new();
+    for i in 0..slots {
+        let start = i * MAX_ARG_STR_LEN;
+        let end = (start + MAX_ARG_STR_LEN).min(buf.len());
+        if start >= end {
+            break;
+        }
+        let slot = &buf[start..end];
+        let nul = slot.iter().position(|&b| b == 0).unwrap_or(slot.len());
+        if nul == 0 {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&String::from_utf8_lossy(&slot[..nul]));
+    }
+    out
+}
+
 /// Map kernel `ExecEvent` into the canonical `SecurityTelemetryEvent` without silent data loss.
 pub fn exec_event_to_security_telemetry(event: &ExecEvent) -> SecurityTelemetryEvent {
+    let (argv_len, argv) = argv_field(event);
     SecurityTelemetryEvent {
         pid: scalar_or_zero(event.pid, event.field_unknown(CAPTURE_TGID)),
         ppid: scalar_or_zero(event.ppid, event.field_unknown(CAPTURE_PPID)),
@@ -40,6 +74,12 @@ pub fn exec_event_to_security_telemetry(event: &ExecEvent) -> SecurityTelemetryE
         euid: scalar_or_zero(event.euid, event.field_unknown(CAPTURE_EUID)),
         comm: string_field(&event.comm, CAPTURE_COMM, event.capture_status),
         filename: string_field(&event.filename, CAPTURE_FILENAME, event.capture_status),
+        argv_len,
+        argv_truncated: event.argv_trunc_mask != 0
+            || (event.argv_flags & (ARGV_FLAG_ARGC_TRUNCATED | ARGV_FLAG_PROBE_FAULT)) != 0
+            || event.field_unknown(CAPTURE_ARGV),
+        argv_trunc_mask: event.argv_trunc_mask,
+        argv,
     }
 }
 
@@ -89,6 +129,18 @@ pub fn exec_event_otel_attributes(event: &ExecEvent) -> OtelExecAttributes {
     attributes.insert(
         "neuromesh.args_count".into(),
         display_scalar(event.args_count, CAPTURE_ARGS_COUNT, event.capture_status),
+    );
+    attributes.insert("neuromesh.argv".into(), display_argv(event));
+    let argv_truncated = event.argv_trunc_mask != 0
+        || (event.argv_flags & (ARGV_FLAG_ARGC_TRUNCATED | ARGV_FLAG_PROBE_FAULT)) != 0
+        || event.field_unknown(CAPTURE_ARGV);
+    attributes.insert(
+        "neuromesh.argv_truncated".into(),
+        argv_truncated.to_string(),
+    );
+    attributes.insert(
+        "neuromesh.argv_trunc_mask".into(),
+        format!("0x{:02x}", event.argv_trunc_mask),
     );
     attributes.insert(
         "neuromesh.container_id".into(),
@@ -159,6 +211,28 @@ fn display_string(bytes: &[u8], bit: u16, status: u16, field: &str) -> String {
     cstr_lossy(bytes).into_owned()
 }
 
+fn argv_field(event: &ExecEvent) -> (u16, [u8; MAX_ARGV_LEN]) {
+    use neuromesh_common::{MAX_ARGS_CAPTURE, MAX_ARG_STR_LEN};
+
+    let mut out = [0u8; MAX_ARGV_LEN];
+    let slots = (event.argv_len as usize).min(MAX_ARGS_CAPTURE);
+    let bytes = (slots * MAX_ARG_STR_LEN).min(MAX_ARGV_LEN);
+    out[..bytes].copy_from_slice(&event.argv[..bytes]);
+    (slots as u16, out)
+}
+
+#[inline]
+fn display_argv(event: &ExecEvent) -> String {
+    let formatted = format_argv_cmdline(&event.argv, event.argv_len);
+    if event.field_unknown(CAPTURE_ARGV) && formatted.is_empty() {
+        return format!("UNKNOWN:{}", bit_name(CAPTURE_ARGV));
+    }
+    if event.field_unknown(CAPTURE_ARGV) && !formatted.is_empty() {
+        return format!("{formatted} [truncated]");
+    }
+    formatted
+}
+
 #[inline]
 fn string_field<const N: usize>(bytes: &[u8; N], bit: u16, status: u16) -> [u8; N] {
     let mut out = [0u8; N];
@@ -209,7 +283,8 @@ fn bit_name(bit: u16) -> &'static str {
         CAPTURE_GID => "gid_probe_fault",
         CAPTURE_COMM => "comm_probe_fault",
         CAPTURE_FILENAME => "filename_probe_fault",
-        CAPTURE_ARGS_COUNT => "argv_probe_fault",
+        CAPTURE_ARGS_COUNT => "args_count_probe_fault",
+        CAPTURE_ARGV => "argv_probe_fault",
         CAPTURE_CONTAINER_ID => "cgroup_probe_fault",
         CAPTURE_NAMESPACE_ID => "namespace_probe_fault",
         CAPTURE_TIMESTAMP => "timestamp_probe_fault",
@@ -223,7 +298,7 @@ mod tests {
     use core::mem::{offset_of, size_of};
     use neuromesh_common::{
         ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
-        MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
+        MAX_ARGV_LEN, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
     };
 
     fn bytes_with_prefix<const N: usize>(prefix: &[u8]) -> [u8; N] {
@@ -250,6 +325,10 @@ mod tests {
             comm: bytes_with_prefix::<MAX_COMM_LEN>(b"curl"),
             filename: bytes_with_prefix::<MAX_FILENAME_LEN>(b"/usr/bin/curl"),
             args_count: 2,
+            argv_len: 0,
+            argv_trunc_mask: 0,
+            argv_flags: 0,
+            argv: [0; MAX_ARGV_LEN],
             container_id: bytes_with_prefix::<MAX_CONTAINER_ID_LEN>(b"neuromesh-agent"),
             align_pad: [0; 4],
             namespace_id: 4026531836,
@@ -266,7 +345,8 @@ mod tests {
         assert_eq!(offset_of!(ExecEvent, pid), 16);
         assert_eq!(offset_of!(ExecEvent, comm), 40);
         assert_eq!(offset_of!(ExecEvent, filename), 56);
-        assert_eq!(offset_of!(ExecEvent, namespace_id), 384);
+        assert_eq!(offset_of!(ExecEvent, argv), 320);
+        assert_eq!(offset_of!(ExecEvent, namespace_id), 644);
     }
 
     #[test]

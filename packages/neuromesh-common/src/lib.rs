@@ -9,19 +9,28 @@ pub const MAX_COMM_LEN: usize = 16;
 /// Cgroup / container identifier buffer (cgroup v2 path or kernfs name).
 pub const MAX_CONTAINER_ID_LEN: usize = 64;
 
+/// NUL-separated argv is stored as fixed verifier-safe slots:
+/// [`MAX_ARGS_CAPTURE`] × [`MAX_ARG_STR_LEN`] = [`MAX_ARGV_LEN`] bytes.
+/// Captured at `sys_enter_execve` (Issue #46).
+pub const MAX_ARGS_CAPTURE: usize = 8;
+pub const MAX_ARG_STR_LEN: usize = 32;
+pub const MAX_ARGV_LEN: usize = MAX_ARGS_CAPTURE * MAX_ARG_STR_LEN;
+
 /// Schema revision for `ExecEvent` ring-buffer records.
-pub const EXEC_EVENT_SCHEMA_VERSION: u16 = 1;
+///
+/// v2 adds capped argv payload (`argv` / `argv_len`) — see Issue #46.
+pub const EXEC_EVENT_SCHEMA_VERSION: u16 = 2;
 
 /// Event type discriminator — `execve` syscall visibility.
 pub const EXEC_EVENT_TYPE_EXECVE: u8 = 1;
 
-/// Serialized size of `ExecEvent` v1 (fixed for verifier + userspace bounds checks).
-pub const EXEC_EVENT_STRUCT_SIZE: u16 = 408;
+/// Serialized size of `ExecEvent` v2 (fixed for verifier + userspace bounds checks).
+pub const EXEC_EVENT_STRUCT_SIZE: u16 = 668;
 
-/// Maximum argv pointers probed when counting execution arguments.
-pub const MAX_ARGS_PROBE: u32 = 16;
+/// Maximum argv pointers probed / slots filled when capturing arguments.
+pub const MAX_ARGS_PROBE: u32 = MAX_ARGS_CAPTURE as u32;
 
-/// Passive visibility — syscall observed, not denied by LSM.
+/// Telemetry visibility — syscall observed, not denied by LSM.
 pub const ENFORCEMENT_ALLOWED: u8 = 0;
 
 /// LSM denied execution before binary load.
@@ -43,9 +52,16 @@ pub const CAPTURE_ARGS_COUNT: u16 = 1 << 8;
 pub const CAPTURE_CONTAINER_ID: u16 = 1 << 9;
 pub const CAPTURE_NAMESPACE_ID: u16 = 1 << 10;
 pub const CAPTURE_TIMESTAMP: u16 = 1 << 11;
+/// Argv string copy truncated, faulted, or unavailable (Issue #46).
+pub const CAPTURE_ARGV: u16 = 1 << 12;
 
 /// Sentinel written by the kernel when a string field cannot be captured.
 pub const UNKNOWN_SENTINEL: &[u8] = b"UNKNOWN";
+
+/// Argv argc overflow: more than [`MAX_ARGS_CAPTURE`] pointers were present.
+pub const ARGV_FLAG_ARGC_TRUNCATED: u8 = 1 << 0;
+/// Argv probe fault (null argv / read error) distinct from length truncation.
+pub const ARGV_FLAG_PROBE_FAULT: u8 = 1 << 1;
 
 /// Enterprise exec visibility record — shared between C BPF and user-space consumers.
 ///
@@ -69,6 +85,15 @@ pub struct ExecEvent {
     pub comm: [u8; MAX_COMM_LEN],
     pub filename: [u8; MAX_FILENAME_LEN],
     pub args_count: u32,
+    /// Number of successfully copied argv slots (0..=[`MAX_ARGS_CAPTURE`]).
+    pub argv_len: u16,
+    /// Bit `i` set when slot `i` filled the 32-byte buffer (argument may be truncated).
+    pub argv_trunc_mask: u8,
+    /// [`ARGV_FLAG_ARGC_TRUNCATED`] / [`ARGV_FLAG_PROBE_FAULT`].
+    pub argv_flags: u8,
+    /// Argv storage: [`MAX_ARGS_CAPTURE`] × [`MAX_ARG_STR_LEN`] fixed slots
+    /// (flat `[u8; MAX_ARGV_LEN]`).
+    pub argv: [u8; MAX_ARGV_LEN],
     pub container_id: [u8; MAX_CONTAINER_ID_LEN],
     pub align_pad: [u8; 4],
     pub namespace_id: u64,
@@ -107,6 +132,11 @@ pub struct SecurityTelemetryEvent {
     pub euid: u32,
     pub comm: [u8; MAX_COMM_LEN],
     pub filename: [u8; MAX_FILENAME_LEN],
+    pub argv_len: u16,
+    /// True when any argv slot was buffer-full / argc overflowed / probe faulted.
+    pub argv_truncated: bool,
+    pub argv_trunc_mask: u8,
+    pub argv: [u8; MAX_ARGV_LEN],
 }
 
 /// Kernel/user-space health counters exposed via the `TELEMETRY_STATS` BPF array map.

@@ -21,7 +21,7 @@
 - Rust passive tracepoint `neuromesh_exec_hook` (built, not attached)
 - Wasm policy evaluation on hot path (`wasm_policy.rs` scaffold only)
 - Slow Path GNN inference (`ai-threat-detector`)
-- Full argv/env capture from execve tracepoint context
+- Full argv/env capture from execve tracepoint context (capped argv landed in Issue #46; full env still out of scope)
 
 ### Assumptions
 
@@ -95,7 +95,7 @@ The `sys_enter_execve` tracepoint is the highest-volume syscall surface in the a
 | **C process-visibility gap (`execveat`)** | Allowed `execveat` / `fexecve` never hits the C visibility attach | **Observability only — not a security-control gap.** `sys_exec.bpf.c` / `process_monitor.rs` attach solely `syscalls/sys_enter_execve`; there is no `sys_enter_execveat` attach. Allowed `execveat` executions are invisible to the process-visibility / correlation stream. Blacklisted-path denials still occur on the LSM path above. |
 | **Namespace escape context** | Container breakout before agent deploy | Agent must run on host PID namespace (`hostPID: true`) |
 | **BPF hook disable** | `CAP_BPF` + `CAP_SYS_ADMIN` attacker detaches programs | No tamper-evident watchdog in open-source core |
-| **Verifier-minimal telemetry** | C tracepoint emits PID-only records | Filename/argv not available for volume path — correlation gap |
+| **Verifier-minimal telemetry** | C tracepoint emits PID-only records | **Mitigated for argv ([#46](https://github.com/Neuromesh-Security/neuromesh/issues/46)):** `sys_enter_execve` already captures pid/comm/filename/lineage; capped argv (256-byte NUL-separated) added in `ExecEvent` v2. Env capture still out of scope. |
 | **BTF offset coverage gap** | Rust LSM reads `linux_binprm` / `task_struct` fields via BTF-resolved offsets injected at load time (hardcoded offsets removed in PR #49) | Offsets are fail-closed at agent startup when BTF resolution fails; residual risk is **unvalidated kernels** (see §7) — wrong or untested ABIs are not silently papered over with guessed constants, but CI has not proven every claimed LTS line |
 | **Kprobe offset drift** | `tcp_connect` socket field offsets from minimal `vmlinux.h` | Dest IP/port read failure on kernel ABI change |
 | **RingBuf loss under load** | Legitimate high exec rate exceeds 500k/sec/CPU | Events dropped by design — attacker can hide in noise |
@@ -276,7 +276,7 @@ Integration tests run via `cargo test -p neuromesh-integration-tests` **without*
 
 | Risk | Severity | Notes | Owner | Target |
 |------|----------|-------|-------|--------|
-| C execve tracepoint emits PID-only | Medium | Full argv capture requires verifier-reviewed `ctx` reads. Planned mitigation: add verifier-reviewed argv capture to the C tracepoint. | Unassigned | Tracked in #TBD — new issue needed |
+| C execve tracepoint argv capture | Medium → **Mitigated ([#46](https://github.com/Neuromesh-Security/neuromesh/issues/46))** | Capped argv capture landed in `ExecEvent` schema v2: **8 slots × 32 bytes** via `bpf_probe_read_user` + `bpf_probe_read_user_str` on `sys_enter_execve` argv (not `bprm`). **Truncation is explicit:** per-slot `argv_trunc_mask` (bit i when slot i filled the 32 B buffer), `argv_flags` (`ARGC_TRUNCATED` / `PROBE_FAULT`), `CAPTURE_ARGV`, and CRITICAL_ALERT JSON fields `argv_truncated` + `argv_trunc_mask` — analysts must not treat a filled slot as a proven-complete argument. Residual: full env; content beyond caps. Ringbuf depth drops ~39% vs v1 (668 B vs 408 B in a 1 MiB `PROCESS_EVENTS`) — real secondary drop risk under consumer lag; primary backpressure remains the 500k EPS token bucket. | Dragan Flavius (@DraganFlavius) | Closed via [#46](https://github.com/Neuromesh-Security/neuromesh/issues/46) / PR #77 |
 | `neuromesh_exec_hook` not attached | Low | Rich passive telemetry exists but unused at runtime | — | — |
 | Per-CPU drop accounting | Low | `RATE_LIMIT_DROPS` summed across CPUs; NUMA hot spots may dominate | — | — |
 | BTF offset resolver — cross-kernel coverage (hardcoded offsets RESOLVED) | Medium | **Resolved (PR #49):** the Rust LSM no longer uses compile-time hardcoded `task_struct` / `linux_binprm` offsets; the orchestrator resolves them from live BTF and aborts startup on resolution failure (no guessed-offset fallback). **Labeling fixed ([#52](https://github.com/Neuromesh-Security/neuromesh/issues/52)):** CI matrix jobs are now honestly named `ubuntu-22.04 / ~6.8-azure` and `ubuntu-24.04 / ~6.17-azure` (duplicate aspirational `"5.15"`/`"6.1"` cells collapsed — real coverage unchanged at two Azure HWE kernels). **Still open (severity not reduced):** live validation still does **not** cover real 5.15 / 6.1 LTS (or true non-Azure 6.8). Unit tests + one WSL2 5.15.167 fixture are cross-checked against bpftool ground truth but do not substitute for those pre-release hardware checks before those lines are claimed as validated. | Unassigned | Tracked in #TBD — new issue needed (real LTS hardware validation); labeling accuracy closed via #52 |

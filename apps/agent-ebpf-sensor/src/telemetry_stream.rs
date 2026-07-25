@@ -322,6 +322,9 @@ mod tests {
                 euid: 1000,
                 comm: "bash".to_string(),
                 binary_path: "/tmp/evil.bin".to_string(),
+                argv: String::new(),
+                argv_truncated: false,
+                argv_trunc_mask: 0,
                 matched_pattern: "/tmp/".to_string(),
             },
         )

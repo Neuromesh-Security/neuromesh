@@ -57,6 +57,10 @@ mod tests {
             euid: 1000,
             comm: [0u8; MAX_COMM_LEN],
             filename,
+            argv_len: 0,
+            argv_truncated: false,
+            argv_trunc_mask: 0,
+            argv: [0; neuromesh_common::MAX_ARGV_LEN],
         }
     }
 

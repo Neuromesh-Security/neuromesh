@@ -305,29 +305,83 @@ static __always_inline int capture_filename(struct exec_event_t *event,
 	return 0;
 }
 
-static __always_inline void capture_args_count(struct exec_event_t *event,
-					       const char __user *const __user *argv)
+static __always_inline void capture_argv(struct exec_event_t *event,
+					 const char __user *const __user *argv)
 {
+	/*
+	 * Telemetry-only argv capture at sys_enter_execve (Issue #46).
+	 *
+	 * Source: syscall argv pointer (trace->args[1]) — NOT linux_binprm
+	 * (this is the C sys_enter_execve path, not LSM).
+	 *
+	 * Pattern: bpf_probe_read_user for argv[i], then bpf_probe_read_user_str
+	 * into a fixed slot event->argv[i][MAX_ARG_STR_LEN]. Variable offsets
+	 * into a flat buffer are rejected by the verifier on the CI matrix
+	 * (~5.15 WSL repro + ~6.8/~6.17-azure).
+	 *
+	 * Caps: MAX_ARGS_CAPTURE (8) × MAX_ARG_STR_LEN (32) = 256 bytes.
+	 */
 	__u32 count = 0;
-	const char __user *arg_ptr = 0;
 	__u32 i;
+	const char __user *arg_ptr = 0;
+	long ret;
+
+	__builtin_memset(event->argv, 0, sizeof(event->argv));
+	event->argv_len = 0;
+	event->argv_trunc_mask = 0;
+	event->argv_flags = 0;
+	event->args_count = 0;
 
 	if (!argv) {
-		event->capture_status |= CAPTURE_ARGS_COUNT;
+		event->capture_status |= CAPTURE_ARGS_COUNT | CAPTURE_ARGV;
+		event->argv_flags |= ARGV_FLAG_PROBE_FAULT;
 		return;
 	}
 
-	for (i = 0; i < MAX_ARGS_PROBE; i++) {
+#pragma clang loop unroll(full)
+	for (i = 0; i < MAX_ARGS_CAPTURE; i++) {
 		if (bpf_probe_read_user(&arg_ptr, sizeof(arg_ptr), &argv[i]) < 0) {
-			event->capture_status |= CAPTURE_ARGS_COUNT;
+			event->capture_status |= CAPTURE_ARGS_COUNT | CAPTURE_ARGV;
+			event->argv_flags |= ARGV_FLAG_PROBE_FAULT;
 			break;
 		}
 		if (!arg_ptr)
 			break;
+
+		ret = bpf_probe_read_user_str(event->argv[i], sizeof(event->argv[i]),
+					      arg_ptr);
+		if (ret <= 0) {
+			event->capture_status |= CAPTURE_ARGV;
+			event->argv_flags |= ARGV_FLAG_PROBE_FAULT;
+			break;
+		}
+		/*
+		 * bpf_probe_read_user_str returns `size` when the destination is
+		 * filled (exact fit of size-1 chars + NUL, OR longer string
+		 * truncated). Either way the analyst must not treat the slot as
+		 * a proven complete argument — flag per-slot + event.
+		 */
+		if (ret >= (long)sizeof(event->argv[i])) {
+			event->argv_trunc_mask |= (__u8)(1U << i);
+			event->capture_status |= CAPTURE_ARGV;
+		}
 		count++;
 	}
 
 	event->args_count = count;
+	event->argv_len = (__u16)count;
+
+	/* More argv pointers remain beyond the slot cap → argc truncated. */
+	if (count == MAX_ARGS_CAPTURE && argv) {
+		const char __user *extra = 0;
+
+		if (bpf_probe_read_user(&extra, sizeof(extra), &argv[MAX_ARGS_CAPTURE]) ==
+			    0 &&
+		    extra) {
+			event->capture_status |= CAPTURE_ARGV;
+			event->argv_flags |= ARGV_FLAG_ARGC_TRUNCATED;
+		}
+	}
 }
 
 SEC("tracepoint/syscalls/sys_enter_execve")
@@ -366,7 +420,7 @@ int neuromesh_process_events(void *ctx)
 		return 0;
 	}
 
-	capture_args_count(event, argv_ptr);
+	capture_argv(event, argv_ptr);
 
 	/* Atomic schema publish — written last so userspace rejects torn records. */
 	event->schema_version = EXEC_EVENT_SCHEMA_VERSION;

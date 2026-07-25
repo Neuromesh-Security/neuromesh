@@ -1,13 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Shared ExecEvent v1 layout — must match neuromesh_common::ExecEvent byte-for-byte. */
+/* Shared ExecEvent v2 layout — must match neuromesh_common::ExecEvent byte-for-byte. */
 
 #pragma once
 
 #include "bpf_helpers.h"
 
-#define EXEC_EVENT_SCHEMA_VERSION 1U
+#define EXEC_EVENT_SCHEMA_VERSION 2U
 #define EXEC_EVENT_TYPE_EXECVE    1U
-#define EXEC_EVENT_STRUCT_SIZE    408U
+#define EXEC_EVENT_STRUCT_SIZE    668U
 
 #define EXEC_COMM_LEN         16
 #define EXEC_FILENAME_LEN     256
@@ -29,8 +29,22 @@
 #define CAPTURE_CONTAINER_ID (1U << 9)
 #define CAPTURE_NAMESPACE_ID (1U << 10)
 #define CAPTURE_TIMESTAMP    (1U << 11)
+#define CAPTURE_ARGV         (1U << 12)
 
-#define MAX_ARGS_PROBE 16U
+/*
+ * Issue #46: verifier-safe argv capture at sys_enter_execve.
+ * Fixed 8×32 slots (256 bytes total) — variable destination offsets into a
+ * flat buffer fail the verifier (`R1 max value outside allowed memory range`).
+ * Per-slot `bpf_probe_read_user_str` with a constant size is the standard
+ * Tracee / Falco / aya-cookbook pattern.
+ */
+#define MAX_ARGS_CAPTURE  8U
+#define MAX_ARG_STR_LEN   32U
+#define MAX_ARGS_PROBE    MAX_ARGS_CAPTURE
+
+/* argv_flags bits (Issue #46 truncation / fault signaling). */
+#define ARGV_FLAG_ARGC_TRUNCATED (1U << 0)
+#define ARGV_FLAG_PROBE_FAULT    (1U << 1)
 
 #define UNKNOWN_LITERAL "UNKNOWN"
 
@@ -52,6 +66,12 @@ struct exec_event_t {
 	char comm[EXEC_COMM_LEN];
 	char filename[EXEC_FILENAME_LEN];
 	__u32 args_count;
+	__u16 argv_len;
+	/* Bit i set when slot i filled the 32-byte buffer (string may be truncated). */
+	__u8 argv_trunc_mask;
+	/* ARGV_FLAG_* — argc overflow / probe fault beyond per-slot mask. */
+	__u8 argv_flags;
+	char argv[MAX_ARGS_CAPTURE][MAX_ARG_STR_LEN];
 
 	char container_id[EXEC_CONTAINER_ID_LEN];
 	__u8 align_pad[4];
