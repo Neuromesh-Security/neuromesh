@@ -11,10 +11,13 @@ default allow := false
 # /tmp/ may be excepted for whitelisted SPIFFE IDs; /dev/shm/ and /var/tmp/
 # remain hard-denied in the LSM regardless of identity. Widening that set is
 # a deliberate Rego + threat-model policy change — not an implementation side effect.
+#
+# IDs are path-form (SPIRE K8s canonical): spiffe://{trust}/ns/{ns}/sa/{sa}.
+# Flat shorthand (spiffe://trust/name) is intentionally rejected.
 whitelist := {
-	"spiffe://neuromesh.security/agent-ebpf-sensor",
-	"spiffe://neuromesh.security/zt-policy-engine",
-	"spiffe://neuromesh.security/ai-threat-detector",
+	"spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor",
+	"spiffe://neuromesh.security/ns/default/sa/zt-policy-engine",
+	"spiffe://neuromesh.security/ns/default/sa/ai-threat-detector",
 }
 
 # Non-ephemeral execution is always permitted.

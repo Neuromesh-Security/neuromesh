@@ -1,5 +1,6 @@
 use agent_ebpf_sensor::btf_offsets::{self, ResolvedOffsets};
 use agent_ebpf_sensor::bytecode_attestation::{self, EmbeddedArtifact};
+use agent_ebpf_sensor::identity_allow::{self, IdentityAllowMaps};
 use agent_ebpf_sensor::ingestion;
 use agent_ebpf_sensor::lsm_pin::{
     self, attach_and_pin_lsm_fail_closed, classify_enforcement_pins, deny_map_seed_plan,
@@ -21,13 +22,13 @@ use agent_ebpf_sensor::telemetry_stream::{self, TelemetryStreamHandle};
 use agent_ebpf_sensor::wasm_policy::WasmPolicyEngine;
 use agent_ebpf_sensor::{load_with_map_pinning, pin_root, wait_for_shutdown_signal};
 use anyhow::Context;
-use aya::maps::{Array, MapData, PerCpuArray, RingBuf};
+use aya::maps::{Array, HashMap, MapData, PerCpuArray, RingBuf};
 use aya::programs::Lsm;
 use aya::{Btf, Ebpf, EbpfLoader};
 use log::info;
 use neuromesh_common::{
-    PathDenyEntry, SecurityTelemetryEvent, TelemetryHealthStats, PATH_DENY_COUNT_MAP,
-    PATH_DENY_LIST_MAP, TELEMETRY_STATS_INDEX,
+    PathDenyEntry, SecurityTelemetryEvent, TelemetryHealthStats, IDENTITY_ALLOW_CGROUPS_MAP,
+    IDENTITY_EXCEPTIONS_VALID_MAP, PATH_DENY_COUNT_MAP, PATH_DENY_LIST_MAP, TELEMETRY_STATS_INDEX,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -160,6 +161,37 @@ async fn main() -> Result<(), anyhow::Error> {
         count: deny_count,
     };
 
+    // Slice 2a identity maps — process-lifetime only (NOT pinned). Fail-closed
+    // on agent exit: exceptions die with the process; path deny survives via pins.
+    let allow_cgroups = HashMap::<MapData, u64, u8>::try_from(
+        enforcement_bpf
+            .take_map(IDENTITY_ALLOW_CGROUPS_MAP)
+            .ok_or_else(|| {
+                anyhow::anyhow!("{IDENTITY_ALLOW_CGROUPS_MAP} map missing from eBPF object")
+            })?,
+    )?;
+    let exceptions_valid = Array::<MapData, u8>::try_from(
+        enforcement_bpf
+            .take_map(IDENTITY_EXCEPTIONS_VALID_MAP)
+            .ok_or_else(|| {
+                anyhow::anyhow!("{IDENTITY_EXCEPTIONS_VALID_MAP} map missing from eBPF object")
+            })?,
+    )?;
+    let mut identity_maps = IdentityAllowMaps {
+        allow_cgroups,
+        exceptions_valid,
+    };
+    identity_allow::set_exceptions_valid(&mut identity_maps, false)
+        .context("failed to initialize IDENTITY_EXCEPTIONS_VALID=0")?;
+    let manual_seeds = identity_allow::apply_manual_cgroup_seeds_from_env(&mut identity_maps)
+        .context("failed to apply NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS")?;
+    if !manual_seeds.is_empty() {
+        info!(
+            "⚠️ Manual identity cgroup seeds applied (lab/test): {} id(s) — VALID still requires fresh PE identity section",
+            manual_seeds.len()
+        );
+    }
+
     let active_count = lsm_pin::active_deny_count(&deny_maps)?;
     let seed_plan = deny_map_seed_plan(maps_preexisted, active_count)?;
     let policy_state = match seed_plan {
@@ -191,7 +223,8 @@ async fn main() -> Result<(), anyhow::Error> {
         enf_paths.link.display()
     );
 
-    let _policy_sync = policy_sync::spawn_policy_sync(deny_maps, policy_state, shutdown.clone());
+    let _policy_sync =
+        policy_sync::spawn_policy_sync(deny_maps, identity_maps, policy_state, shutdown.clone());
 
     let correlation_ingestion = ingestion::spawn_from_env().await;
 

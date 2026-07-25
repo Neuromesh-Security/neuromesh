@@ -150,7 +150,7 @@ func TestSPIFFEValidator_MockIdentity_OnlyWhenExplicitlyEnabled(t *testing.T) {
 	if !result.Valid {
 		t.Fatal("expected mock validation to succeed")
 	}
-	if result.Identity.String() != "spiffe://neuromesh.security/agent-ebpf-sensor" {
+	if result.Identity.String() != "spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor" {
 		t.Fatalf("unexpected identity: %s", result.Identity)
 	}
 }

@@ -1,13 +1,19 @@
-//! Periodic sync of the path-prefix deny list from zt-policy-engine.
+//! Periodic sync of the path-prefix deny list + identity exceptions from
+//! zt-policy-engine (Slice 2a schema_version 2).
 //!
 //! Fail-closed contract:
 //! - Bootstrap (pre-attach) seeds the BPF maps with the historical hardcoded set.
-//! - Sync failure leaves last-known-good map contents untouched.
+//! - Sync failure leaves last-known-good **deny** map contents untouched.
+//! - Identity exceptions: PE `expires_at` (90s TTL) — when exceeded, VALID=0 for
+//!   **ALL** exceptions (including manual seeds). No grace-period workaround.
 //! - Staleness (> [`path_deny::POLICY_STALE_AFTER`]) is logged/metric'd but never
-//!   disables enforcement.
-//! - Auth failure (Issue #55) is a sync failure: no unauthenticated retry, maps
-//!   unchanged (same STALE / last-known-good path as network errors).
+//!   disables path-deny enforcement.
+//! - Auth failure (Issue #55) is a sync failure: no unauthenticated retry.
 
+use crate::identity_allow::{
+    self, apply_identity_validity, invalidate_if_expired, IdentityAllowMaps,
+    IdentitySectionValidity,
+};
 use crate::path_deny::{
     self, apply_deny_entries, PathDenyMaps, PolicySyncState, POLICY_STALE_AFTER,
     POLICY_SYNC_INTERVAL,
@@ -15,6 +21,7 @@ use crate::path_deny::{
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -99,54 +106,85 @@ pub async fn fetch_policy_bundle(
         .context("failed to read policy-bundle body")
 }
 
-/// Fetch + apply one policy bundle. On any error, maps are left unchanged.
+/// Fetch + apply one policy bundle (deny + identity validity).
 pub async fn sync_once(
     client: &reqwest::Client,
     base_url: &str,
     bearer_token: &str,
-    maps: &mut PathDenyMaps,
+    deny_maps: &mut PathDenyMaps,
+    identity_maps: &mut IdentityAllowMaps,
     state: &mut PolicySyncState,
+    identity_expires_at: &mut Option<SystemTime>,
 ) -> Result<()> {
     let body = fetch_policy_bundle(client, base_url, bearer_token).await?;
-    let (version, entries) = path_deny::entries_from_bundle_json(&body)?;
+    let parsed = identity_allow::parse_policy_bundle_json(&body)?;
 
-    if version == state.last_version {
-        state.mark_success(version);
+    // Always refresh identity validity from the live body (expires_at advances
+    // even when content version is unchanged).
+    apply_identity_validity(identity_maps, &parsed.identity)?;
+    *identity_expires_at = match &parsed.identity {
+        IdentitySectionValidity::Fresh(s) => Some(s.expires_at),
+        IdentitySectionValidity::Invalid { .. } => None,
+    };
+
+    if parsed.version == state.last_version {
+        state.mark_success(parsed.version);
         tracing::debug!(
             target: "neuromesh::policy_sync",
             version = %state.last_version,
-            "policy bundle unchanged"
+            "policy bundle unchanged (identity TTL refreshed)"
         );
         return Ok(());
     }
 
-    apply_deny_entries(maps, &entries).context("failed to apply policy bundle to BPF maps")?;
-    state.mark_success(version);
+    let mut entries = Vec::with_capacity(parsed.deny_path_prefixes.len());
+    for prefix in &parsed.deny_path_prefixes {
+        let entry = neuromesh_common::PathDenyEntry::from_prefix(prefix.as_bytes()).ok_or_else(
+            || anyhow::anyhow!("bundle prefix {prefix:?} empty or too long"),
+        )?;
+        entries.push(entry);
+    }
+    apply_deny_entries(deny_maps, &entries).context("failed to apply policy bundle to BPF maps")?;
+    state.mark_success(parsed.version);
     tracing::info!(
         target: "neuromesh::policy_sync",
         version = %state.last_version,
         prefixes = entries.len(),
-        "applied path-prefix deny list from zt-policy-engine"
+        identity_fresh = matches!(parsed.identity, IdentitySectionValidity::Fresh(_)),
+        "applied path-prefix deny list + identity validity from zt-policy-engine"
     );
     Ok(())
 }
 
-/// Spawn the background sync loop. Errors are logged; maps keep last-known-good.
+/// Spawn the background sync loop. Errors are logged; deny maps keep last-known-good.
 pub fn spawn_policy_sync(
-    maps: PathDenyMaps,
+    deny_maps: PathDenyMaps,
+    identity_maps: IdentityAllowMaps,
     mut state: PolicySyncState,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let maps = Arc::new(Mutex::new(maps));
+    let deny_maps = Arc::new(Mutex::new(deny_maps));
+    let identity_maps = Arc::new(Mutex::new(identity_maps));
     tokio::spawn(async move {
+        let mut identity_expires_at: Option<SystemTime> = None;
+
         let base_url = match std::env::var(POLICY_ENGINE_URL_ENV) {
             Ok(url) if !url.is_empty() => url,
             _ => {
                 tracing::info!(
                     target: "neuromesh::policy_sync",
                     "NEUROMESH_ZT_POLICY_ENGINE_URL unset — policy sync disabled; \
-                     enforcing bootstrap deny list only"
+                     enforcing bootstrap deny list only; identity exceptions VALID=0"
                 );
+                {
+                    let mut id = identity_maps.lock().await;
+                    let _ = apply_identity_validity(
+                        &mut id,
+                        &IdentitySectionValidity::Invalid {
+                            reason: "policy sync disabled".into(),
+                        },
+                    );
+                }
                 loop {
                     tokio::select! {
                         _ = shutdown.cancelled() => return,
@@ -167,6 +205,15 @@ pub fn spawn_policy_sync(
                     "policy-bundle token unavailable — sync disabled; \
                      enforcing last-known-good bootstrap deny list (no unauthenticated requests)"
                 );
+                {
+                    let mut id = identity_maps.lock().await;
+                    let _ = apply_identity_validity(
+                        &mut id,
+                        &IdentitySectionValidity::Invalid {
+                            reason: "token unavailable".into(),
+                        },
+                    );
+                }
                 loop {
                     tokio::select! {
                         _ = shutdown.cancelled() => return,
@@ -199,7 +246,7 @@ pub fn spawn_policy_sync(
             %base_url,
             interval_secs = POLICY_SYNC_INTERVAL.as_secs(),
             stale_after_secs = POLICY_STALE_AFTER.as_secs(),
-            "path-prefix deny-list sync armed (authenticated)"
+            "path-prefix deny-list + identity-exception sync armed (authenticated)"
         );
 
         let mut interval = tokio::time::interval(POLICY_SYNC_INTERVAL);
@@ -209,21 +256,33 @@ pub fn spawn_policy_sync(
             tokio::select! {
                 _ = shutdown.cancelled() => return,
                 _ = interval.tick() => {
-                    let mut maps_guard = maps.lock().await;
+                    let mut deny_guard = deny_maps.lock().await;
+                    let mut id_guard = identity_maps.lock().await;
+                    // TTL gate every tick — outage past expires_at kills ALL exceptions.
+                    let _ = invalidate_if_expired(
+                        &mut id_guard,
+                        identity_expires_at,
+                        SystemTime::now(),
+                    );
                     match sync_once(
                         &client,
                         &base_url,
                         &bearer_token,
-                        &mut maps_guard,
+                        &mut deny_guard,
+                        &mut id_guard,
                         &mut state,
+                        &mut identity_expires_at,
                     )
                     .await
                     {
                         Ok(()) => {}
                         Err(error) => {
-                            // Retain last-known-good — do not clear maps.
-                            // Auth rejection is handled identically to network failure.
                             state.refresh_stale_flag();
+                            let _ = invalidate_if_expired(
+                                &mut id_guard,
+                                identity_expires_at,
+                                SystemTime::now(),
+                            );
                             if state.stale {
                                 tracing::warn!(
                                     target: "neuromesh::policy_sync",
@@ -290,8 +349,8 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
-    fn sample_bundle() -> &'static str {
-        r#"{"schema_version":1,"version":"sha256:abad1dea","deny_path_prefixes":["/tmp/","/dev/shm/","/var/tmp/"]}"#
+    fn sample_bundle_v2() -> &'static str {
+        r#"{"schema_version":2,"version":"sha256:abad1dea","deny_path_prefixes":["/tmp/","/dev/shm/","/var/tmp/"],"identity_allow_exceptions":{"scope_path_prefix":"/tmp/","spiffe_ids":["spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor"],"issued_at":"2099-01-01T00:00:00Z","expires_at":"2099-01-01T00:01:30Z"}}"#
     }
 
     #[test]
@@ -326,7 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_valid_token_returns_body() {
-        let (base, join) = spawn_stub(Some("good-token"), "HTTP/1.1 200 OK", sample_bundle());
+        let (base, join) = spawn_stub(Some("good-token"), "HTTP/1.1 200 OK", sample_bundle_v2());
         let client = reqwest::Client::new();
         let body = fetch_policy_bundle(&client, &base, "good-token")
             .await
@@ -342,7 +401,6 @@ mod tests {
     async fn fetch_missing_token_rejected_no_unauthenticated_retry() {
         let (base, join) = spawn_stub(None, "HTTP/1.1 401 Unauthorized", "unauthorized");
         let client = reqwest::Client::new();
-        // Send a token the stub ignores for body; server returns 401.
         let err = fetch_policy_bundle(&client, &base, "any-token")
             .await
             .expect_err("401");
@@ -365,8 +423,6 @@ mod tests {
         join.join().unwrap();
     }
 
-    /// Auth rejection is a sync failure: last-known-good version/state must not advance
-    /// (same contract as network errors — sync_once returns before apply/mark_success).
     #[tokio::test]
     async fn auth_rejection_retains_last_known_good_sync_state() {
         let (base, join) = spawn_stub(
@@ -386,7 +442,6 @@ mod tests {
             err.to_string().contains("retaining last-known-good"),
             "got {err}"
         );
-        // Mirror sync_once: on Err, do not call mark_success / apply_deny_entries.
         assert_eq!(state.last_version, version_before);
         assert_eq!(state.last_success, success_before);
         assert!(!state.stale);

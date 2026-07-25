@@ -171,6 +171,28 @@ pub const PATH_DENY_COUNT_MAP: &str = "PATH_DENY_COUNT";
 /// `zt-policy-engine`'s `/v1/policy-bundle` export.
 pub const BOOTSTRAP_PATH_DENY_PREFIXES: &[&[u8]] = &[b"/tmp/", b"/dev/shm/", b"/var/tmp/"];
 
+/// Max entries in `IDENTITY_ALLOW_CGROUPS` (Slice 2a). Sized for dense nodes
+/// with headroom; only allowlisted workloads are seeded (see threat-model).
+pub const IDENTITY_ALLOW_CGROUPS_MAX_ENTRIES: u32 = 4096;
+
+/// BPF map: cgroup_id → allow (`1` = excepted for `/tmp/` when VALID=1).
+pub const IDENTITY_ALLOW_CGROUPS_MAP: &str = "IDENTITY_ALLOW_CGROUPS";
+
+/// BPF map: single-slot freshness flag for identity exceptions.
+pub const IDENTITY_EXCEPTIONS_VALID_MAP: &str = "IDENTITY_EXCEPTIONS_VALID";
+
+/// Value written into `IDENTITY_ALLOW_CGROUPS` for an allowed cgroup.
+pub const IDENTITY_ALLOW_VALUE: u8 = 1;
+
+/// `IDENTITY_EXCEPTIONS_VALID[0]` when the PE identity section is fresh.
+pub const IDENTITY_EXCEPTIONS_VALID_FRESH: u8 = 1;
+
+/// `IDENTITY_EXCEPTIONS_VALID[0]` when stale/missing/invalid — no exceptions.
+pub const IDENTITY_EXCEPTIONS_VALID_STALE: u8 = 0;
+
+/// Only path prefix eligible for identity exceptions (must match PE export).
+pub const IDENTITY_EXCEPTION_SCOPE_PREFIX: &[u8] = b"/tmp/";
+
 /// One deny-list entry stored in the `PATH_DENY_LIST` BPF array.
 ///
 /// `len` is the significant byte count in `bytes` (1..=PATH_DENY_KEY_BYTES).
