@@ -116,12 +116,20 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
 | `NEUROMESH_POLICY_BUNDLE_TOKEN` | _(required)_ | Shared Bearer token for `GET /v1/policy-bundle` (Issue #55) |
 | `NEUROMESH_POLICY_BUNDLE_TOKEN_FILE` | — | Preferred: absolute path to token file (Kubernetes Secret mount) |
 
+
 ## Current limitations (honest)
 
-- `/v1/evaluate` is **not** called from the eBPF LSM hot path. Phase 1 agent sync
-  uses authenticated `GET /v1/policy-bundle` for path-prefix deny-list maps only;
-  SPIFFE-based allow-exceptions for ephemeral paths remain Phase 2 (and will apply
-  to `/tmp/` only — `/dev/shm/` and `/var/tmp/` stay hard-denied).
+- `/v1/evaluate` is **not** called from the eBPF LSM hot path. Agent sync uses
+  authenticated `GET /v1/policy-bundle` (schema_version 2) for path-prefix deny
+  maps **and** identity-allow exception metadata (`identity_allow_exceptions`).
+  Kernel exceptions apply to `/tmp/` only — `/dev/shm/` and `/var/tmp/` stay
+  hard-denied. SPIFFE IDs are path-form (`/ns/.../sa/...`).
+- Slice 2a is **not production-ready** without Slice 2b (real cgroup↔pod↔SPIFFE
+  correlator + pod-delete invalidation). Lab-only manual seeding via
+  `NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS` must never appear in
+  `deploy/kubernetes/`.
+- A PE outage past the 90s identity `expires_at` sets
+  `IDENTITY_EXCEPTIONS_VALID=0` for **all** exceptions (intentional).
 - `GET /v1/policy-bundle` requires a shared Bearer token (Issue #55). SPIFFE mTLS
   was not chosen for Slice 0 because this repo does not yet deploy SPIRE on nodes.
 - The insecure mock bypass still exists as an explicit env opt-in for local

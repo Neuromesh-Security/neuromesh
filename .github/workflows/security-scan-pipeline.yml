@@ -222,7 +222,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Build can fail before any Dockerfile RUN step when Buildx boots BuildKit
+      # and Docker Hub times out pulling the BuildKit image, e.g.:
+      #   Get "https://registry-1.docker.io/v2/": net/http: request canceled
+      #   while waiting for connection (Client.Timeout exceeded while awaiting headers)
+      # That is a registry flake — not a Go compile failure. One automatic retry
+      # absorbs the common single-timeout case (PR #79 / Issue #78 investigation).
       - name: Build Docker image
+        id: docker-build
+        continue-on-error: true
         uses: docker/build-push-action@v6
         with:
           context: apps/zt-policy-engine
@@ -231,6 +239,26 @@ jobs:
           load: true
           cache-from: type=gha,scope=neuromesh-zt-policy-engine
           cache-to: type=gha,mode=max,scope=neuromesh-zt-policy-engine
+
+      - name: Build Docker image (retry after registry timeout)
+        id: docker-build-retry
+        if: steps.docker-build.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/zt-policy-engine
+          file: apps/zt-policy-engine/Dockerfile
+          tags: neuromesh-zt-policy-engine:ci
+          load: true
+          cache-from: type=gha,scope=neuromesh-zt-policy-engine
+          cache-to: type=gha,mode=max,scope=neuromesh-zt-policy-engine
+
+      - name: Require Docker image build success
+        if: |
+          steps.docker-build.outcome != 'success' &&
+          steps.docker-build-retry.outcome != 'success'
+        run: |
+          echo "::error::neuromesh-zt-policy-engine Docker build failed after retry (check registry/BuildKit pull errors above)."
+          exit 1
 
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@v0
@@ -268,8 +296,11 @@ jobs:
           format: table
           skip-setup-trivy: true
 
+      # Only upload when Trivy actually produced SARIF (build/scan ran). Using
+      # bare `if: always()` after a skipped scan turns a registry flake into a
+      # misleading "Path does not exist: *.sarif" red herring.
       - name: Upload Trivy SARIF
-        if: always()
+        if: hashFiles('trivy-neuromesh-zt-policy-engine.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-neuromesh-zt-policy-engine.sarif

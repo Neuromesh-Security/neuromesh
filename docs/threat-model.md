@@ -185,11 +185,24 @@ SPIFFE mTLS was evaluated and deferred: this repo does not ship SPIRE on nodes t
 
 | Field | Meaning |
 |-------|---------|
-| `schema_version` | Document schema (currently `1`) |
-| `version` | Content-addressed `sha256:…` of the prefix set (changes only when prefixes change) |
-| `deny_path_prefixes` | Deny prefixes — Phase 1 set matches historical LSM defaults: `/tmp/`, `/dev/shm/`, `/var/tmp/` |
+| `schema_version` | Document schema (`2` as of Slice 2a; agent accepts `1` or `2`) |
+| `version` | Content-addressed `sha256:…` of deny prefixes + identity scope + SPIFFE IDs |
+| `deny_path_prefixes` | Deny prefixes — Phase 1 set: `/tmp/`, `/dev/shm/`, `/var/tmp/` |
+| `identity_allow_exceptions` | Slice 2a: `{ scope_path_prefix, spiffe_ids, issued_at, expires_at }` |
 
-Agent behavior (`apps/agent-ebpf-sensor/src/policy_sync.rs`, `path_deny.rs`):
+#### Slice 2a identity exceptions (schema_version 2)
+
+| Behavior | Detail |
+|----------|--------|
+| **Scope** | Exceptions apply **only** when path starts with `/tmp/` (agent rejects any other `scope_path_prefix`) |
+| **SPIFFE IDs** | Path-form only (`spiffe://{trust}/ns/{ns}/sa/{sa}`) — matches Rego + real SPIRE SVIDs |
+| **TTL** | `expires_at = issued_at + 90s` (3× sync interval). When exceeded → `IDENTITY_EXCEPTIONS_VALID=0` for **ALL** exceptions including manual seeds — **intentional, no grace period** |
+| **Kernel maps** | `IDENTITY_ALLOW_CGROUPS` (HashMap u64→u8, max 4096), `IDENTITY_EXCEPTIONS_VALID` (Array@1) — **not pinned** (die with agent) |
+| **LSM order** | deny-list hit → `/tmp/` only → VALID fresh → cgroup allow → else DENY |
+| **Manual seed** | `NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS` lab/test only; loud `SECURITY WARNING`; **absent from all `deploy/kubernetes/` manifests**. Production correlator = Slice 2b |
+| **Production readiness** | Slice 2a alone is **not** production-safe without Slice 2b (cgroup↔pod↔SPIFFE + delete watch) |
+
+Agent behavior (`apps/agent-ebpf-sensor/src/policy_sync.rs`, `path_deny.rs`, `identity_allow.rs`):
 
 | Behavior | Detail |
 |----------|--------|
@@ -285,8 +298,9 @@ Integration tests run via `cargo test -p neuromesh-integration-tests` **without*
 | LotL single-shot from whitelisted path | Medium | Requires Slow Path / Wasm (future). Planned mitigation: Wasm policy engine + Slow Path GNN correlation (currently scaffold-only, see §3). | Unassigned | Tracked in #TBD — new issue needed |
 | Agent exit tore down LSM deny (unpinned link) | High → **Mitigated (PR #72)** | **Resolved for survival:** LSM link pinned at `{NEUROMESH_BPF_PIN_ROOT}/neuromesh_lsm_exec_guard_link` and deny maps at `PATH_DENY_LIST` / `PATH_DENY_COUNT` (bpffs forbids `.` in pin basenames); pin failure aborts startup (fail-closed). Empirically verified: deny survives `kill -9` of the agent on a live BPF-LSM kernel. | Dragan Flavius (@DraganFlavius) | Closed via [#44](https://github.com/Neuromesh-Security/neuromesh/issues/44) / PR #72 |
 | Agent tampering by root | High → **Mitigated (Phase 1 + Phase 2 + on-disk path)** | **Phase 1 (PR #62):** Cosign-static-key signed bytecode manifest verified fail-closed at startup *before* any BPF load — three embedded objects (`sys_exec.bpf.o`, `network_filter.bpf.o`, LSM enforcement ELF). **Agent binary:** not in that manifest (circular by design). **Expected digest for Phase 2 / #75 (default):** the agent **self-hashes `/proc/self/exe` once when the integrity monitor arms** and remembers that value for the process lifetime — this is **not** an independent operator-published Cosign-adjacent source of truth. Optional override `NEUROMESH_AGENT_EXE_DIGEST=sha256:<hex>` exists in code but has **no** README/runbook / published digest artifact today, so production behavior is the self-baseline. **Limitation:** a self-established baseline does **not** detect day-zero compromise (binary already tampered *before* first start); it only detects **later** drift of the running inode and/or on-disk install path vs that first-start snapshot. Day-zero agent-binary provenance remains image Cosign (admission) + Phase 1 bytecode objects, not this env. **PR #72:** pinned LSM link + deny maps so exit/crash does not drop enforcement. **Phase 2 (PR #74):** periodic monitor re-hashes `/proc/self/exe` (running inode), confirms pinned LSM link via `PinnedLink::from_pin` + `FdLink::info()`, and confirms deny-map pins. **On-disk residual closed ([#75](https://github.com/Neuromesh-Security/neuromesh/issues/75)):** second independent check opens the install path **by name** (`readlink(/proc/self/exe)` at arm time, strip ` (deleted)`, or `NEUROMESH_AGENT_ON_DISK_PATH`) and compares to the same expected digest — detects `unlink`+replace that `/proc/self/exe` alone misses. Failures increment `agent_integrity_failure_total{reason=exe_digest\|on_disk_binary\|lsm_link\|pinned_map}`; default **alert + exit** (`NEUROMESH_INTEGRITY_EXIT_ON_FAILURE=true`). Evidence-only (TOCTOU between hash and exit possible). Production install path is `/usr/local/bin/agent-ebpf-sensor` (Dockerfile + DaemonSet `command`) but is resolved at runtime, not hardcoded. Does **not** stop a determined root who also controls the alert channel or re-signs with a stolen key. Live droplet scenarios in `scripts/manual_verify_runtime_integrity.sh` (pinned_map + unlink+replace) gate merge approval. | Dragan Flavius (@DraganFlavius) | Closed via [#44](https://github.com/Neuromesh-Security/neuromesh/issues/44) + [#75](https://github.com/Neuromesh-Security/neuromesh/issues/75) |
-| Unauthenticated `GET /v1/policy-bundle` | Low → **Mitigated (Slice 0)** | **Resolved for auth:** endpoint requires shared Bearer token (`NEUROMESH_POLICY_BUNDLE_TOKEN` / `_FILE`); agent never falls back to unauthenticated sync; auth failure retains last-known-good deny maps. Residual: static shared secret must be provisioned/rotated (same class as Cosign static keys) until SPIRE-based mTLS is operable in deploy. Identity allowlist content still **must not** ship until Slice 2a. | Dragan Flavius (@DraganFlavius) | Tracked in [#55](https://github.com/Neuromesh-Security/neuromesh/issues/55) |
-| Phase 2 `cgroup_id` recycling | Medium | Future Slice 2b identity maps keyed by `cgroup_id` must invalidate on pod delete (K8s watch), not TTL alone — recycled IDs could otherwise inherit stale allow. Documented in §4.5; **not implemented** in Slice 0. | Unassigned | Before Slice 2b |
+| Unauthenticated `GET /v1/policy-bundle` | Low → **Mitigated (Slice 0)** | **Resolved for auth:** endpoint requires shared Bearer token (`NEUROMESH_POLICY_BUNDLE_TOKEN` / `_FILE`); agent never falls back to unauthenticated sync; auth failure retains last-known-good deny maps. Residual: static shared secret must be provisioned/rotated (same class as Cosign static keys) until SPIRE-based mTLS is operable in deploy. Identity allowlist content ships in Slice 2a (schema_version 2) over this authenticated path. | Dragan Flavius (@DraganFlavius) | Tracked in [#55](https://github.com/Neuromesh-Security/neuromesh/issues/55) |
+| Phase 2 identity exceptions without correlator | Medium | Slice 2a ships PE export + LSM `/tmp/` exception + manual cgroup seed (lab only). **Not production-ready** until Slice 2b correlator + cgroup recycle invalidation. Manual seed env must never appear in `deploy/kubernetes/`. | Unassigned | Slice 2b |
+| Phase 2 `cgroup_id` recycling | Medium | Future Slice 2b identity maps keyed by `cgroup_id` must invalidate on pod delete (K8s watch), not TTL alone — recycled IDs could otherwise inherit stale allow. Documented in §4.5; **not implemented** in Slice 2a. | Unassigned | Before Slice 2b |
 | CI coverage gate | Low | ≥70% line coverage on core crates; Ring 0 not measured | — | — |
 
 ---

@@ -153,37 +153,20 @@ pub fn bootstrap_deny_maps(maps: &mut PathDenyMaps) -> Result<PolicySyncState> {
 }
 
 /// Parse a policy-bundle JSON body into deny entries.
+///
+/// Accepts schema_version 1 or 2 (Slice 2a). Identity section is handled by
+/// [`crate::identity_allow`]; this function only extracts deny prefixes.
 pub fn entries_from_bundle_json(body: &str) -> Result<(String, Vec<PathDenyEntry>)> {
-    #[derive(serde::Deserialize)]
-    struct BundleDoc {
-        schema_version: u32,
-        version: String,
-        deny_path_prefixes: Vec<String>,
-    }
-
-    let doc: BundleDoc = serde_json::from_str(body).context("malformed policy-bundle JSON")?;
-    if doc.schema_version != 1 {
-        bail!(
-            "unsupported policy-bundle schema_version {} (expected 1)",
-            doc.schema_version
-        );
-    }
-    if doc.version.is_empty() {
-        bail!("policy-bundle missing version");
-    }
-    if doc.deny_path_prefixes.is_empty() {
-        bail!("policy-bundle deny_path_prefixes is empty (refusing fail-open)");
-    }
-
-    let mut entries = Vec::with_capacity(doc.deny_path_prefixes.len());
-    for prefix in &doc.deny_path_prefixes {
+    let parsed = crate::identity_allow::parse_policy_bundle_json(body)?;
+    let mut entries = Vec::with_capacity(parsed.deny_path_prefixes.len());
+    for prefix in &parsed.deny_path_prefixes {
         let bytes = prefix.as_bytes();
         let entry = PathDenyEntry::from_prefix(bytes).with_context(|| {
             format!("bundle prefix {prefix:?} is empty or longer than {PATH_DENY_KEY_BYTES} bytes")
         })?;
         entries.push(entry);
     }
-    Ok((doc.version, entries))
+    Ok((parsed.version, entries))
 }
 
 #[cfg(test)]
@@ -270,6 +253,17 @@ mod tests {
     fn parse_valid_bundle() {
         let (version, entries) = entries_from_bundle_json(
             r#"{"schema_version":1,"version":"sha256:dead","deny_path_prefixes":["/tmp/","/dev/shm/","/var/tmp/"]}"#,
+        )
+        .unwrap();
+        assert_eq!(version, "sha256:dead");
+        assert_eq!(entries.len(), 3);
+        assert!(map_backed_is_blacklisted(&window("/tmp/x"), &entries));
+    }
+
+    #[test]
+    fn parse_valid_bundle_schema_v2() {
+        let (version, entries) = entries_from_bundle_json(
+            r#"{"schema_version":2,"version":"sha256:dead","deny_path_prefixes":["/tmp/","/dev/shm/","/var/tmp/"],"identity_allow_exceptions":{"scope_path_prefix":"/tmp/","spiffe_ids":["spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor"],"issued_at":"2099-01-01T00:00:00Z","expires_at":"2099-01-01T00:01:30Z"}}"#,
         )
         .unwrap();
         assert_eq!(version, "sha256:dead");

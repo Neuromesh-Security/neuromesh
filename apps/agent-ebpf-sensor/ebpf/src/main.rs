@@ -8,17 +8,19 @@ use aya_ebpf::{
         bpf_probe_read_kernel, bpf_probe_read_kernel_str_bytes,
     },
     macros::{lsm, map},
-    maps::{Array, RingBuf},
+    maps::{Array, HashMap, RingBuf},
     programs::LsmContext,
 };
-use aya_ebpf_bindings::helpers::bpf_get_current_task;
+use aya_ebpf_bindings::helpers::{bpf_get_current_cgroup_id, bpf_get_current_task};
 use aya_log_ebpf::info;
 use neuromesh_common::{
-    PathDenyEntry, CAPTURE_COMM, CAPTURE_CONTAINER_ID, CAPTURE_EUID, CAPTURE_FILENAME,
-    CAPTURE_NAMESPACE_ID, CAPTURE_PPID, ENFORCEMENT_BLOCKED, EXEC_EVENT_SCHEMA_VERSION,
-    EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE, ExecEvent, TelemetryHealthStats, MAX_ARGV_LEN,
-    MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN, PATH_DENY_KEY_BYTES,
-    PATH_DENY_MAX_ENTRIES, TELEMETRY_STATS_INDEX, UNKNOWN_SENTINEL,
+    ExecEvent, PathDenyEntry, TelemetryHealthStats, CAPTURE_COMM, CAPTURE_CONTAINER_ID,
+    CAPTURE_EUID, CAPTURE_FILENAME, CAPTURE_NAMESPACE_ID, CAPTURE_PPID, ENFORCEMENT_BLOCKED,
+    EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
+    IDENTITY_ALLOW_CGROUPS_MAX_ENTRIES, IDENTITY_ALLOW_VALUE, IDENTITY_EXCEPTIONS_VALID_FRESH,
+    IDENTITY_EXCEPTION_SCOPE_PREFIX, MAX_ARGV_LEN, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN,
+    MAX_FILENAME_LEN, PATH_DENY_KEY_BYTES, PATH_DENY_MAX_ENTRIES, TELEMETRY_STATS_INDEX,
+    UNKNOWN_SENTINEL,
 };
 
 /// LSM denial code — maps to `-EPERM` in the kernel security hook contract.
@@ -58,7 +60,7 @@ static TASK_REAL_PARENT_OFFSET: u64 = u64::MAX;
 static TASK_TGID_OFFSET: u64 = u64::MAX;
 
 #[map]
-static TELEMETRY_RINGBUF: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
+static TELEM_RINGBUF: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
 
 #[map]
 static TELEMETRY_STATS: Array<TelemetryHealthStats> = Array::with_max_entries(1, 0);
@@ -70,34 +72,74 @@ static TELEMETRY_STATS: Array<TelemetryHealthStats> = Array::with_max_entries(1,
 /// only performs a bounded array scan + `starts_with` — never a network call.
 /// `PATH_DENY_COUNT[0]` is the active entry count (capped at PATH_DENY_MAX_ENTRIES).
 #[map]
-static PATH_DENY_LIST: Array<PathDenyEntry> =
-    Array::with_max_entries(PATH_DENY_MAX_ENTRIES, 0);
+static PATH_DENY_LIST: Array<PathDenyEntry> = Array::with_max_entries(PATH_DENY_MAX_ENTRIES, 0);
 
 #[map]
 static PATH_DENY_COUNT: Array<u32> = Array::with_max_entries(1, 0);
 
+/// Slice 2a: cgroup_id → allow for `/tmp/` only when VALID is fresh.
+/// Not pinned — process-lifetime only (fail-closed on agent exit).
+#[map]
+static ID_ALLOW_CGROUP: HashMap<u64, u8> =
+    HashMap::with_max_entries(IDENTITY_ALLOW_CGROUPS_MAX_ENTRIES, 0);
+
+/// Slice 2a: ID_EXCEPT_VALID[0] == 1 only while PE identity section
+/// is within expires_at. Stale/0 → no exceptions (including manual seeds).
+#[map]
+static ID_EXCEPT_VALID: Array<u8> = Array::with_max_entries(1, 0);
+
 #[lsm(hook = "bprm_check_security")]
-pub fn neuromesh_lsm_exec_guard(ctx: LsmContext) -> i32 {
+pub fn nm_lsm_bprm(ctx: LsmContext) -> i32 {
     // Decision-critical path is fail-closed (Issue #54): any error obtaining
     // the path used for deny matching must DENY, never ALLOW. Telemetry-only
     // probes (ppid / emit_blocked_exec_event) remain best-effort elsewhere.
-    match try_neuromesh_lsm_exec_guard(ctx) {
+    match try_nm_lsm_bprm(ctx) {
         Ok(ret) => ret,
         Err(_) => LSM_DENY,
     }
 }
 
-fn try_neuromesh_lsm_exec_guard(ctx: LsmContext) -> Result<i32, i64> {
+fn try_nm_lsm_bprm(ctx: LsmContext) -> Result<i32, i64> {
     let prefix = read_bprm_path_prefix(&ctx)?;
 
     if !is_blacklisted_path(&prefix) {
         return Ok(0);
     }
 
+    // Identity exception: /tmp/ only → VALID fresh → cgroup allow.
+    // /dev/shm/ and /var/tmp/ never excepted.
+    if path_starts_with(
+        &prefix,
+        IDENTITY_EXCEPTION_SCOPE_PREFIX,
+        IDENTITY_EXCEPTION_SCOPE_PREFIX.len(),
+    ) && identity_exception_allows()
+    {
+        return Ok(0);
+    }
+
     emit_blocked_exec_event(&ctx);
-    info!(&ctx, "Neuromesh XDR: blocked execution from blacklisted path");
+    info!(
+        &ctx,
+        "Neuromesh XDR: blocked execution from blacklisted path"
+    );
 
     Ok(LSM_DENY)
+}
+
+/// Fail-closed identity exception lookup (Slice 2a). No network; map only.
+fn identity_exception_allows() -> bool {
+    let valid = match ID_EXCEPT_VALID.get(0) {
+        Some(v) => *v,
+        None => return false,
+    };
+    if valid != IDENTITY_EXCEPTIONS_VALID_FRESH {
+        return false;
+    }
+    let cg = unsafe { bpf_get_current_cgroup_id() };
+    match ID_ALLOW_CGROUP.get_ptr(&cg) {
+        Some(ptr) => unsafe { *ptr == IDENTITY_ALLOW_VALUE },
+        None => false,
+    }
 }
 
 fn init_exec_event(event: &mut ExecEvent, enforcement_action: u8) {
@@ -221,7 +263,7 @@ fn read_bprm_filename_ptr(ctx: &LsmContext) -> Result<*const u8, i64> {
 }
 
 fn emit_blocked_exec_event(ctx: &LsmContext) {
-    if let Some(mut entry) = TELEMETRY_RINGBUF.reserve::<ExecEvent>(0) {
+    if let Some(mut entry) = TELEM_RINGBUF.reserve::<ExecEvent>(0) {
         let event = unsafe { &mut *entry.as_mut_ptr() };
         init_exec_event(event, ENFORCEMENT_BLOCKED);
         populate_lineage(event);

@@ -74,6 +74,9 @@ spec:
             # Issue #55: shared bearer for GET /v1/policy-bundle (Secret mount).
             - name: NEUROMESH_POLICY_BUNDLE_TOKEN_FILE
               value: /etc/neuromesh/policy-bundle/token
+            # Slice 2a: NEVER set NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS here.
+            # That env is lab/test-only manual cgroup seeding (loud SECURITY WARNING).
+            # Production correlator is Slice 2b — not this DaemonSet.
           securityContext:
             privileged: true
             runAsUser: 0

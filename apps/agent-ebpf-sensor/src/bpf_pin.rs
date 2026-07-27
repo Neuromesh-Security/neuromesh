@@ -2,13 +2,14 @@
 
 use anyhow::{Context, Result};
 use aya::{Ebpf, EbpfLoader};
+use neuromesh_common::{PROCESS_EVENTS_MAP, RATE_LIMIT_BUCKET_MAP};
 use std::path::{Path, PathBuf};
 
 /// Default bpffs namespace for Neuromesh visibility maps.
 pub const DEFAULT_BPF_PIN_ROOT: &str = "/sys/fs/bpf/neuromesh";
 
 /// Maps persisted across agent restarts (rate limiter state + ringbuf backing store).
-pub const PINNED_PROCESS_MAPS: &[&str] = &["PROCESS_EVENTS", "RATE_LIMIT_BUCKET"];
+pub const PINNED_PROCESS_MAPS: &[&str] = &[PROCESS_EVENTS_MAP, RATE_LIMIT_BUCKET_MAP];
 
 /// Resolve the bpffs pin root from the environment or fall back to the default namespace.
 pub fn pin_root() -> PathBuf {

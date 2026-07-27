@@ -21,8 +21,8 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-pub const PROCESS_EVENTS_MAP: &str = "PROCESS_EVENTS";
-pub const SYS_EXEC_PROGRAM: &str = "neuromesh_process_events";
+pub const PROCESS_EVENTS_MAP: &str = neuromesh_common::PROCESS_EVENTS_MAP;
+pub const SYS_EXEC_PROGRAM: &str = neuromesh_common::PROCESS_EVENTS_PROG;
 
 /// Bounded queue between kernel RingBuf drain and user-space processing.
 pub const DEFAULT_PROCESS_CHANNEL_CAPACITY: usize = 8192;
@@ -44,7 +44,7 @@ pub async fn start_process_monitor(
         .context("failed to cast eBPF program to TracePoint")?;
     program
         .load()
-        .context("kernel verifier rejected neuromesh_process_events tracepoint")?;
+        .context("kernel verifier rejected nm_proc_events tracepoint")?;
     program
         .attach("syscalls", "sys_enter_execve")
         .context("failed to attach sys_enter_execve tracepoint")?;

@@ -10,12 +10,12 @@ use tracing::info;
 
 const DEFAULT_HEALTH_INTERVAL_SECS: u64 = 5;
 
-/// Sum per-CPU `RATE_LIMIT_DROPS` counters for global execve drop visibility.
+/// Sum per-CPU `RLIMIT_DROPS` counters for global execve drop visibility.
 pub fn sum_rate_limit_drops(map: &PerCpuArray<MapData, u64>) -> Result<u64> {
     const RATE_LIMIT_KEY: u32 = 0;
     let values = map
         .get(&RATE_LIMIT_KEY, 0)
-        .context("failed to read RATE_LIMIT_DROPS per-CPU values")?;
+        .context("failed to read RLIMIT_DROPS per-CPU values")?;
     Ok(values.iter().copied().sum())
 }
 
@@ -54,7 +54,7 @@ pub fn spawn_health_monitor(
                             tracing::warn!(
                                 target: "neuromesh::health",
                                 error = %error,
-                                "failed to sample RATE_LIMIT_DROPS map"
+                                "failed to sample RLIMIT_DROPS map"
                             );
                         }
                     }

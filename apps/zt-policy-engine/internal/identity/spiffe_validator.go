@@ -448,7 +448,9 @@ func (v *SPIFFEValidator) mockInternalIdentity(workload string) ValidationResult
 		workload = "agent-ebpf-sensor"
 	}
 
-	id := SPIFFEID(fmt.Sprintf("spiffe://%s/%s", v.cfg.TrustDomain, workload))
+	// Path-form matches real SPIRE K8s SVIDs and execution.rego whitelist
+	// (Slice 2a). Flat shorthand is no longer emitted.
+	id := SPIFFEID(fmt.Sprintf("spiffe://%s/ns/default/sa/%s", v.cfg.TrustDomain, workload))
 	return ValidationResult{
 		Identity: id,
 		Valid:    true,

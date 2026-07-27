@@ -72,7 +72,7 @@ static __always_inline void read_sock_dest(struct sock *sk,
 }
 
 SEC("kprobe/tcp_connect")
-int neuromesh_tcp_connect(struct pt_regs *ctx)
+int nm_tcp_connect(struct pt_regs *ctx)
 {
 	struct sock_dest_stack_t stack_sock;
 	struct network_event_t stack_event;

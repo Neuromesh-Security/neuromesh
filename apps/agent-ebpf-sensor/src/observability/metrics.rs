@@ -8,8 +8,9 @@ use std::sync::{
 };
 use std::time::Instant;
 
-/// Kernel `RATE_LIMIT_DROPS` per-CPU map name (see `sys_exec.bpf.c`).
-pub const RATE_LIMIT_DROPS_MAP: &str = "RATE_LIMIT_DROPS";
+/// Kernel `RLIMIT_DROPS` per-CPU map name (see `sys_exec.bpf.c`).
+/// Was `RATE_LIMIT_DROPS` (16 chars; exceeds BPF_OBJ_NAME_LEN-1).
+pub use neuromesh_common::RATE_LIMIT_DROPS_MAP;
 
 /// Enterprise observability counters for execve visibility and agent lifecycle.
 pub struct AgentMetrics {

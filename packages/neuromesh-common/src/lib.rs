@@ -160,16 +160,104 @@ pub const PATH_DENY_MAX_ENTRIES: u32 = 64;
 /// `PATH_PREFIX_LEN` window used for blacklist matching.
 pub const PATH_DENY_KEY_BYTES: usize = 16;
 
+/// Kernel `BPF_OBJ_NAME_LEN` is 16 (including NUL) → max usable object name length.
+///
+/// Map and program names longer than this are truncated (or rejected by bpftool
+/// name lookup). All Neuromesh BPF object names MUST be ≤ this length.
+pub const BPF_OBJ_NAME_MAX: usize = 15;
+
+/// Compile-time guard: reject BPF object names that exceed [`BPF_OBJ_NAME_MAX`].
+pub const fn bpf_obj_name(name: &'static str) -> &'static str {
+    assert!(name.len() <= BPF_OBJ_NAME_MAX);
+    name
+}
+
 /// BPF map name for the centrally-governed path-prefix deny list (enforcement object).
-pub const PATH_DENY_LIST_MAP: &str = "PATH_DENY_LIST";
+pub const PATH_DENY_LIST_MAP: &str = bpf_obj_name("PATH_DENY_LIST");
 
 /// BPF map name for the active entry count companion array (single u32 at index 0).
-pub const PATH_DENY_COUNT_MAP: &str = "PATH_DENY_COUNT";
+pub const PATH_DENY_COUNT_MAP: &str = bpf_obj_name("PATH_DENY_COUNT");
 
 /// Bootstrap / fail-closed default deny prefixes — identical to the historical
 /// hardcoded LSM set (`/tmp/`, `/dev/shm/`, `/var/tmp/`). Must stay in sync with
 /// `zt-policy-engine`'s `/v1/policy-bundle` export.
 pub const BOOTSTRAP_PATH_DENY_PREFIXES: &[&[u8]] = &[b"/tmp/", b"/dev/shm/", b"/var/tmp/"];
+
+/// Max entries in `ID_ALLOW_CGROUP` (Slice 2a). Sized for dense nodes
+/// with headroom; only allowlisted workloads are seeded (see threat-model).
+pub const IDENTITY_ALLOW_CGROUPS_MAX_ENTRIES: u32 = 4096;
+
+/// BPF map: cgroup_id → allow (`1` = excepted for `/tmp/` when VALID=1).
+/// Kernel name ≤15 (`IDENTITY_ALLOW_CGROUPS` exceeded `BPF_OBJ_NAME_LEN`).
+pub const IDENTITY_ALLOW_CGROUPS_MAP: &str = bpf_obj_name("ID_ALLOW_CGROUP");
+
+/// BPF map: single-slot freshness flag for identity exceptions.
+/// Kernel name ≤15 (`IDENTITY_EXCEPTIONS_VALID` exceeded `BPF_OBJ_NAME_LEN`).
+pub const IDENTITY_EXCEPTIONS_VALID_MAP: &str = bpf_obj_name("ID_EXCEPT_VALID");
+
+/// Value written into `ID_ALLOW_CGROUP` for an allowed cgroup.
+pub const IDENTITY_ALLOW_VALUE: u8 = 1;
+
+/// `ID_EXCEPT_VALID[0]` when the PE identity section is fresh.
+pub const IDENTITY_EXCEPTIONS_VALID_FRESH: u8 = 1;
+
+/// `ID_EXCEPT_VALID[0]` when stale/missing/invalid — no exceptions.
+pub const IDENTITY_EXCEPTIONS_VALID_STALE: u8 = 0;
+
+/// Process-visibility ringbuf (C `sys_exec.bpf.c`).
+pub const PROCESS_EVENTS_MAP: &str = bpf_obj_name("PROCESS_EVENTS");
+
+/// Per-CPU token-bucket state (C `sys_exec.bpf.c`). Was `RATE_LIMIT_BUCKET` (17).
+pub const RATE_LIMIT_BUCKET_MAP: &str = bpf_obj_name("RLIMIT_BUCKET");
+
+/// Per-CPU rate-limit drop counter (C `sys_exec.bpf.c`). Was `RATE_LIMIT_DROPS` (16).
+pub const RATE_LIMIT_DROPS_MAP: &str = bpf_obj_name("RLIMIT_DROPS");
+
+/// Filename-capture failure counter (C `sys_exec.bpf.c`). Was `CAPTURE_FAILURES` (16).
+pub const CAPTURE_FAILURES_MAP: &str = bpf_obj_name("CAPTURE_FAILS");
+
+/// Network visibility ringbuf (C `network_filter.bpf.c`).
+pub const NETWORK_EVENTS_MAP: &str = bpf_obj_name("NETWORK_EVENTS");
+
+/// Network ringbuf drop counter (C `network_filter.bpf.c`).
+pub const DROPPED_EVENTS_MAP: &str = bpf_obj_name("DROPPED_EVENTS");
+
+/// LSM enforcement telemetry ringbuf (Rust eBPF). Was `TELEMETRY_RINGBUF` (16).
+pub const TELEMETRY_RINGBUF_MAP: &str = bpf_obj_name("TELEM_RINGBUF");
+
+/// LSM telemetry health counters array (Rust eBPF).
+pub const TELEMETRY_STATS_MAP: &str = bpf_obj_name("TELEMETRY_STATS");
+
+/// LSM deny program (Rust eBPF). Was `neuromesh_lsm_exec_guard` (24).
+pub const LSM_EXEC_GUARD_PROG: &str = bpf_obj_name("nm_lsm_bprm");
+
+/// Process visibility program (C). Was `neuromesh_process_events` (24).
+pub const PROCESS_EVENTS_PROG: &str = bpf_obj_name("nm_proc_events");
+
+/// TCP connect visibility program (C). Was `neuromesh_tcp_connect` (20).
+pub const TCP_CONNECT_PROG: &str = bpf_obj_name("nm_tcp_connect");
+
+/// Every BPF map/prog object name shipped by Neuromesh (for collision lint).
+pub const ALL_BPF_OBJECT_NAMES: &[&str] = &[
+    PATH_DENY_LIST_MAP,
+    PATH_DENY_COUNT_MAP,
+    IDENTITY_ALLOW_CGROUPS_MAP,
+    IDENTITY_EXCEPTIONS_VALID_MAP,
+    PROCESS_EVENTS_MAP,
+    RATE_LIMIT_BUCKET_MAP,
+    RATE_LIMIT_DROPS_MAP,
+    CAPTURE_FAILURES_MAP,
+    NETWORK_EVENTS_MAP,
+    DROPPED_EVENTS_MAP,
+    TELEMETRY_RINGBUF_MAP,
+    TELEMETRY_STATS_MAP,
+    LSM_EXEC_GUARD_PROG,
+    PROCESS_EVENTS_PROG,
+    TCP_CONNECT_PROG,
+];
+
+/// Only path prefix eligible for identity exceptions (must match PE export).
+pub const IDENTITY_EXCEPTION_SCOPE_PREFIX: &[u8] = b"/tmp/";
 
 /// One deny-list entry stored in the `PATH_DENY_LIST` BPF array.
 ///
@@ -232,3 +320,34 @@ unsafe impl aya::Pod for TelemetryHealthStats {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for PathDenyEntry {}
+
+#[cfg(test)]
+mod bpf_obj_name_tests {
+    use super::*;
+
+    #[test]
+    fn all_bpf_object_names_fit_and_are_unique_under_truncation() {
+        let mut seen = [None; ALL_BPF_OBJECT_NAMES.len()];
+        for (i, name) in ALL_BPF_OBJECT_NAMES.iter().enumerate() {
+            assert!(
+                name.len() <= BPF_OBJ_NAME_MAX,
+                "{name:?} len {} > {BPF_OBJ_NAME_MAX}",
+                name.len()
+            );
+            let trunc = if name.len() > BPF_OBJ_NAME_MAX {
+                &name[..BPF_OBJ_NAME_MAX]
+            } else {
+                name
+            };
+            for (j, prev) in seen.iter().enumerate().take(i) {
+                if let Some(p) = prev {
+                    assert_ne!(
+                        trunc, *p,
+                        "truncation collision: {name:?} vs earlier name sharing {trunc:?} (index {j})"
+                    );
+                }
+            }
+            seen[i] = Some(trunc);
+        }
+    }
+}

@@ -3,7 +3,7 @@
 //
 // Enterprise ExecEvent v1 capture with CO-RE lineage, bounded argv probing,
 // per-CPU token-bucket rate limiting (~500k events/sec), and fail-closed
-// filename capture (discard + CAPTURE_FAILURES on probe fault).
+// filename capture (discard + CAPTURE_FAILS on probe fault).
 
 #include "vmlinux.h"
 #include <bpf/bpf_core_read.h>
@@ -41,21 +41,21 @@ struct {
 	__uint(max_entries, 1);
 	__type(key, __u32);
 	__type(value, struct rate_limit_state);
-} RATE_LIMIT_BUCKET SEC(".maps");
+} RLIMIT_BUCKET SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, __u32);
 	__type(value, __u64);
-} RATE_LIMIT_DROPS SEC(".maps");
+} RLIMIT_DROPS SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, __u32);
 	__type(value, __u64);
-} CAPTURE_FAILURES SEC(".maps");
+} CAPTURE_FAILS SEC(".maps");
 
 static __always_inline void record_counter(void *map)
 {
@@ -70,12 +70,12 @@ static __always_inline void record_counter(void *map)
 
 static __always_inline void record_rate_drop(void)
 {
-	record_counter(&RATE_LIMIT_DROPS);
+	record_counter(&RLIMIT_DROPS);
 }
 
 static __always_inline void record_capture_failure(void)
 {
-	record_counter(&CAPTURE_FAILURES);
+	record_counter(&CAPTURE_FAILS);
 }
 
 static __always_inline int rate_limit_allow(void)
@@ -86,7 +86,7 @@ static __always_inline int rate_limit_allow(void)
 	__u64 delta;
 	__u64 refill;
 
-	state = bpf_map_lookup_elem(&RATE_LIMIT_BUCKET, &key);
+	state = bpf_map_lookup_elem(&RLIMIT_BUCKET, &key);
 	if (!state)
 		return 1;
 
@@ -385,7 +385,7 @@ static __always_inline void capture_argv(struct exec_event_t *event,
 }
 
 SEC("tracepoint/syscalls/sys_enter_execve")
-int neuromesh_process_events(void *ctx)
+int nm_proc_events(void *ctx)
 {
 	struct trace_event_raw_sys_enter *trace = ctx;
 	struct exec_event_t *event;
