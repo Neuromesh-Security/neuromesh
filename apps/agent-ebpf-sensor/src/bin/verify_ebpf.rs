@@ -53,9 +53,9 @@ fn main() -> Result<()> {
 
     if let Some(program) = ebpf.program_mut(TCP_CONNECT_PROG) {
         let program: &mut KProbe = program.try_into()?;
-        program
-            .load()
-            .with_context(|| format!("kernel verifier rejected kprobe program {TCP_CONNECT_PROG}"))?;
+        program.load().with_context(|| {
+            format!("kernel verifier rejected kprobe program {TCP_CONNECT_PROG}")
+        })?;
         verified += 1;
     }
 
@@ -71,11 +71,9 @@ fn main() -> Result<()> {
         let program: &mut Lsm = program.try_into()?;
         let btf =
             Btf::from_sys_fs().context("failed to load kernel BTF (required for LSM verify)")?;
-        program
-            .load("bprm_check_security", &btf)
-            .with_context(|| {
-                format!("kernel verifier rejected LSM program {LSM_EXEC_GUARD_PROG}")
-            })?;
+        program.load("bprm_check_security", &btf).with_context(|| {
+            format!("kernel verifier rejected LSM program {LSM_EXEC_GUARD_PROG}")
+        })?;
         verified += 1;
     }
 
