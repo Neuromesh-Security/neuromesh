@@ -136,7 +136,7 @@ pub struct EnforcementPinPaths {
     pub link_tmp: PathBuf,
 }
 
-/// Attach `neuromesh_lsm_exec_guard` and pin the link under `pin_root` (fail-closed).
+/// Attach `nm_lsm_bprm` and pin the link under `pin_root` (fail-closed).
 ///
 /// Handoff: pin to `*_link_tmp`, remove prior `*_link` if present (old attach
 /// drops), rename tmp → final, then reopen. While both old and new programs may

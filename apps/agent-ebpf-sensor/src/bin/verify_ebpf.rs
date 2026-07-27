@@ -1,6 +1,6 @@
 //! Load compiled eBPF bytecode through the kernel verifier (Aya loader).
 //!
-//! For the Rust LSM enforcement object (`neuromesh_lsm_exec_guard`), this binary
+//! For the Rust LSM enforcement object (`nm_lsm_bprm`), this binary
 //! also exercises the production BTF-offset resolution path: it loads the
 //! runner's live `/sys/kernel/btf/vmlinux`, resolves
 //! `task_struct`/`linux_binprm` field offsets via
@@ -16,6 +16,7 @@ use agent_ebpf_sensor::btf_offsets::{self, ResolvedOffsets};
 use anyhow::{Context, Result};
 use aya::programs::{KProbe, Lsm, TracePoint};
 use aya::{Btf, Ebpf, EbpfLoader};
+use neuromesh_common::{LSM_EXEC_GUARD_PROG, PROCESS_EVENTS_PROG, TCP_CONNECT_PROG};
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -36,43 +37,45 @@ fn main() -> Result<()> {
     // Dropping the peek releases any maps before the real load.
     let has_lsm = {
         let peek = Ebpf::load(&data).context("failed to parse eBPF object file (peek)")?;
-        peek.program("neuromesh_lsm_exec_guard").is_some()
+        peek.program(LSM_EXEC_GUARD_PROG).is_some()
     };
 
     let mut ebpf = if has_lsm {
         load_enforcement_with_live_btf_offsets(&data)?
     } else {
         println!(
-            "[ebpf-verifier] No neuromesh_lsm_exec_guard in object — skipping BTF offset injection"
+            "[ebpf-verifier] No {LSM_EXEC_GUARD_PROG} in object — skipping BTF offset injection"
         );
         Ebpf::load(&data).context("failed to parse eBPF object file")?
     };
 
     let mut verified = 0usize;
 
-    if let Some(program) = ebpf.program_mut("neuromesh_tcp_connect") {
+    if let Some(program) = ebpf.program_mut(TCP_CONNECT_PROG) {
         let program: &mut KProbe = program.try_into()?;
         program
             .load()
-            .context("kernel verifier rejected kprobe program neuromesh_tcp_connect")?;
+            .with_context(|| format!("kernel verifier rejected kprobe program {TCP_CONNECT_PROG}"))?;
         verified += 1;
     }
 
-    if let Some(program) = ebpf.program_mut("neuromesh_process_events") {
+    if let Some(program) = ebpf.program_mut(PROCESS_EVENTS_PROG) {
         let program: &mut TracePoint = program.try_into()?;
-        program
-            .load()
-            .context("kernel verifier rejected tracepoint program neuromesh_process_events")?;
+        program.load().with_context(|| {
+            format!("kernel verifier rejected tracepoint program {PROCESS_EVENTS_PROG}")
+        })?;
         verified += 1;
     }
 
-    if let Some(program) = ebpf.program_mut("neuromesh_lsm_exec_guard") {
+    if let Some(program) = ebpf.program_mut(LSM_EXEC_GUARD_PROG) {
         let program: &mut Lsm = program.try_into()?;
         let btf =
             Btf::from_sys_fs().context("failed to load kernel BTF (required for LSM verify)")?;
         program
             .load("bprm_check_security", &btf)
-            .context("kernel verifier rejected LSM program neuromesh_lsm_exec_guard")?;
+            .with_context(|| {
+                format!("kernel verifier rejected LSM program {LSM_EXEC_GUARD_PROG}")
+            })?;
         verified += 1;
     }
 

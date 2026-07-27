@@ -64,6 +64,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Lint BPF object name lengths (BPF_OBJ_NAME_LEN)
+        run: bash scripts/lint_bpf_obj_names.sh
+
       - name: Install clang (C BPF visibility object)
         run: sudo apt-get update && sudo apt-get install -y clang llvm cmake g++ gcc build-essential pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
 
@@ -279,7 +282,7 @@ jobs:
 
       # Exercises the production BTF offset resolver against this runner's
       # live /sys/kernel/btf/vmlinux, injects offsets, then asks the kernel
-      # verifier to accept neuromesh_lsm_exec_guard. Fail-closed: any
+      # verifier to accept nm_lsm_bprm. Fail-closed: any
       # resolution failure fails this job. Does not weaken the prior
       # verifier gate — it strengthens it to cover the new startup path.
       - name: Verify Rust enforcement + live BTF offsets

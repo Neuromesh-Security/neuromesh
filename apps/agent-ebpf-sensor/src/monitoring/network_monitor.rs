@@ -13,8 +13,8 @@ use tokio::io::Interest;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-pub const NETWORK_EVENTS_MAP: &str = "NETWORK_EVENTS";
-pub const TCP_CONNECT_PROGRAM: &str = "neuromesh_tcp_connect";
+pub const NETWORK_EVENTS_MAP: &str = neuromesh_common::NETWORK_EVENTS_MAP;
+pub const TCP_CONNECT_PROGRAM: &str = neuromesh_common::TCP_CONNECT_PROG;
 
 /// Attach the C kprobe and spawn a Tokio task that drains `NETWORK_EVENTS`.
 pub async fn start_network_monitor(
@@ -30,7 +30,7 @@ pub async fn start_network_monitor(
         .context("failed to cast eBPF program to KProbe")?;
     program
         .load()
-        .context("kernel verifier rejected neuromesh_tcp_connect kprobe")?;
+        .context("kernel verifier rejected nm_tcp_connect kprobe")?;
     program
         .attach("tcp_connect", 0)
         .context("failed to attach tcp_connect kprobe")?;

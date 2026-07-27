@@ -60,7 +60,7 @@ static TASK_REAL_PARENT_OFFSET: u64 = u64::MAX;
 static TASK_TGID_OFFSET: u64 = u64::MAX;
 
 #[map]
-static TELEMETRY_RINGBUF: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
+static TELEM_RINGBUF: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
 
 #[map]
 static TELEMETRY_STATS: Array<TelemetryHealthStats> = Array::with_max_entries(1, 0);
@@ -80,26 +80,26 @@ static PATH_DENY_COUNT: Array<u32> = Array::with_max_entries(1, 0);
 /// Slice 2a: cgroup_id → allow for `/tmp/` only when VALID is fresh.
 /// Not pinned — process-lifetime only (fail-closed on agent exit).
 #[map]
-static IDENTITY_ALLOW_CGROUPS: HashMap<u64, u8> =
+static ID_ALLOW_CGROUP: HashMap<u64, u8> =
     HashMap::with_max_entries(IDENTITY_ALLOW_CGROUPS_MAX_ENTRIES, 0);
 
-/// Slice 2a: IDENTITY_EXCEPTIONS_VALID[0] == 1 only while PE identity section
+/// Slice 2a: ID_EXCEPT_VALID[0] == 1 only while PE identity section
 /// is within expires_at. Stale/0 → no exceptions (including manual seeds).
 #[map]
-static IDENTITY_EXCEPTIONS_VALID: Array<u8> = Array::with_max_entries(1, 0);
+static ID_EXCEPT_VALID: Array<u8> = Array::with_max_entries(1, 0);
 
 #[lsm(hook = "bprm_check_security")]
-pub fn neuromesh_lsm_exec_guard(ctx: LsmContext) -> i32 {
+pub fn nm_lsm_bprm(ctx: LsmContext) -> i32 {
     // Decision-critical path is fail-closed (Issue #54): any error obtaining
     // the path used for deny matching must DENY, never ALLOW. Telemetry-only
     // probes (ppid / emit_blocked_exec_event) remain best-effort elsewhere.
-    match try_neuromesh_lsm_exec_guard(ctx) {
+    match try_nm_lsm_bprm(ctx) {
         Ok(ret) => ret,
         Err(_) => LSM_DENY,
     }
 }
 
-fn try_neuromesh_lsm_exec_guard(ctx: LsmContext) -> Result<i32, i64> {
+fn try_nm_lsm_bprm(ctx: LsmContext) -> Result<i32, i64> {
     let prefix = read_bprm_path_prefix(&ctx)?;
 
     if !is_blacklisted_path(&prefix) {
@@ -128,7 +128,7 @@ fn try_neuromesh_lsm_exec_guard(ctx: LsmContext) -> Result<i32, i64> {
 
 /// Fail-closed identity exception lookup (Slice 2a). No network; map only.
 fn identity_exception_allows() -> bool {
-    let valid = match IDENTITY_EXCEPTIONS_VALID.get(0) {
+    let valid = match ID_EXCEPT_VALID.get(0) {
         Some(v) => *v,
         None => return false,
     };
@@ -136,7 +136,7 @@ fn identity_exception_allows() -> bool {
         return false;
     }
     let cg = unsafe { bpf_get_current_cgroup_id() };
-    match IDENTITY_ALLOW_CGROUPS.get_ptr(&cg) {
+    match ID_ALLOW_CGROUP.get_ptr(&cg) {
         Some(ptr) => unsafe { *ptr == IDENTITY_ALLOW_VALUE },
         None => false,
     }
@@ -263,7 +263,7 @@ fn read_bprm_filename_ptr(ctx: &LsmContext) -> Result<*const u8, i64> {
 }
 
 fn emit_blocked_exec_event(ctx: &LsmContext) {
-    if let Some(mut entry) = TELEMETRY_RINGBUF.reserve::<ExecEvent>(0) {
+    if let Some(mut entry) = TELEM_RINGBUF.reserve::<ExecEvent>(0) {
         let event = unsafe { &mut *entry.as_mut_ptr() };
         init_exec_event(event, ENFORCEMENT_BLOCKED);
         populate_lineage(event);

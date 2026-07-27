@@ -186,7 +186,7 @@ pub fn set_exceptions_valid(maps: &mut IdentityAllowMaps, fresh: bool) -> Result
     };
     maps.exceptions_valid
         .set(0, v, 0)
-        .context("failed to write IDENTITY_EXCEPTIONS_VALID[0]")?;
+        .context("failed to write ID_EXCEPT_VALID[0]")?;
     Ok(())
 }
 
@@ -194,7 +194,7 @@ pub fn set_exceptions_valid(maps: &mut IdentityAllowMaps, fresh: bool) -> Result
 pub fn seed_allow_cgroup(maps: &mut IdentityAllowMaps, cgroup_id: u64) -> Result<()> {
     maps.allow_cgroups
         .insert(cgroup_id, IDENTITY_ALLOW_VALUE, 0)
-        .with_context(|| format!("failed to insert IDENTITY_ALLOW_CGROUPS[{cgroup_id}]"))?;
+        .with_context(|| format!("failed to insert ID_ALLOW_CGROUP[{cgroup_id}]"))?;
     Ok(())
 }
 

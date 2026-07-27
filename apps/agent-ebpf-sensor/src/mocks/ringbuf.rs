@@ -23,7 +23,7 @@ impl MockRingBuf {
         self
     }
 
-    /// Drain all pending events as if polled from `TELEMETRY_RINGBUF`.
+    /// Drain all pending events as if polled from `TELEM_RINGBUF`.
     pub fn drain(&mut self) -> Vec<SecurityTelemetryEvent> {
         let drained = std::mem::take(&mut self.pending);
         self.stats.events_processed = self

@@ -17,7 +17,7 @@
 #
 # Scenarios (all required):
 #   1) Bundle stub (schema_version 2) with short expires_at serves /v1/policy-bundle
-#   2) Agent syncs → IDENTITY_EXCEPTIONS_VALID[0] == 1 (bpftool evidence)
+#   2) Agent syncs → ID_EXCEPT_VALID[0] == 1 (bpftool evidence)
 #   3) Manual seed env emits SECURITY WARNING; allow map contains seeded id
 #   4) Seeded cgroup + /tmp/ exec → ALLOW (exit 0)
 #   5) Non-seeded cgroup + /tmp/ exec → DENY (non-zero)
@@ -90,7 +90,8 @@ u64_le_hex() {
 
 read_valid_flag() {
   # Prefer JSON; fall back to text dump "value: 01".
-  if out="$(bpftool -j map dump name IDENTITY_EXCEPTIONS_VALID 2>/dev/null)"; then
+  # Map kernel name is ID_EXCEPT_VALID (≤15 chars; was IDENTITY_EXCEPTIONS_VALID).
+  if out="$(bpftool -j map dump name ID_EXCEPT_VALID 2>/dev/null)"; then
     python3 -c '
 import json,sys
 data=json.load(sys.stdin)
@@ -105,7 +106,7 @@ else:
 ' <<<"$out"
     return 0
   fi
-  bpftool map dump name IDENTITY_EXCEPTIONS_VALID 2>/dev/null \
+  bpftool map dump name ID_EXCEPT_VALID 2>/dev/null \
     | python3 -c '
 import re,sys
 for line in sys.stdin:
@@ -140,7 +141,7 @@ lookup_allow_cgroup() {
   local key
   key="$(u64_le_hex "$id")"
   # shellcheck disable=SC2086
-  bpftool map lookup name IDENTITY_ALLOW_CGROUPS key hex $key 2>/dev/null
+  bpftool map lookup name ID_ALLOW_CGROUP key hex $key 2>/dev/null
 }
 
 # Run argv inside a specific cgroup leaf (cgroup v2).
@@ -322,10 +323,14 @@ echo "== scenario 2+3: start agent (seed=${ALLOW_CG_ID}, PE=127.0.0.1:${PE_PORT}
 : >"$AGENT_LOG"
 export NEUROMESH_ZT_POLICY_ENGINE_URL="http://127.0.0.1:${PE_PORT}"
 export NEUROMESH_POLICY_BUNDLE_TOKEN="$BUNDLE_TOKEN"
+# Prefer env token for this harness — never inherit a k8s TOKEN_FILE mount.
+unset NEUROMESH_POLICY_BUNDLE_TOKEN_FILE || true
 export NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS="$ALLOW_CG_ID"
 export NEUROMESH_BPF_PIN_ROOT="$PIN_ROOT"
 # Integrity exit would abort mid-test if pins are manipulated elsewhere.
 export NEUROMESH_INTEGRITY_EXIT_ON_FAILURE="${NEUROMESH_INTEGRITY_EXIT_ON_FAILURE:-false}"
+# Sync success/failure lines are tracing::info!/warn! — default filter is error-only.
+export RUST_LOG="${RUST_LOG:-neuromesh=info,neuromesh::policy_sync=info,neuromesh::identity_allow=info}"
 
 # shellcheck disable=SC2086
 "$AGENT_BIN" >>"$AGENT_LOG" 2>&1 &
@@ -357,7 +362,7 @@ test -f "$PIN_ROOT/neuromesh_lsm_exec_guard_link" || fail "LSM link pin missing"
 if ! wait_valid_flag 1 >/dev/null; then
   echo "--- agent log (tail) ---" >&2
   tail -n 80 "$AGENT_LOG" >&2 || true
-  fail "scenario 2: IDENTITY_EXCEPTIONS_VALID did not become 1 within 90s"
+  fail "scenario 2: ID_EXCEPT_VALID did not become 1 within 90s"
 fi
 VALID_NOW="$(read_valid_flag)"
 [[ "$VALID_NOW" == "1" ]] || fail "VALID=$VALID_NOW want 1"
@@ -366,11 +371,11 @@ VALID_NOW="$(read_valid_flag)"
 grep -E "identity_fresh|applied path-prefix deny list \\+ identity validity|policy bundle unchanged \\(identity TTL refreshed\\)" \
   "$AGENT_LOG" >/dev/null \
   || fail "scenario 2: no identity sync log line in $AGENT_LOG"
-pass "scenario 2: IDENTITY_EXCEPTIONS_VALID=1 after schema_version 2 sync (bpftool+log)"
+pass "scenario 2: ID_EXCEPT_VALID=1 after schema_version 2 sync (bpftool+log)"
 
 lookup_allow_cgroup "$ALLOW_CG_ID" >/dev/null \
-  || fail "scenario 3: seeded cgroup_id $ALLOW_CG_ID missing from IDENTITY_ALLOW_CGROUPS"
-pass "scenario 3: IDENTITY_ALLOW_CGROUPS contains seeded cgroup_id=$ALLOW_CG_ID"
+  || fail "scenario 3: seeded cgroup_id $ALLOW_CG_ID missing from ID_ALLOW_CGROUP"
+pass "scenario 3: ID_ALLOW_CGROUP contains seeded cgroup_id=$ALLOW_CG_ID"
 
 # --- payloads ---
 write_payload "$PAYLOAD_TMP"
@@ -389,8 +394,8 @@ expect_deny "scenario 6b: /var/tmp/ deny despite seeded cgroup" "$CG_BASE/allow"
 
 echo "== scenario 7: TTL expiry / VALID=0 → seeded /tmp/ must DENY =="
 if [[ "$FORCE_VALID_ZERO" == "1" ]]; then
-  echo "forcing IDENTITY_EXCEPTIONS_VALID=0 via bpftool (NEUROMESH_IDENTITY_TEST_FORCE_VALID_ZERO=1)"
-  bpftool map update name IDENTITY_EXCEPTIONS_VALID key hex 00 00 00 00 value hex 00 \
+  echo "forcing ID_EXCEPT_VALID=0 via bpftool (NEUROMESH_IDENTITY_TEST_FORCE_VALID_ZERO=1)"
+  bpftool map update name ID_EXCEPT_VALID key hex 00 00 00 00 value hex 00 \
     || fail "bpftool map update VALID=0 failed"
 else
   echo "stopping bundle stub so expires_at cannot refresh; waiting for TTL (${TEST_TTL_SECS}s) + sync tick"
@@ -404,8 +409,8 @@ fi
 if ! wait_valid_flag 0 >/dev/null; then
   # If wall-clock path stalled, still try force for diagnosis then fail closed.
   echo "VALID still non-zero after wait; dumping maps" >&2
-  bpftool map dump name IDENTITY_EXCEPTIONS_VALID >&2 || true
-  fail "scenario 7: IDENTITY_EXCEPTIONS_VALID did not become 0"
+  bpftool map dump name ID_EXCEPT_VALID >&2 || true
+  fail "scenario 7: ID_EXCEPT_VALID did not become 0"
 fi
 [[ "$(read_valid_flag)" == "0" ]] || fail "VALID not 0 before deny re-check"
 expect_deny "scenario 7: /tmp/ deny after VALID=0 (same seeded cgroup)" "$CG_BASE/allow" "$PAYLOAD_TMP"
