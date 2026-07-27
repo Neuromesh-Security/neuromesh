@@ -2,10 +2,8 @@
 # Fail CI if any Neuromesh BPF map/program object name exceeds BPF_OBJ_NAME_LEN-1
 # (15 usable characters) or if two names collide under 15-char truncation.
 #
-# Sources scanned:
-#   - Rust eBPF #[map] statics + #[lsm] / pub fn program entrypoints
-#   - C SEC(".maps") map structs + SEC(...) int program symbols
-#   - neuromesh_common ALL_BPF_OBJECT_NAMES (via cargo test)
+# Uses find/grep/sed/awk only (no ripgrep) so Production CI Lint works on stock
+# ubuntu-latest runners.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,35 +13,51 @@ trap 'rm -f "$TMP"' EXIT
 
 collect() {
   # C maps: `} NAME SEC(".maps");`
-  rg -No --glob '*.c' --glob '*.h' \
-    '\}[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]+SEC\("\.maps"\)' \
-    -r '$1' "$ROOT/apps/agent-ebpf-sensor" || true
+  find "$ROOT/apps/agent-ebpf-sensor" -type f \( -name '*.c' -o -name '*.h' \) -print0 \
+    | xargs -0 grep -hE '\}[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+SEC\("\.maps"\)' 2>/dev/null \
+    | sed -E 's/.*\}[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]+SEC\("\.maps"\).*/\1/' || true
 
-  # C programs: `int NAME(` immediately after a SEC("…") line (heuristic: all
-  # `SEC("tracepoint|kprobe|…")` followed by `int name(`).
-  rg -No --glob '*.c' \
-    'SEC\("[^"]+"\)[[:space:]]*\n[[:space:]]*int[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\(' \
-    -U -r '$1' "$ROOT/apps/agent-ebpf-sensor" || true
+  # C programs: `int NAME(` on the line after `SEC("…")`
+  find "$ROOT/apps/agent-ebpf-sensor" -type f -name '*.c' -print0 \
+    | xargs -0 awk '
+        /^SEC\("/ { want=1; next }
+        want && $0 ~ /^int[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/ {
+          sub(/^int[[:space:]]+/, "", $0)
+          sub(/[[:space:]]*\(.*/, "", $0)
+          print $0
+          want=0
+          next
+        }
+        want && $0 !~ /^[[:space:]]*$/ && $0 !~ /^\/\// { want=0 }
+      ' 2>/dev/null || true
 
-  # Rust eBPF maps: `static NAME:` (after #[map] — accept all static ALL_CAPS
-  # map-like names in ebpf/src; exclude OFFSET globals via allowlist of known maps
-  # by matching HashMap/Array/RingBuf typed statics).
-  rg -No --glob '**/ebpf/src/**/*.rs' \
-    'static[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*:[[:space:]]*(RingBuf|Array|HashMap)' \
-    -r '$1' "$ROOT/apps/agent-ebpf-sensor" || true
+  # Rust eBPF maps: `static NAME: RingBuf|Array|HashMap`
+  find "$ROOT/apps/agent-ebpf-sensor/ebpf/src" -type f -name '*.rs' -print0 \
+    | xargs -0 grep -hE 'static[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*(RingBuf|Array|HashMap)' 2>/dev/null \
+    | sed -E 's/.*static[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*:.*/\1/' || true
 
-  # Rust eBPF LSM entry: `pub fn NAME(` under #[lsm(...)]
-  rg -No --glob '**/ebpf/src/**/*.rs' \
-    '#\[lsm[^\]]*\][[:space:]]*\n[[:space:]]*pub[[:space:]]+fn[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)' \
-    -U -r '$1' "$ROOT/apps/agent-ebpf-sensor" || true
+  # Rust LSM entry: `pub fn NAME` on/after `#[lsm…]`
+  find "$ROOT/apps/agent-ebpf-sensor/ebpf/src" -type f -name '*.rs' -print0 \
+    | xargs -0 awk '
+        /#\[lsm/ { want=1; next }
+        want && $0 ~ /pub[[:space:]]+fn[[:space:]]+[A-Za-z_]/ {
+          line=$0
+          sub(/.*pub[[:space:]]+fn[[:space:]]+/, "", line)
+          sub(/[[:space:]]*\(.*/, "", line)
+          print line
+          want=0
+          next
+        }
+        want && $0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*\/\// && $0 !~ /^[[:space:]]*#/ { want=0 }
+      ' 2>/dev/null || true
 
-  # Central string constants in neuromesh-common (bpf_obj_name("…") / MAP/PROG).
-  rg -No --glob '**/neuromesh-common/src/lib.rs' \
-    'bpf_obj_name\("([A-Za-z_][A-Za-z0-9_]*)"\)' \
-    -r '$1' "$ROOT/packages" || true
+  # Central string constants: bpf_obj_name("NAME")
+  find "$ROOT/packages/neuromesh-common/src" -type f -name '*.rs' -print0 \
+    | xargs -0 grep -ohE 'bpf_obj_name\("[A-Za-z_][A-Za-z0-9_]*"\)' 2>/dev/null \
+    | sed -E 's/bpf_obj_name\("([A-Za-z_][A-Za-z0-9_]*)"\)/\1/' || true
 }
 
-collect | sort -u >"$TMP"
+collect | sed '/^$/d' | sort -u >"$TMP"
 
 if [[ ! -s "$TMP" ]]; then
   echo "ERROR: lint_bpf_obj_names found zero BPF object names — scanner broken?" >&2
@@ -70,8 +84,6 @@ while IFS= read -r name; do
   trunc_owner[$trunc]="$name"
 done <"$TMP"
 
-# Required names that must appear (guards against accidental rename drift /
-# scanner missing a source).
 required=(
   PATH_DENY_LIST
   PATH_DENY_COUNT
@@ -96,7 +108,6 @@ for want in "${required[@]}"; do
   fi
 done
 
-# Forbid known over-length legacy names if they reappear.
 legacy=(
   IDENTITY_ALLOW_CGROUPS
   IDENTITY_EXCEPTIONS_VALID
