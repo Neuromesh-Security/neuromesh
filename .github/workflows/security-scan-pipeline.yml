@@ -156,7 +156,7 @@ jobs:
           config: p/ci
 
   sast-gosec:
-    name: SAST — Go (gosec) (work: ${{ matrix.module }})
+    name: "SAST — Go (gosec) (work: ${{ matrix.module }})"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: detect-changes
