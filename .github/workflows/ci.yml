@@ -93,18 +93,8 @@ jobs:
             CORE=false
             REASON="workflow_dispatch force_core=false"
           else
-            CORE="$(python3 - <<'PY'
-import json, os
-all_files = json.loads(os.environ.get("ALL_FILES") or "[]")
-non_core = set(json.loads(os.environ.get("NON_CORE_FILES") or "[]"))
-# core=true unless every changed file is under the non-core allowlist
-# (same semantics as former paths-ignore).
-if not all_files:
-    print("false")
-else:
-    print("true" if any(f not in non_core for f in all_files) else "false")
-PY
-)"
+            # Avoid YAML-breaking heredocs: one-liner compares all vs non_core file lists.
+            CORE="$(python3 -c 'import json,os; a=json.loads(os.environ.get("ALL_FILES") or "[]"); n=set(json.loads(os.environ.get("NON_CORE_FILES") or "[]")); print("true" if a and any(f not in n for f in a) else "false")')"
             REASON="dorny list-files: core unless only apps/ai-threat-detector|security-dashboard paths changed"
           fi
           echo "core=${CORE}" >> "$GITHUB_OUTPUT"
