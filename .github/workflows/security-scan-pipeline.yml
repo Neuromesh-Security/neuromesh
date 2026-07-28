@@ -1,26 +1,31 @@
 name: Security Scan Pipeline
 
+# Required-check gate pattern (Fortune-500): always run on PR/push to main;
+# expensive SAST/SBOM work is path-conditional; gate jobs always report.
+# Nightly schedule always treats core=true (full sweep).
+
 on:
   push:
-    branches: [main]
-    # Non-core services (see experimental-ci.yml) have their own,
-    # independent SAST/SBOM/Trivy pipeline -- see sast-bandit and
-    # supply-chain notes below. A push/PR touching ONLY those paths must
-    # not trigger this core workflow at all.
-    paths-ignore:
-      - apps/ai-threat-detector/**
-      - apps/security-dashboard/**
+    branches:
+      - main
+      - "test/ci-gate-scenario/**"
   pull_request:
-    branches: [main]
-    paths-ignore:
-      - apps/ai-threat-detector/**
-      - apps/security-dashboard/**
-  # The nightly schedule is intentionally NOT path-filtered (schedule
-  # triggers ignore paths-ignore/paths entirely) -- it always does a full
-  # repo sweep regardless of what changed, which is correct for a
-  # scheduled security scan.
+    branches:
+      - main
+      - fix/ci-required-check-gates
   schedule:
     - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force_core:
+        description: "Override path detection (auto | true | false)"
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - true
+          - false
 
 concurrency:
   group: security-scan-${{ github.workflow }}-${{ github.ref }}
@@ -29,6 +34,7 @@ concurrency:
 permissions:
   contents: read
   security-events: write
+  pull-requests: read
 
 env:
   GO_VERSION: "1.25.12"
@@ -37,10 +43,65 @@ env:
   # experimental-ci.yml, which declares its own PYTHON_VERSION.
 
 jobs:
+  detect-changes:
+    name: Detect core path changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      core: ${{ steps.resolve.outputs.core }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Paths filter
+        id: filter
+        if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.force_core == 'auto')
+        uses: dorny/paths-filter@v3
+        with:
+          list-files: json
+          filters: |
+            non_core:
+              - 'apps/ai-threat-detector/**'
+              - 'apps/security-dashboard/**'
+            all:
+              - '**'
+
+      - name: Resolve core flag
+        id: resolve
+        env:
+          ALL_FILES: ${{ steps.filter.outputs.all_files }}
+          NON_CORE_FILES: ${{ steps.filter.outputs.non_core_files }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            CORE=true
+            REASON="nightly schedule — full repo sweep"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_core }}" = "true" ]; then
+            CORE=true
+            REASON="workflow_dispatch force_core=true"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_core }}" = "false" ]; then
+            CORE=false
+            REASON="workflow_dispatch force_core=false"
+          else
+            CORE="$(python3 -c 'import json,os; a=json.loads(os.environ.get("ALL_FILES") or "[]"); n=set(json.loads(os.environ.get("NON_CORE_FILES") or "[]")); print("true" if a and any(f not in n for f in a) else "false")')"
+            REASON="dorny list-files: core unless only apps/ai-threat-detector|security-dashboard paths changed"
+          fi
+          echo "core=${CORE}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Detect core path changes"
+            echo ""
+            echo "- **core:** \`${CORE}\`"
+            echo "- **reason:** ${REASON}"
+            echo "- **all_files:** \`${ALL_FILES}\`"
+            echo "- **non_core_files:** \`${NON_CORE_FILES}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   filesystem-trivy:
     name: Trivy — Filesystem
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: detect-changes
+    if: needs.detect-changes.outputs.core == 'true'
     permissions:
       contents: read
       security-events: write
@@ -90,6 +151,8 @@ jobs:
     name: Semgrep — Static Analysis
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: detect-changes
+    if: needs.detect-changes.outputs.core == 'true'
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -100,9 +163,11 @@ jobs:
           config: p/ci
 
   sast-gosec:
-    name: SAST — Go (gosec)
+    name: "SAST — Go (gosec) (work: ${{ matrix.module }})"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: detect-changes
+    if: needs.detect-changes.outputs.core == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -143,6 +208,8 @@ jobs:
     name: SAST — Rust (cargo-audit)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: detect-changes
+    if: needs.detect-changes.outputs.core == 'true'
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -163,6 +230,8 @@ jobs:
     name: SAST — Rust (cargo-deny)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: detect-changes
+    if: needs.detect-changes.outputs.core == 'true'
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -210,11 +279,13 @@ jobs:
     # sast-bandit note above. Its SBOM/Trivy container scan runs in
     # experimental-ci.yml, independent of these core-only prerequisites.
     needs:
+      - detect-changes
       - filesystem-trivy
       - semgrep
       - sast-gosec
       - sast-cargo-audit
       - sast-cargo-deny
+    if: needs.detect-changes.outputs.core == 'true'
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -311,11 +382,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs:
+      - detect-changes
       - filesystem-trivy
       - semgrep
       - sast-gosec
       - sast-cargo-audit
       - sast-cargo-deny
+    if: needs.detect-changes.outputs.core == 'true'
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -375,3 +448,87 @@ jobs:
         with:
           sarif_file: trivy-neuromesh-agent-ebpf-sensor.sarif
           category: trivy-neuromesh-agent-ebpf-sensor
+
+  # ---------------------------------------------------------------------------
+  # Required-check gates (branch protection points here)
+  # ---------------------------------------------------------------------------
+  gate-gosec-zt-policy-engine:
+    name: SAST — Go (gosec) (apps/zt-policy-engine)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [detect-changes, sast-gosec]
+    if: always() && needs.detect-changes.result == 'success'
+    steps:
+      - name: Resolve gosec zt-policy-engine required check
+        env:
+          CORE: ${{ needs.detect-changes.outputs.core }}
+          WORK: ${{ needs.sast-gosec.result }}
+        run: |
+          set -euo pipefail
+          if [ "$CORE" != "true" ]; then
+            {
+              echo "## SAST — Go (gosec) (apps/zt-policy-engine) — not applicable to this change"
+              echo ""
+              echo "No core paths changed. gosec matrix was skipped."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "## SAST — Go (gosec) (apps/zt-policy-engine) — mirroring sast-gosec matrix (result=\`${WORK}\`)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$WORK" != "success" ]; then
+            echo "::error::sast-gosec matrix did not succeed (result=${WORK})"
+            exit 1
+          fi
+
+  gate-gosec-k8s-admission-webhook:
+    name: SAST — Go (gosec) (apps/k8s-admission-webhook)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [detect-changes, sast-gosec]
+    if: always() && needs.detect-changes.result == 'success'
+    steps:
+      - name: Resolve gosec k8s-admission-webhook required check
+        env:
+          CORE: ${{ needs.detect-changes.outputs.core }}
+          WORK: ${{ needs.sast-gosec.result }}
+        run: |
+          set -euo pipefail
+          if [ "$CORE" != "true" ]; then
+            {
+              echo "## SAST — Go (gosec) (apps/k8s-admission-webhook) — not applicable to this change"
+              echo ""
+              echo "No core paths changed. gosec matrix was skipped."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "## SAST — Go (gosec) (apps/k8s-admission-webhook) — mirroring sast-gosec matrix (result=\`${WORK}\`)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$WORK" != "success" ]; then
+            echo "::error::sast-gosec matrix did not succeed (result=${WORK})"
+            exit 1
+          fi
+
+  gate-gosec:
+    name: gosec
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [detect-changes, sast-gosec]
+    if: always() && needs.detect-changes.result == 'success'
+    steps:
+      - name: Resolve aggregate gosec required check
+        env:
+          CORE: ${{ needs.detect-changes.outputs.core }}
+          WORK: ${{ needs.sast-gosec.result }}
+        run: |
+          set -euo pipefail
+          if [ "$CORE" != "true" ]; then
+            {
+              echo "## gosec — not applicable to this change"
+              echo ""
+              echo "No core paths changed. gosec matrix was skipped."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "## gosec — mirroring sast-gosec matrix (result=\`${WORK}\`)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$WORK" != "success" ]; then
+            echo "::error::sast-gosec matrix did not succeed (result=${WORK})"
+            exit 1
+          fi
