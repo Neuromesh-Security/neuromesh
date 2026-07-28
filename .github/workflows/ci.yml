@@ -63,21 +63,27 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Same semantics as the former paths-ignore on ai-threat-detector /
-      # security-dashboard: core=true unless EVERY changed file is non-core.
+      # Explicit non-core vs everything-else. Do NOT use `**` + `!exclude`
+      # in one filter: dorny/micromatch still matched ai-threat-detector paths
+      # as core=true under that pattern (observed on PR #84).
       - name: Paths filter
         id: filter
         if: github.event_name != 'workflow_dispatch' || inputs.force_core == 'auto'
         uses: dorny/paths-filter@v3
         with:
+          list-files: json
           filters: |
-            core:
+            non_core:
+              - 'apps/ai-threat-detector/**'
+              - 'apps/security-dashboard/**'
+            all:
               - '**'
-              - '!apps/ai-threat-detector/**'
-              - '!apps/security-dashboard/**'
 
       - name: Resolve core flag
         id: resolve
+        env:
+          ALL_FILES: ${{ steps.filter.outputs.all_files }}
+          NON_CORE_FILES: ${{ steps.filter.outputs.non_core_files }}
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_core }}" = "true" ]; then
@@ -87,8 +93,19 @@ jobs:
             CORE=false
             REASON="workflow_dispatch force_core=false"
           else
-            CORE="${{ steps.filter.outputs.core }}"
-            REASON="dorny/paths-filter (core unless only non-core paths changed)"
+            CORE="$(python3 - <<'PY'
+import json, os
+all_files = json.loads(os.environ.get("ALL_FILES") or "[]")
+non_core = set(json.loads(os.environ.get("NON_CORE_FILES") or "[]"))
+# core=true unless every changed file is under the non-core allowlist
+# (same semantics as former paths-ignore).
+if not all_files:
+    print("false")
+else:
+    print("true" if any(f not in non_core for f in all_files) else "false")
+PY
+)"
+            REASON="dorny list-files: core unless only apps/ai-threat-detector|security-dashboard paths changed"
           fi
           echo "core=${CORE}" >> "$GITHUB_OUTPUT"
           {
@@ -96,6 +113,8 @@ jobs:
             echo ""
             echo "- **core:** \`${CORE}\`"
             echo "- **reason:** ${REASON}"
+            echo "- **all_files:** \`${ALL_FILES}\`"
+            echo "- **non_core_files:** \`${NON_CORE_FILES}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   lint:
