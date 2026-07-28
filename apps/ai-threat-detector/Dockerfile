@@ -32,3 +32,5 @@ ENV PYTHONUNBUFFERED=1 \
 CMD ["python", "main.py"]
 
 LABEL org.opencontainers.image.source=https://github.com/Neuromesh-Security/neuromesh
+
+# ci-gate dual-scenario non-core-v2 proof
