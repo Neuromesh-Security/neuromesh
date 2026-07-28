@@ -351,3 +351,5 @@ mod bpf_obj_name_tests {
         }
     }
 }
+
+// ci-gate dual-scenario: core path touch
