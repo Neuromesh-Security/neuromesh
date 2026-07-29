@@ -3,9 +3,12 @@
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 ![Version](https://img.shields.io/badge/Version-v0.1.0--core-blue.svg)
 ![Architecture](https://img.shields.io/badge/Architecture-eBPF%20%7C%20Wasm%20%7C%20GNN-success.svg)
+[![Live site](https://img.shields.io/badge/Live%20site-neuromesh--security.netlify.app-00C7B7.svg)](https://neuromesh-security.netlify.app/)
 
 > **Kernel-native runtime security for Linux and Kubernetes.**
 > Ring 0 eBPF telemetry, synchronous LSM enforcement, and asynchronous AI correlation — engineered for production SOCs, not slide decks.
+
+**Live site / demo:** [https://neuromesh-security.netlify.app/](https://neuromesh-security.netlify.app/)
 
 ---
 
@@ -123,6 +126,31 @@ Neuromesh separates security into two layers with explicit latency contracts:
 
 ---
 
+## Security Verification
+
+The following claims are from **internal engineering verification** on a real Ubuntu 24.04 Linux kernel with BPF LSM enabled. They are **not** a third-party security audit, certification, or external assessment.
+
+Reproducible evidence lives in-repo:
+
+| Evidence | Script / reference |
+|----------|-------------------|
+| LSM enforcement survives agent death | [`scripts/manual_verify_lsm_pin.sh`](scripts/manual_verify_lsm_pin.sh) — [Issue #44](https://github.com/Neuromesh-Security/neuromesh/issues/44) / [PR #72](https://github.com/Neuromesh-Security/neuromesh/pull/72) |
+| Runtime tamper detection of pinned artifacts | [`scripts/manual_verify_runtime_integrity.sh`](scripts/manual_verify_runtime_integrity.sh) — [PR #74](https://github.com/Neuromesh-Security/neuromesh/pull/74) / [PR #76](https://github.com/Neuromesh-Security/neuromesh/pull/76) |
+
+**What was verified live (not unit-test-only):**
+
+1. **Kernel LSM enforcement survives agent process termination.** With the LSM link and deny maps pinned under bpffs, blacklisted-path execution remained denied after `kill -9` of the agent process. Enforcement is kernel-resident for the pinned lifetime; it does not depend on the user-space orchestrator staying alive. Proven on a live BPF-LSM kernel via the manual pin script above (Issue #44 / PR #72).
+
+2. **Runtime tamper detection of pinned enforcement artifacts.** Post-start removal of a pinned deny-map artifact is detected by the integrity monitor and surfaced (metrics / alert path) within the configured integrity interval. Verified live via the runtime integrity script (PR #74 / PR #76).
+
+**Scope limits (read before treating this as a procurement claim):**
+
+- These results are **operator-reproducible engineering checks**, not an external audit.
+- They cover the specific failure modes exercised by the scripts above (pin survival after abrupt agent death; detection of post-start pin / on-disk path manipulation). They do not imply complete coverage of every residual risk in [`docs/threat-model.md`](docs/threat-model.md).
+- Identity-exception work (Slice 2a) is **out of scope for “verified production-ready” claims here**: Slice 2a alone is **not** production-safe without Slice 2b (cgroup↔pod↔SPIFFE correlator and recycle invalidation). See the threat model.
+
+---
+
 ## Open Core Model
 
 Neuromesh follows an **Open Core** strategy: the runtime sensor and deterministic detection logic are Apache 2.0; AI-driven anomaly detection, enterprise integrations, and fleet operations are commercial.
@@ -157,7 +185,7 @@ Neuromesh follows an **Open Core** strategy: the runtime sensor and deterministi
 | OIDC / SAML SSO, audited admin dashboards | Partial — RBAC, session verification, and structured access-decision logging are implemented (`security-dashboard/src/middleware.ts`, `src/lib/auth/rbac.ts`); the OIDC/SAML authentication handshake (callback endpoint, authorization-code/token exchange) is not yet implemented. |
 | 24×7 SLA, dedicated TAM, custom MITRE detection packs | Yes |
 
-**Pricing:** [sales@neuromesh.security](mailto:sales@neuromesh.security)
+**Pricing:** [draganflaviusfx@gmail.com](mailto:draganflaviusfx@gmail.com)
 
 ---
 
