@@ -35,7 +35,7 @@ members.
 ### How to Report
 
 1. **Do not** open a public GitHub issue for security vulnerabilities.
-2. Email **security@neuromesh.security** with:
+2. Email **draganflaviusfx@gmail.com** with:
    - A clear description of the vulnerability and affected component
    - Steps to reproduce (proof-of-concept, logs, or minimal test case)
    - Impact assessment (confidentiality, integrity, availability)
@@ -77,8 +77,8 @@ resolve the issue quickly.
 
 ## Security Contacts
 
-- **Vulnerability reports:** security@neuromesh.security
-- **General security inquiries:** security@neuromesh.security
+- **Vulnerability reports:** draganflaviusfx@gmail.com
+- **General security inquiries:** draganflaviusfx@gmail.com
 
 ---
 
