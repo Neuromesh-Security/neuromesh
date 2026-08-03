@@ -55,7 +55,7 @@ impl TeardownWatcher {
             .watches()
             .add(path, mask)
             .with_context(|| format!("inotify add_watch {}", path.display()))?;
-        self.by_path.insert(path.to_path_buf(), wd);
+        self.by_path.insert(path.to_path_buf(), wd.clone());
         self.by_wd.insert(wd, path.to_path_buf());
         Ok(())
     }
