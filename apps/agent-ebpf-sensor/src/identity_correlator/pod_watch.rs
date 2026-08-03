@@ -97,8 +97,8 @@ impl K8sClient {
 
         let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
         if PathBuf::from(SA_CA_PATH).is_file() {
-            let ca = std::fs::read(SA_CA_PATH)
-                .with_context(|| format!("read SA CA at {SA_CA_PATH}"))?;
+            let ca =
+                std::fs::read(SA_CA_PATH).with_context(|| format!("read SA CA at {SA_CA_PATH}"))?;
             let cert = Certificate::from_pem(&ca).context("parse SA CA PEM")?;
             builder = builder.add_root_certificate(cert);
         } else {
@@ -244,11 +244,7 @@ async fn watch_loop(
                 resource_version = rv.to_string();
             }
             if ev.event_type == "DELETED" {
-                if let Some(uid) = ev
-                    .object
-                    .pointer("/metadata/uid")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(uid) = ev.object.pointer("/metadata/uid").and_then(|v| v.as_str()) {
                     if tx.send(uid.to_string()).is_err() {
                         return Ok(());
                     }
