@@ -9,10 +9,7 @@ use std::path::{Path, PathBuf};
 /// Walk `cgroup_root` depth-first; return the directory whose inode equals `cgroup_id`.
 pub fn path_for_cgroup_id(cgroup_root: &Path, cgroup_id: u64) -> Result<PathBuf> {
     if !cgroup_root.is_dir() {
-        bail!(
-            "cgroup root {} is not a directory",
-            cgroup_root.display()
-        );
+        bail!("cgroup root {} is not a directory", cgroup_root.display());
     }
     match find_inode(cgroup_root, cgroup_id)? {
         Some(p) => Ok(p),
@@ -71,7 +68,8 @@ mod tests {
 
     #[test]
     fn finds_temp_dir_inode() {
-        let dir = std::env::temp_dir().join(format!("neuromesh-cgroup-resolve-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("neuromesh-cgroup-resolve-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let leaf = dir.join("leaf");

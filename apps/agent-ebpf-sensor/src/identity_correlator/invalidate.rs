@@ -97,7 +97,10 @@ mod tests {
 
     #[test]
     fn metric_labels_stable() {
-        assert_eq!(InvalidationReason::PodDelete.as_metric_label(), "pod_delete");
+        assert_eq!(
+            InvalidationReason::PodDelete.as_metric_label(),
+            "pod_delete"
+        );
         assert_eq!(
             ResyncReason::InotifyOverflow.as_metric_label(),
             "inotify_overflow"

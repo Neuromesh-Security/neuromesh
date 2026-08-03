@@ -82,8 +82,7 @@ impl SideTable {
                 .or_default()
                 .insert(cgroup_id);
         }
-        self.by_path
-            .insert(entry.cgroup_path.clone(), cgroup_id);
+        self.by_path.insert(entry.cgroup_path.clone(), cgroup_id);
         self.by_cgroup.insert(cgroup_id, entry);
         outcome
     }
@@ -197,7 +196,9 @@ mod tests {
             t.insert(5, entry("new", "/cg/new", 5)),
             InsertOutcome::Replaced
         );
-        assert!(t.cgroup_id_for_path(std::path::Path::new("/cg/old")).is_none());
+        assert!(t
+            .cgroup_id_for_path(std::path::Path::new("/cg/old"))
+            .is_none());
         assert_eq!(
             t.cgroup_id_for_path(std::path::Path::new("/cg/new")),
             Some(5)

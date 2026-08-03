@@ -147,7 +147,7 @@ pub async fn register_seeded_cgroup(
     _state: &CorrelatorState,
     _cgroup_root: &Path,
     _cgroup_id: u64,
-    _teardown_tx: Option<&()> ,
+    _teardown_tx: Option<&()>,
 ) -> Result<SideEntry> {
     bail!("identity correlator cgroup resolve is Linux-only")
 }
@@ -341,19 +341,17 @@ async fn run_correlator(
     #[cfg(feature = "orchestrator")] metrics: Arc<crate::observability::AgentMetrics>,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    use futures::StreamExt;
-
-    // Prefer full pod-watch + teardown. If kube is unavailable (lab droplet
+    // Prefer full pod-watch + teardown. If the API is unavailable (lab droplet
     // without a cluster), keep teardown watch alone — that is the primary
     // recycle-race closer per the design decision.
-    let client = match pod_watch::connect_client().await {
+    let client = match pod_watch::K8sClient::connect().await {
         Ok(c) => Some(c),
         Err(e) => {
             tracing::error!(
                 target: "neuromesh::identity_correlator",
                 error = %e,
-                "kube client unavailable — running cgroup teardown invalidation ONLY \
-                 (Pod DELETE informer disabled). Not production-complete."
+                "Kubernetes API client unavailable — running cgroup teardown invalidation ONLY \
+                 (Pod DELETE watch disabled). Not production-complete."
             );
             None
         }
@@ -372,7 +370,6 @@ async fn run_correlator(
         )
         .await?;
     } else {
-        // Teardown-only startup: sweep missing paths + rearm watches.
         let mut to_delete = Vec::new();
         {
             let mut table = state.side_table.lock().await;
@@ -395,9 +392,13 @@ async fn run_correlator(
         metrics.record_identity_resync(ResyncReason::Startup.as_metric_label());
     }
 
-    let mut pod_stream: pod_watch::PodWatchStream = match client.clone() {
-        Some(c) => pod_watch::pod_delete_stream(c, config.node_name.clone()),
-        None => Box::pin(futures::stream::pending()),
+    let mut rx_pod_delete = match client.clone() {
+        Some(c) => Some(pod_watch::spawn_pod_delete_watch(
+            c,
+            config.node_name.clone(),
+            shutdown.clone(),
+        )),
+        None => None,
     };
 
     loop {
@@ -470,60 +471,34 @@ async fn run_correlator(
                 }
             }
 
-            ev = pod_stream.next() => {
-                let Some(ev) = ev else {
-                    // Should not happen with pending(); treat as disable.
+            uid = async {
+                match rx_pod_delete.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending::<Option<String>>().await,
+                }
+            } => {
+                let Some(uid) = uid else {
+                    rx_pod_delete = None;
                     continue;
                 };
-                match ev {
-                    Ok(event) => {
-                        if let Some(uid) = pod_watch::deleted_pod_uid(&event) {
-                            let (ids, paths) = {
-                                let mut table = state.side_table.lock().await;
-                                let removed = table.remove_by_pod(&uid);
-                                let paths: Vec<_> =
-                                    removed.iter().map(|(_, e)| e.cgroup_path.clone()).collect();
-                                let ids: Vec<_> = removed.into_iter().map(|(id, _)| id).collect();
-                                (ids, paths)
-                            };
-                            for p in paths {
-                                let _ = tx_cmd.send(TeardownCmd::Unwatch(p));
-                            }
-                            let _ = apply_invalidations(
-                                &maps,
-                                &ids,
-                                InvalidationReason::PodDelete,
-                                #[cfg(feature = "orchestrator")]
-                                Some(metrics.as_ref()),
-                            ).await;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            target: "neuromesh::identity_correlator",
-                            error = %e,
-                            "pod watch error — forcing fail-closed resync"
-                        );
-                        if let Some(ref client) = client {
-                            if let Err(re) = forced_resync(
-                                &config,
-                                client,
-                                &maps,
-                                &state,
-                                &tx_cmd,
-                                ResyncReason::WatchError,
-                                #[cfg(feature = "orchestrator")]
-                                Some(metrics.as_ref()),
-                            ).await {
-                                tracing::error!(
-                                    target: "neuromesh::identity_correlator",
-                                    error = %re,
-                                    "watch-error resync failed"
-                                );
-                            }
-                        }
-                    }
+                let (ids, paths) = {
+                    let mut table = state.side_table.lock().await;
+                    let removed = table.remove_by_pod(&uid);
+                    let paths: Vec<_> =
+                        removed.iter().map(|(_, e)| e.cgroup_path.clone()).collect();
+                    let ids: Vec<_> = removed.into_iter().map(|(id, _)| id).collect();
+                    (ids, paths)
+                };
+                for p in paths {
+                    let _ = tx_cmd.send(TeardownCmd::Unwatch(p));
                 }
+                let _ = apply_invalidations(
+                    &maps,
+                    &ids,
+                    InvalidationReason::PodDelete,
+                    #[cfg(feature = "orchestrator")]
+                    Some(metrics.as_ref()),
+                ).await;
             }
         }
     }
@@ -533,7 +508,7 @@ async fn run_correlator(
 #[cfg(target_os = "linux")]
 async fn forced_resync(
     config: &IdentityCorrelatorConfig,
-    client: &kube::Client,
+    client: &pod_watch::K8sClient,
     maps: &Arc<Mutex<IdentityAllowMaps>>,
     state: &CorrelatorState,
     tx_cmd: &tokio::sync::mpsc::UnboundedSender<TeardownCmd>,
