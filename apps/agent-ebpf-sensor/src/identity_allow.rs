@@ -198,6 +198,17 @@ pub fn seed_allow_cgroup(maps: &mut IdentityAllowMaps, cgroup_id: u64) -> Result
     Ok(())
 }
 
+/// Remove a single allowed cgroup_id (Slice 2b-i invalidation).
+///
+/// Missing keys are OK (idempotent) — the entry may already have been cleared
+/// by a racing teardown/informer path.
+pub fn remove_allow_cgroup(maps: &mut IdentityAllowMaps, cgroup_id: u64) -> Result<()> {
+    match maps.allow_cgroups.remove(&cgroup_id) {
+        Ok(()) | Err(aya::maps::MapError::KeyNotFound) => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("failed to remove ID_ALLOW_CGROUP[{cgroup_id}]")),
+    }
+}
+
 /// Parse `NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS` (comma-separated u64).
 pub fn parse_manual_cgroup_ids(raw: &str) -> Result<Vec<u64>> {
     let mut out = Vec::new();
@@ -226,8 +237,10 @@ pub fn emit_manual_seed_security_warning(ids: &[u64]) {
     eprintln!(
         "SECURITY WARNING: {IDENTITY_ALLOW_CGROUP_IDS_ENV} is set — manual identity \
          cgroup seeding is ACTIVE (lab/test only). This is NOT a production correlator \
-         (Slice 2b). Seeded cgroup_ids={ids:?}. Never set this in deploy/kubernetes/ \
-         or production. PE outage past 90s still invalidates ALL exceptions (VALID=0)."
+         (Slice 2b-ii auto-correlation). Slice 2b-i may invalidate these entries on \
+         pod/cgroup teardown. Seeded cgroup_ids={ids:?}. Never set this in \
+         deploy/kubernetes/ or production. PE outage past 90s still invalidates ALL \
+         exceptions (VALID=0)."
     );
     tracing::error!(
         target: "neuromesh::identity_allow",

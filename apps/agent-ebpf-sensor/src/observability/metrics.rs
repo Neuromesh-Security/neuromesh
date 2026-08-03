@@ -21,6 +21,12 @@ pub struct AgentMetrics {
     /// Issue #44 Phase 2 / #75 — labeled by `reason`
     /// (`exe_digest`|`on_disk_binary`|`lsm_link`|`pinned_map`).
     pub integrity_failures: CounterVec,
+    /// Slice 2b-i — labeled by `reason`
+    /// (`pod_delete`|`cgroup_teardown`|`resync_sweep`).
+    pub identity_invalidations: CounterVec,
+    /// Slice 2b-i — labeled by `reason`
+    /// (`inotify_overflow`|`startup`|`watch_error`).
+    pub identity_resyncs: CounterVec,
     userspace_drops: AtomicU64,
     started_at: Instant,
 }
@@ -56,6 +62,24 @@ impl AgentMetrics {
         )
         .context("failed to create agent_integrity_failure_total counter")?;
 
+        let identity_invalidations = CounterVec::new(
+            Opts::new(
+                "identity_correlator_invalidation_total",
+                "Slice 2b-i IDENTITY_ALLOW_CGROUPS invalidations; label reason=pod_delete|cgroup_teardown|resync_sweep",
+            ),
+            &["reason"],
+        )
+        .context("failed to create identity_correlator_invalidation_total counter")?;
+
+        let identity_resyncs = CounterVec::new(
+            Opts::new(
+                "identity_correlator_resync_total",
+                "Slice 2b-i forced correlator resyncs; label reason=inotify_overflow|startup|watch_error",
+            ),
+            &["reason"],
+        )
+        .context("failed to create identity_correlator_resync_total counter")?;
+
         registry
             .register(Box::new(events_processed.clone()))
             .context("failed to register ebpf_events_processed_total")?;
@@ -68,6 +92,12 @@ impl AgentMetrics {
         registry
             .register(Box::new(integrity_failures.clone()))
             .context("failed to register agent_integrity_failure_total")?;
+        registry
+            .register(Box::new(identity_invalidations.clone()))
+            .context("failed to register identity_correlator_invalidation_total")?;
+        registry
+            .register(Box::new(identity_resyncs.clone()))
+            .context("failed to register identity_correlator_resync_total")?;
 
         Ok(Arc::new(Self {
             registry,
@@ -75,6 +105,8 @@ impl AgentMetrics {
             events_dropped,
             uptime_seconds,
             integrity_failures,
+            identity_invalidations,
+            identity_resyncs,
             userspace_drops: AtomicU64::new(0),
             started_at: Instant::now(),
         }))
@@ -124,5 +156,25 @@ impl AgentMetrics {
 
     pub fn integrity_failure_total(&self, reason: &str) -> f64 {
         self.integrity_failures.with_label_values(&[reason]).get()
+    }
+
+    pub fn record_identity_invalidation(&self, reason: &str) {
+        self.identity_invalidations
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    pub fn identity_invalidation_total(&self, reason: &str) -> f64 {
+        self.identity_invalidations
+            .with_label_values(&[reason])
+            .get()
+    }
+
+    pub fn record_identity_resync(&self, reason: &str) {
+        self.identity_resyncs.with_label_values(&[reason]).inc();
+    }
+
+    pub fn identity_resync_total(&self, reason: &str) -> f64 {
+        self.identity_resyncs.with_label_values(&[reason]).get()
     }
 }

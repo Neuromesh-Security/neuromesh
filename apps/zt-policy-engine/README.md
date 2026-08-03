@@ -128,6 +128,9 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
   correlator + pod-delete invalidation). Lab-only manual seeding via
   `NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS` must never appear in
   `deploy/kubernetes/`.
+- Slice **2b-i** (Issue #92) adds invalidation plumbing (pod DELETE informer +
+  cgroup teardown watch). Slice **2b-ii** (automatic correlation/insert) is still
+  required before identity exceptions are production-safe.
 - A PE outage past the 90s identity `expires_at` sets
   `IDENTITY_EXCEPTIONS_VALID=0` for **all** exceptions (intentional).
 - `GET /v1/policy-bundle` requires a shared Bearer token (Issue #55). SPIFFE mTLS

@@ -1,6 +1,7 @@
 use agent_ebpf_sensor::btf_offsets::{self, ResolvedOffsets};
 use agent_ebpf_sensor::bytecode_attestation::{self, EmbeddedArtifact};
 use agent_ebpf_sensor::identity_allow::{self, IdentityAllowMaps};
+use agent_ebpf_sensor::identity_correlator::{self, CorrelatorState, IdentityCorrelatorConfig};
 use agent_ebpf_sensor::ingestion;
 use agent_ebpf_sensor::lsm_pin::{
     self, attach_and_pin_lsm_fail_closed, classify_enforcement_pins, deny_map_seed_plan,
@@ -35,6 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 const SYS_EXEC_BPF: &[u8] = include_bytes!("../target/bpf/sys_exec.bpf.o");
@@ -192,6 +194,75 @@ async fn main() -> Result<(), anyhow::Error> {
         );
     }
 
+    // Shared with policy_sync + Slice 2b-i correlator invalidation.
+    let identity_maps = Arc::new(Mutex::new(identity_maps));
+    let correlator_cfg = IdentityCorrelatorConfig::from_env()
+        .context("invalid identity correlator configuration")?;
+    let correlator_state = CorrelatorState::new();
+
+    // Metrics before correlator so invalidation counters are live from first event.
+    let metrics = AgentMetrics::new()?;
+
+    #[cfg(target_os = "linux")]
+    let _correlator = {
+        let spawned = identity_correlator::spawn_identity_correlator(
+            correlator_cfg.clone(),
+            Arc::clone(&identity_maps),
+            Arc::clone(&correlator_state),
+            Arc::clone(&metrics),
+            shutdown.clone(),
+        );
+        if let Some((handle, teardown_tx)) = spawned {
+            for id in &manual_seeds {
+                match identity_correlator::register_seeded_cgroup(
+                    &correlator_state,
+                    &correlator_cfg.cgroup_root,
+                    *id,
+                    Some(&teardown_tx),
+                )
+                .await
+                {
+                    Ok(entry) => {
+                        info!(
+                            "📋 Side-table registered seeded cgroup_id={} path={} pod_uid={:?}",
+                            id,
+                            entry.cgroup_path.display(),
+                            entry.pod_uid
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "neuromesh::identity_correlator",
+                            cgroup_id = *id,
+                            error = %e,
+                            "failed to register seeded cgroup in side table \
+                             (BPF seed remains; invalidation may be incomplete for this id)"
+                        );
+                    }
+                }
+            }
+            Some(handle)
+        } else {
+            None
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _correlator = {
+        let _ = (correlator_cfg, correlator_state, &manual_seeds);
+        identity_correlator::spawn_identity_correlator(
+            IdentityCorrelatorConfig {
+                enabled: false,
+                node_name: String::new(),
+                cgroup_root: PathBuf::from("/sys/fs/cgroup"),
+            },
+            Arc::clone(&identity_maps),
+            CorrelatorState::new(),
+            Arc::clone(&metrics),
+            shutdown.clone(),
+        );
+        Option::<()>::None
+    };
+
     let active_count = lsm_pin::active_deny_count(&deny_maps)?;
     let seed_plan = deny_map_seed_plan(maps_preexisted, active_count)?;
     let policy_state = match seed_plan {
@@ -223,14 +294,17 @@ async fn main() -> Result<(), anyhow::Error> {
         enf_paths.link.display()
     );
 
-    let _policy_sync =
-        policy_sync::spawn_policy_sync(deny_maps, identity_maps, policy_state, shutdown.clone());
+    let _policy_sync = policy_sync::spawn_policy_sync(
+        deny_maps,
+        Arc::clone(&identity_maps),
+        policy_state,
+        shutdown.clone(),
+    );
 
     let correlation_ingestion = ingestion::spawn_from_env().await;
 
     let mut process_bpf = load_with_map_pinning(SYS_EXEC_BPF, &bpf_pin_root)?;
 
-    let metrics = AgentMetrics::new()?;
     let rate_limit_drops = PerCpuArray::try_from(
         process_bpf
             .take_map(RATE_LIMIT_DROPS_MAP)
