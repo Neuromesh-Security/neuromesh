@@ -47,8 +47,6 @@ struct PodItem {
 #[derive(Debug, Deserialize)]
 struct ObjectMeta {
     uid: Option<String>,
-    #[serde(rename = "resourceVersion", default)]
-    resource_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
