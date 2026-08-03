@@ -1,8 +1,26 @@
 # Neuromesh Performance Baseline — eBPF Sensor Core
 
-**Status:** Measured (user space) · Pending live kernel validation  
+## Security Correctness — Verified Separately from Performance
+
+This document measures **throughput, latency, CPU, and drop-rate under sustained load** (Sections 1–4 below). Those load/performance figures remain **partially TBD** as documented in the tables and procedures that follow.
+
+It does **not** measure **security correctness** (whether enforcement and detection work at all). That has been **verified live, separately**, via internal engineering checks:
+
+| Verified behavior | Reference |
+|-------------------|-----------|
+| LSM enforcement survives agent `kill -9` | [Issue #44](https://github.com/Neuromesh-Security/neuromesh/issues/44) / [PR #72](https://github.com/Neuromesh-Security/neuromesh/pull/72), [`scripts/manual_verify_lsm_pin.sh`](../scripts/manual_verify_lsm_pin.sh) |
+| Runtime tamper detection of pinned enforcement artifacts | [PR #74](https://github.com/Neuromesh-Security/neuromesh/pull/74) / [PR #76](https://github.com/Neuromesh-Security/neuromesh/pull/76), [`scripts/manual_verify_runtime_integrity.sh`](../scripts/manual_verify_runtime_integrity.sh) |
+| Identity-exception allow / deny / scope / TTL correctness (all 7 scenarios) | [PR #79](https://github.com/Neuromesh-Security/neuromesh/pull/79), [`scripts/manual_verify_identity_exception.sh`](../scripts/manual_verify_identity_exception.sh) |
+
+These two categories are **independent**. Security correctness being verified does **not** close the high-throughput performance/load TBDs in this document — those require generating load near the documented EPS tier targets. Three independent live standard-tier stress runs have now been executed (see §2.3–§2.4); they validated **zero-drop correctness and two-phase agent CPU behavior at ~880–962 EPS only**, not kernel rate-limiter behavior near the 500k/CPU ceiling.
+
+For the narrative summary of the same live checks, see [Security Verification](../README.md#security-verification) in the repository README.
+
+---
+
+**Status:** Security correctness verified live (see section above) · §2.3 measured (generator-bound ~880–962 EPS, zero drops, 3 independent runs) · §2.4 measured (two-phase CPU documented; full drain-to-idle not captured) · Extreme tier / kernel rate-limiter saturation untested pending stronger hardware  
 **Release:** `v0.1.0-core`  
-**Date:** 2026-07-14  
+**Date:** 2026-08-03  
 **Component:** `apps/agent-ebpf-sensor`  
 **Harness:** [Criterion.rs](https://github.com/bheisler/criterion.rs) v0.5 (user space) · `execve_stress_test` (kernel load)  
 **Environment:** Linux x86_64, release profile
@@ -162,10 +180,29 @@ observed_drop_rate ≈ max(0, generated_eps − min(500_000, user_space_drain_ra
 
 | Load tier | Target EPS | Expected kernel drops | Expected user-space drops | Measured drop rate | Status |
 |-----------|------------|----------------------|--------------------------|-------------------|--------|
-| Below ceiling | < 100k | 0 | 0 | _TBD_ | Post-CI |
-| Standard | 100k | 0 (at limit) | 0 | _TBD_ | Post-CI |
-| Extreme | 500k+ | > 0 (by design) | 0–_TBD_ | _TBD_ | Post-CI |
-| Chaos (MPSC=64) | 100k+ | 0 | > 0 (by design) | _TBD_ | Post-CI |
+| Below ceiling | < 100k | 0 | 0 | **0%** (measured @ ~880–962 EPS, 3 runs) | Measured (live) |
+| Standard | 100k | 0 (at limit) | 0 | **0%** (measured @ ~880–962 EPS achieved; see note) | Measured at low load only |
+| Extreme | 500k+ | > 0 (by design) | 0–_TBD_ | _TBD_ | Untested — hardware cannot generate load |
+| Chaos (MPSC=64) | 100k+ | 0 | > 0 (by design) | _TBD_ | Untested |
+
+##### Live measurement note (standard tier, Ubuntu 24.04 BPF-LSM host)
+
+Three independent standard-tier harness runs (`EXECVE_STRESS_TIER=standard`, 128 workers, 30s, `/bin/true`) on a **single shared vCPU** droplet:
+
+| Signal | Observed (all three runs) |
+|--------|---------------------------|
+| Generator `average_eps` | **880–962** (`target_eps=100000`) — ≈0.9–1.0% of target |
+| Example run detail | `spawned=28868`, `failed=0`, `elapsed=30.00s`, `average_eps=962` |
+| `ebpf_events_dropped_total` | **0** throughout every run (zero kernel / MPSC drops before, during, and after) |
+| `ebpf_events_processed_total` | Tracks generator volume (example: 12 → 28897, **Δ 28885**) |
+
+**Reproducibility:** Hitting the same ~900 EPS band with **zero drops on every run** is evidence that this ceiling is a **reproducible generator-side bottleneck** on this hardware class — not a fluke and not a kernel-side drop or rate-limiter problem.
+
+**Root cause (generator-bound, not kernel-bound):** The stress harness issues blocking `Command::new("/bin/true").status()` (full `fork`+`execve`+wait) from async worker tasks. On a single shared vCPU, Tokio effectively serializes that work onto ~one runtime thread, so aggregate spawn rate saturates near ~900 EPS regardless of the 128-worker knob. The agent’s ~500k/CPU token bucket was never approached.
+
+**Interpretation (do not over-read):** These runs validate **zero-drop correctness at low–moderate load only**. They do **not** validate behavior near the **500k/CPU** token-bucket ceiling.
+
+**Still genuinely untested:** extreme tier, kernel rate-limiter drop-by-design behavior, and any procurement claim that assumes sustained ≥100k EPS through the agent. Those require a follow-up on stronger hardware capable of generating sufficient execve load; until then the corresponding rows remain real TBDs — not implied by these results.
 
 > **Graph placeholder:** `docs/assets/perf-ringbuf-drop-rate.svg` — time-series of `ebpf_events_dropped_total` / (`processed` + `dropped`) during `execve_stress_test` standard and extreme tiers.
 
@@ -182,16 +219,24 @@ EXECVE_STRESS_TIER=standard \
   cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
 ```
 
-| Scenario | Agent CPU (% of 1 core) | Agent RSS (MiB) | Node CPU delta | Status |
-|----------|----------------------|-----------------|----------------|--------|
-| Idle (no workload) | _TBD_ | _TBD_ | _TBD_ | Post-CI |
-| Standard burst (100k EPS, 30s) | _TBD_ | _TBD_ | _TBD_ | Post-CI |
-| Extreme burst (500k EPS, 60s) | _TBD_ | _TBD_ | _TBD_ | Post-CI |
-| Post-burst recovery (60s) | _TBD_ | _TBD_ | _TBD_ | Post-CI |
+##### Live measurement (standard tier, concurrent `pidstat`)
+
+`pidstat -u -p $(pgrep -x agent-ebpf-sensor) 5 60` on the same 1-vCPU droplet class (60s window, **12 samples @ 5s**), overlapping a 30s standard-tier burst:
+
+| Phase | Agent CPU (% of 1 core) | Notes | Status |
+|-------|-------------------------|-------|--------|
+| During 30s burst | **~38–41%** total (`%usr` ~38%, `%wait` ~7–9%) | Agent is **not** CPU-bound during ingest; generator spawn rate remains the limiter | Measured |
+| Immediately after burst (remainder of 60s window) | **~92–99.8%** total (`%wait` ~0%) | Near-saturated — consistent with draining a kernel-event backlog emitted during the burst, not idle | Measured |
+| Average across all 12 samples | **67.97%** `%usr` · **69.31%** total CPU | Window mixes burst + post-burst drain; do not treat as steady-state load | Measured |
+| Idle (no workload) | _TBD_ | Not sampled in these runs | Untested |
+| Extreme burst (500k EPS target) | _TBD_ | Untested — hardware cannot generate load | Untested |
+| Full drain-to-idle after burst | _TBD_ | **Unknown beyond the 60s window** — sampling ended while agent was still near-saturated; full drain duration not captured | Follow-up |
+
+**Honest limitation:** Post-burst drain duration **beyond the 60s `pidstat` window is unknown**. If precise drain-to-idle figures are ever needed for procurement, re-run with a longer `pidstat` window (or until `%CPU` returns to idle baseline).
 
 DaemonSet resource defaults (`deploy/kubernetes/neuromesh-agent.yaml`): request **100m** CPU, limit **500m** CPU, limit **512Mi** memory.
 
-> **Graph placeholder:** `docs/assets/perf-cpu-utilization.svg` — agent CPU % vs generator EPS during standard/extreme tiers.
+> **Graph placeholder:** `docs/assets/perf-cpu-utilization.svg` — agent CPU % vs generator EPS during standard/extreme tiers. Two-phase shape (moderate during burst → near-saturation during backlog drain) is the measured pattern at ~900 EPS.
 
 ---
 
@@ -337,9 +382,9 @@ Stress and live kernel benchmarks are **`#[ignore]`** — not executed in GitHub
 | How much user-space tax per exec event? | **~1 µs** (benign LSM path) |
 | Can RuleEngine keep up with production? | **>8M evaluations/sec** per core (benign) |
 | What happens above 500k execve/sec? | Kernel token bucket drops; counted in Prometheus |
-| What is unmeasured today? | Syscall latency delta, burst CPU, live drop rate — run Section 2 procedures |
+| What is unmeasured today? | Syscall latency delta; idle CPU baseline; full post-burst drain-to-idle; high-EPS / kernel rate-limiter drops (extreme). Measured: zero drops @ ~880–962 EPS (3 runs, §2.3); two-phase burst/drain CPU (§2.4) |
 | Where are graphs? | Placeholders in Section 2; populate post-CI into `docs/assets/` |
 
 ---
 
-*User-space figures measured 2026-07-12 via Criterion. Kernel end-to-end figures pending live hardware validation — re-run this document after each material change to BPF programs or monitor pipeline.*
+*User-space figures measured 2026-07-12 via Criterion. Live standard-tier load + pidstat measured 2026-08 (three independent droplet runs, ~880–962 EPS, zero drops, two-phase CPU). High-throughput kernel end-to-end figures still pending stronger hardware — re-run this document after each material change to BPF programs or monitor pipeline.*
