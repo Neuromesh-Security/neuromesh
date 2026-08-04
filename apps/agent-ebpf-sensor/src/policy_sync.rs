@@ -155,14 +155,16 @@ pub async fn sync_once(
 }
 
 /// Spawn the background sync loop. Errors are logged; deny maps keep last-known-good.
+///
+/// `identity_maps` is shared with Slice 2b-i correlator invalidation (same
+/// `Arc<Mutex<…>>`).
 pub fn spawn_policy_sync(
     deny_maps: PathDenyMaps,
-    identity_maps: IdentityAllowMaps,
+    identity_maps: Arc<Mutex<IdentityAllowMaps>>,
     mut state: PolicySyncState,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let deny_maps = Arc::new(Mutex::new(deny_maps));
-    let identity_maps = Arc::new(Mutex::new(identity_maps));
     tokio::spawn(async move {
         let mut identity_expires_at: Option<SystemTime> = None;
 

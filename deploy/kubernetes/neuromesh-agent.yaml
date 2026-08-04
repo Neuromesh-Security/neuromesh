@@ -76,7 +76,12 @@ spec:
               value: /etc/neuromesh/policy-bundle/token
             # Slice 2a: NEVER set NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS here.
             # That env is lab/test-only manual cgroup seeding (loud SECURITY WARNING).
-            # Production correlator is Slice 2b — not this DaemonSet.
+            # Production auto-correlation is Slice 2b-ii — not this DaemonSet seed.
+            # Slice 2b-i: enable invalidation correlator (pod DELETE + cgroup teardown).
+            - name: NEUROMESH_IDENTITY_CORRELATOR
+              value: "1"
+            - name: NEUROMESH_CGROUP_ROOT
+              value: /host/sys/fs/cgroup
           securityContext:
             privileged: true
             runAsUser: 0

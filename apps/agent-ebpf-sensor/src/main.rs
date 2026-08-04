@@ -1,6 +1,7 @@
 use agent_ebpf_sensor::btf_offsets::{self, ResolvedOffsets};
 use agent_ebpf_sensor::bytecode_attestation::{self, EmbeddedArtifact};
 use agent_ebpf_sensor::identity_allow::{self, IdentityAllowMaps};
+use agent_ebpf_sensor::identity_correlator::{self, CorrelatorState, IdentityCorrelatorConfig};
 use agent_ebpf_sensor::ingestion;
 use agent_ebpf_sensor::lsm_pin::{
     self, attach_and_pin_lsm_fail_closed, classify_enforcement_pins, deny_map_seed_plan,
@@ -35,6 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 const SYS_EXEC_BPF: &[u8] = include_bytes!("../target/bpf/sys_exec.bpf.o");
@@ -192,6 +194,77 @@ async fn main() -> Result<(), anyhow::Error> {
         );
     }
 
+    // Shared with policy_sync + Slice 2b-i correlator invalidation.
+    let identity_maps = Arc::new(Mutex::new(identity_maps));
+    let correlator_cfg = IdentityCorrelatorConfig::from_env()
+        .context("invalid identity correlator configuration")?;
+    let correlator_state = CorrelatorState::new();
+
+    // Metrics before correlator so invalidation counters are live from first event.
+    let metrics = AgentMetrics::new()?;
+
+    #[cfg(target_os = "linux")]
+    let _correlator = {
+        if !manual_seeds.is_empty() && !correlator_cfg.enabled {
+            anyhow::bail!(
+                "NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS is set ({} id(s) written to BPF) but \
+                 NEUROMESH_IDENTITY_CORRELATOR is disabled — side table/inotify will not arm; \
+                 teardown invalidation cannot run for lab seeds. Enable the correlator \
+                 (NEUROMESH_IDENTITY_CORRELATOR=1) or unset the manual seed env.",
+                manual_seeds.len()
+            );
+        }
+        let spawned = identity_correlator::spawn_identity_correlator(
+            correlator_cfg.clone(),
+            Arc::clone(&identity_maps),
+            Arc::clone(&correlator_state),
+            Arc::clone(&metrics),
+            shutdown.clone(),
+        );
+        if let Some((handle, teardown_tx)) = spawned {
+            // Slice 2a BPF seed alone does not inform the correlator. Bridge every
+            // manual seed into the side table + inotify watch (lab/2b-i test support).
+            if !manual_seeds.is_empty() {
+                identity_correlator::register_manual_seed_ids(
+                    &correlator_state,
+                    &correlator_cfg.cgroup_root,
+                    &manual_seeds,
+                    &teardown_tx,
+                )
+                .await
+                .context(
+                    "failed to register manual cgroup seeds with identity correlator \
+                     (BPF map was seeded; side table/inotify arming failed)",
+                )?;
+            }
+            Some(handle)
+        } else {
+            if !manual_seeds.is_empty() {
+                anyhow::bail!(
+                    "manual cgroup seeds applied to BPF but identity correlator did not start — \
+                     side table/inotify not armed; refusing to run with un-watched allow entries"
+                );
+            }
+            None
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _correlator = {
+        let _ = (correlator_cfg, correlator_state, &manual_seeds);
+        identity_correlator::spawn_identity_correlator(
+            IdentityCorrelatorConfig {
+                enabled: false,
+                node_name: String::new(),
+                cgroup_root: PathBuf::from("/sys/fs/cgroup"),
+            },
+            Arc::clone(&identity_maps),
+            CorrelatorState::new(),
+            Arc::clone(&metrics),
+            shutdown.clone(),
+        );
+        Option::<()>::None
+    };
+
     let active_count = lsm_pin::active_deny_count(&deny_maps)?;
     let seed_plan = deny_map_seed_plan(maps_preexisted, active_count)?;
     let policy_state = match seed_plan {
@@ -223,14 +296,17 @@ async fn main() -> Result<(), anyhow::Error> {
         enf_paths.link.display()
     );
 
-    let _policy_sync =
-        policy_sync::spawn_policy_sync(deny_maps, identity_maps, policy_state, shutdown.clone());
+    let _policy_sync = policy_sync::spawn_policy_sync(
+        deny_maps,
+        Arc::clone(&identity_maps),
+        policy_state,
+        shutdown.clone(),
+    );
 
     let correlation_ingestion = ingestion::spawn_from_env().await;
 
     let mut process_bpf = load_with_map_pinning(SYS_EXEC_BPF, &bpf_pin_root)?;
 
-    let metrics = AgentMetrics::new()?;
     let rate_limit_drops = PerCpuArray::try_from(
         process_bpf
             .take_map(RATE_LIMIT_DROPS_MAP)

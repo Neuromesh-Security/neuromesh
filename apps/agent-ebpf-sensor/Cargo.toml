@@ -67,6 +67,12 @@ base64 = "0.22"
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"] }
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "pkcs8", "pem", "rand_core"] }
 
+# Slice 2b-i: cgroup teardown watch (Linux). Pod watch uses existing reqwest —
+# intentionally NOT the `kube` crate (unmaintained backoff/instant/rustls-pemfile).
+[target.'cfg(target_os = "linux")'.dependencies]
+inotify = { version = "0.11", default-features = false }
+libc = "0.2"
+
 [package.metadata.coverage]
 minimum-line-coverage = 70
 
