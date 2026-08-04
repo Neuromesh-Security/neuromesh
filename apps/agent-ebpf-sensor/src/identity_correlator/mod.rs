@@ -1,28 +1,36 @@
-//! Slice 2b-i: identity-allow **invalidation** correlator.
+//! Slice 2b identity correlator: invalidation (2b-i) + auto-insert (2b-ii-A).
 //!
-//! - Populates a side table at manual seed / insert time.
-//! - Invalidates `IDENTITY_ALLOW_CGROUPS` on Pod DELETE (node-local informer)
-//!   and on cgroup directory teardown (inotify).
-//! - Does **not** auto-correlate / auto-insert (that is Slice 2b-ii).
+//! - Populates a side table at manual seed / auto-insert time.
+//! - Invalidates `IDENTITY_ALLOW_CGROUPS` on Pod DELETE, cgroup teardown, and
+//!   PE allowlist revoke.
+//! - Slice **2b-ii-A** auto-correlates container cgroup ids ∩ PE `spiffe_ids`.
 //!
 //! Enable with `NEUROMESH_IDENTITY_CORRELATOR=1` and `NEUROMESH_NODE_NAME`.
+//! Do **not** claim production-safe until 2b-ii-C live verification.
 
+mod allowlist;
+mod container_match;
 mod invalidate;
 mod path_parse;
+mod reconcile;
 mod side_table;
+mod spiffe;
 
 #[cfg(target_os = "linux")]
 mod cgroup_resolve;
-#[cfg(target_os = "linux")]
 mod pod_watch;
 #[cfg(target_os = "linux")]
 mod teardown_watch;
 
+pub use allowlist::PeAllowlistCache;
 pub use invalidate::{
     plan_missing_path_sweep, plan_pod_delete, plan_teardown, InvalidationReason, ResyncReason,
 };
 pub use path_parse::{normalize_pod_uid, parse_cgroup_path, CgroupPathStyle, ParsedCgroupPath};
+pub use pod_watch::{PodView, PodWatchEvent};
+pub use reconcile::{clear_side_table_hygiene, revoke_not_in_allowlist};
 pub use side_table::{InsertOutcome, SideEntry, SideTable};
+pub use spiffe::{construct_spiffe_id, trust_domain_from_env, DEFAULT_SPIFFE_TRUST_DOMAIN};
 
 use crate::identity_allow::{remove_allow_cgroup, IdentityAllowMaps};
 use anyhow::{bail, Result};
@@ -45,6 +53,7 @@ pub struct IdentityCorrelatorConfig {
     pub enabled: bool,
     pub node_name: String,
     pub cgroup_root: PathBuf,
+    pub trust_domain: String,
 }
 
 impl IdentityCorrelatorConfig {
@@ -60,6 +69,7 @@ impl IdentityCorrelatorConfig {
         let cgroup_root = std::env::var(CGROUP_ROOT_ENV)
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/sys/fs/cgroup"));
+        let trust_domain = trust_domain_from_env();
         if enabled {
             if node_name.trim().is_empty() {
                 bail!(
@@ -67,18 +77,18 @@ impl IdentityCorrelatorConfig {
                      (required for node-local pod watch)"
                 );
             }
-            #[cfg(target_os = "linux")]
             pod_watch::validate_node_name(&node_name)?;
         }
         Ok(Self {
             enabled,
             node_name,
             cgroup_root,
+            trust_domain,
         })
     }
 }
 
-/// Shared side table for seed registration + invalidation tasks.
+/// Shared side table for seed registration + invalidation + auto-insert.
 pub struct CorrelatorState {
     pub side_table: Mutex<SideTable>,
 }
@@ -89,6 +99,18 @@ impl CorrelatorState {
             side_table: Mutex::new(SideTable::new()),
         })
     }
+}
+
+/// Hooks shared with `policy_sync` for PE allowlist cache + revoke.
+#[derive(Clone)]
+pub struct IdentityPolicyHooks {
+    pub allowlist: Arc<PeAllowlistCache>,
+    pub state: Arc<CorrelatorState>,
+    pub maps: Arc<Mutex<IdentityAllowMaps>>,
+    #[cfg(target_os = "linux")]
+    pub teardown_tx: Option<tokio::sync::mpsc::UnboundedSender<TeardownCmd>>,
+    #[cfg(feature = "orchestrator")]
+    pub metrics: Option<Arc<crate::observability::AgentMetrics>>,
 }
 
 /// Commands for the inotify worker (arm/disarm watches).
@@ -125,6 +147,9 @@ pub async fn register_seeded_cgroup(
         .unwrap_or_default();
     let entry = SideEntry {
         pod_uid,
+        namespace: String::new(),
+        service_account: String::new(),
+        spiffe_id: String::new(),
         cgroup_path: path.clone(),
         inode,
     };
@@ -224,6 +249,7 @@ pub fn spawn_identity_correlator(
     config: IdentityCorrelatorConfig,
     maps: Arc<Mutex<IdentityAllowMaps>>,
     state: Arc<CorrelatorState>,
+    allowlist: Arc<PeAllowlistCache>,
     #[cfg(feature = "orchestrator")] metrics: Arc<crate::observability::AgentMetrics>,
     shutdown: CancellationToken,
 ) -> Option<(
@@ -233,7 +259,7 @@ pub fn spawn_identity_correlator(
     if !config.enabled {
         tracing::info!(
             target: "neuromesh::identity_correlator",
-            "NEUROMESH_IDENTITY_CORRELATOR disabled — Slice 2b-i invalidation not running"
+            "NEUROMESH_IDENTITY_CORRELATOR disabled — Slice 2b correlator not running"
         );
         return None;
     }
@@ -242,7 +268,8 @@ pub fn spawn_identity_correlator(
         target: "neuromesh::identity_correlator",
         node = %config.node_name,
         cgroup_root = %config.cgroup_root.display(),
-        "starting Slice 2b-i identity invalidation correlator"
+        trust_domain = %config.trust_domain,
+        "starting Slice 2b identity correlator (invalidation + 2b-ii-A auto-insert)"
     );
 
     let (tx_cmd, rx_cmd) = tokio::sync::mpsc::unbounded_channel::<TeardownCmd>();
@@ -261,6 +288,7 @@ pub fn spawn_identity_correlator(
             config,
             maps,
             state,
+            allowlist,
             tx_cmd_for_task,
             rx_batch,
             #[cfg(feature = "orchestrator")]
@@ -285,6 +313,7 @@ pub fn spawn_identity_correlator(
     config: IdentityCorrelatorConfig,
     _maps: Arc<Mutex<IdentityAllowMaps>>,
     _state: Arc<CorrelatorState>,
+    _allowlist: Arc<PeAllowlistCache>,
     #[cfg(feature = "orchestrator")] _metrics: Arc<crate::observability::AgentMetrics>,
     _shutdown: CancellationToken,
 ) -> Option<()> {
@@ -391,6 +420,7 @@ async fn run_correlator(
     config: IdentityCorrelatorConfig,
     maps: Arc<Mutex<IdentityAllowMaps>>,
     state: Arc<CorrelatorState>,
+    allowlist: Arc<PeAllowlistCache>,
     tx_cmd: tokio::sync::mpsc::UnboundedSender<TeardownCmd>,
     mut rx_batch: tokio::sync::mpsc::UnboundedReceiver<teardown_watch::TeardownBatch>,
     #[cfg(feature = "orchestrator")] metrics: Arc<crate::observability::AgentMetrics>,
@@ -406,7 +436,7 @@ async fn run_correlator(
                 target: "neuromesh::identity_correlator",
                 error = %e,
                 "Kubernetes API client unavailable — running cgroup teardown invalidation ONLY \
-                 (Pod DELETE watch disabled). Not production-complete."
+                 (Pod DELETE / auto-insert watch disabled). Not production-complete."
             );
             None
         }
@@ -447,8 +477,8 @@ async fn run_correlator(
         metrics.record_identity_resync(ResyncReason::Startup.as_metric_label());
     }
 
-    let mut rx_pod_delete = match client.clone() {
-        Some(c) => Some(pod_watch::spawn_pod_delete_watch(
+    let mut rx_pod = match client.clone() {
+        Some(c) => Some(pod_watch::spawn_pod_watch(
             c,
             config.node_name.clone(),
             shutdown.clone(),
@@ -549,34 +579,60 @@ async fn run_correlator(
                 }
             }
 
-            uid = async {
-                match rx_pod_delete.as_mut() {
+            ev = async {
+                match rx_pod.as_mut() {
                     Some(rx) => rx.recv().await,
-                    None => std::future::pending::<Option<String>>().await,
+                    None => std::future::pending::<Option<PodWatchEvent>>().await,
                 }
             } => {
-                let Some(uid) = uid else {
-                    rx_pod_delete = None;
+                let Some(ev) = ev else {
+                    rx_pod = None;
                     continue;
                 };
-                let (ids, paths) = {
-                    let mut table = state.side_table.lock().await;
-                    let removed = table.remove_by_pod(&uid);
-                    let paths: Vec<_> =
-                        removed.iter().map(|(_, e)| e.cgroup_path.clone()).collect();
-                    let ids: Vec<_> = removed.into_iter().map(|(id, _)| id).collect();
-                    (ids, paths)
-                };
-                for p in paths {
-                    let _ = tx_cmd.send(TeardownCmd::Unwatch(p));
+                match ev {
+                    PodWatchEvent::Upsert(pod) => {
+                        if let Err(e) = reconcile::reconcile_pod(
+                            &pod,
+                            &config.trust_domain,
+                            &config.cgroup_root,
+                            &allowlist,
+                            &state,
+                            &maps,
+                            &tx_cmd,
+                            #[cfg(feature = "orchestrator")]
+                            Some(metrics.as_ref()),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                target: "neuromesh::identity_correlator",
+                                pod_uid = %pod.uid,
+                                error = %e,
+                                "reconcile_pod failed"
+                            );
+                        }
+                    }
+                    PodWatchEvent::Deleted { uid } => {
+                        let (ids, paths) = {
+                            let mut table = state.side_table.lock().await;
+                            let removed = table.remove_by_pod(&uid);
+                            let paths: Vec<_> =
+                                removed.iter().map(|(_, e)| e.cgroup_path.clone()).collect();
+                            let ids: Vec<_> = removed.into_iter().map(|(id, _)| id).collect();
+                            (ids, paths)
+                        };
+                        for p in paths {
+                            let _ = tx_cmd.send(TeardownCmd::Unwatch(p));
+                        }
+                        let _ = apply_invalidations(
+                            &maps,
+                            &ids,
+                            InvalidationReason::PodDelete,
+                            #[cfg(feature = "orchestrator")]
+                            Some(metrics.as_ref()),
+                        ).await;
+                    }
                 }
-                let _ = apply_invalidations(
-                    &maps,
-                    &ids,
-                    InvalidationReason::PodDelete,
-                    #[cfg(feature = "orchestrator")]
-                    Some(metrics.as_ref()),
-                ).await;
             }
         }
     }
@@ -666,6 +722,9 @@ mod overflow_resync_tests {
             1,
             SideEntry {
                 pod_uid: "p".into(),
+                namespace: String::new(),
+                service_account: String::new(),
+                spiffe_id: String::new(),
                 cgroup_path: PathBuf::from("/nonexistent/neuromesh-overflow-test-path"),
                 inode: 1,
             },

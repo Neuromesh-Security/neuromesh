@@ -65,7 +65,7 @@ impl AgentMetrics {
         let identity_invalidations = CounterVec::new(
             Opts::new(
                 "identity_correlator_invalidation_total",
-                "Slice 2b-i IDENTITY_ALLOW_CGROUPS invalidations; label reason=pod_delete|cgroup_teardown|resync_sweep",
+                "Slice 2b IDENTITY_ALLOW_CGROUPS invalidations; label reason=pod_delete|cgroup_teardown|resync_sweep|pe_allowlist_revoke",
             ),
             &["reason"],
         )
