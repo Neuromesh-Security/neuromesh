@@ -85,18 +85,23 @@ impl TeardownWatcher {
             );
         }
         let parent = path.parent().ok_or_else(|| {
-            anyhow::anyhow!("cannot inotify-watch {}: no parent directory", path.display())
+            anyhow::anyhow!(
+                "cannot inotify-watch {}: no parent directory",
+                path.display()
+            )
         })?;
         let child = path.file_name().ok_or_else(|| {
-            anyhow::anyhow!("cannot inotify-watch {}: no file name component", path.display())
+            anyhow::anyhow!(
+                "cannot inotify-watch {}: no file name component",
+                path.display()
+            )
         })?;
         let child = child.to_os_string();
         let parent_buf = parent.to_path_buf();
 
         if let Some(pw) = self.by_parent.get_mut(&parent_buf) {
             pw.children.insert(child.clone());
-            self.by_path
-                .insert(path.to_path_buf(), (parent_buf, child));
+            self.by_path.insert(path.to_path_buf(), (parent_buf, child));
             return Ok(true);
         }
 
@@ -118,15 +123,9 @@ impl TeardownWatcher {
         let mut children = HashSet::new();
         children.insert(child.clone());
         self.by_wd.insert(wd.clone(), parent_buf.clone());
-        self.by_parent.insert(
-            parent_buf.clone(),
-            ParentWatch {
-                wd,
-                children,
-            },
-        );
-        self.by_path
-            .insert(path.to_path_buf(), (parent_buf, child));
+        self.by_parent
+            .insert(parent_buf.clone(), ParentWatch { wd, children });
+        self.by_path.insert(path.to_path_buf(), (parent_buf, child));
         Ok(true)
     }
 
@@ -238,8 +237,8 @@ impl TeardownWatcher {
                 }
 
                 // Parent lost a child (cgroupfs-compatible path).
-                let is_child_gone = ev.mask.contains(EventMask::DELETE)
-                    || ev.mask.contains(EventMask::MOVED_FROM);
+                let is_child_gone =
+                    ev.mask.contains(EventMask::DELETE) || ev.mask.contains(EventMask::MOVED_FROM);
                 if !is_child_gone {
                     log::info!(
                         "inotify event mask=0x{:x} for parent={} name={:?} — \

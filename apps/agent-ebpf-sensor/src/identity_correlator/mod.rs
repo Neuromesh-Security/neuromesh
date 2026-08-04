@@ -318,40 +318,35 @@ fn inotify_worker_loop(
     while !shutdown.is_cancelled() {
         while let Ok(cmd) = rx_cmd.try_recv() {
             match cmd {
-                TeardownCmd::Watch(path) => {
-                    match watcher.watch_path(&path) {
-                        Ok(true) => {
-                            log::info!(
-                                "armed inotify teardown watch path={} (parent DELETE/MOVED_FROM)",
-                                path.display()
-                            );
-                            tracing::info!(
-                                target: "neuromesh::identity_correlator",
-                                path = %path.display(),
-                                "armed inotify teardown watch (parent DELETE/MOVED_FROM)"
-                            );
-                        }
-                        Ok(false) => {
-                            tracing::debug!(
-                                target: "neuromesh::identity_correlator",
-                                path = %path.display(),
-                                "inotify watch already armed for path"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "neuromesh::identity_correlator",
-                                path = %path.display(),
-                                error = %e,
-                                "failed to watch cgroup path"
-                            );
-                            log::warn!(
-                                "failed to watch cgroup path={}: {e}",
-                                path.display()
-                            );
-                        }
+                TeardownCmd::Watch(path) => match watcher.watch_path(&path) {
+                    Ok(true) => {
+                        log::info!(
+                            "armed inotify teardown watch path={} (parent DELETE/MOVED_FROM)",
+                            path.display()
+                        );
+                        tracing::info!(
+                            target: "neuromesh::identity_correlator",
+                            path = %path.display(),
+                            "armed inotify teardown watch (parent DELETE/MOVED_FROM)"
+                        );
                     }
-                }
+                    Ok(false) => {
+                        tracing::debug!(
+                            target: "neuromesh::identity_correlator",
+                            path = %path.display(),
+                            "inotify watch already armed for path"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "neuromesh::identity_correlator",
+                            path = %path.display(),
+                            error = %e,
+                            "failed to watch cgroup path"
+                        );
+                        log::warn!("failed to watch cgroup path={}: {e}", path.display());
+                    }
+                },
                 TeardownCmd::Unwatch(path) => {
                     let _ = watcher.unwatch_path(&path);
                 }
