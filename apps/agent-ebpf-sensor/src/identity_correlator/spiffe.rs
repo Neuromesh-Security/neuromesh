@@ -63,4 +63,21 @@ mod tests {
             "spiffe://neuromesh.security/ns/kube-system/sa/default"
         );
     }
+
+    #[test]
+    fn trust_domain_env_default_and_override() {
+        let _guard = {
+            static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+            LOCK.get_or_init(|| std::sync::Mutex::new(()))
+                .lock()
+                .unwrap()
+        };
+        std::env::remove_var(SPIFFE_TRUST_DOMAIN_ENV);
+        assert_eq!(trust_domain_from_env(), DEFAULT_SPIFFE_TRUST_DOMAIN);
+        std::env::set_var(SPIFFE_TRUST_DOMAIN_ENV, "  ");
+        assert_eq!(trust_domain_from_env(), DEFAULT_SPIFFE_TRUST_DOMAIN);
+        std::env::set_var(SPIFFE_TRUST_DOMAIN_ENV, "corp.example");
+        assert_eq!(trust_domain_from_env(), "corp.example");
+        std::env::remove_var(SPIFFE_TRUST_DOMAIN_ENV);
+    }
 }

@@ -80,4 +80,15 @@ mod tests {
         c.clear();
         assert!(c.is_empty());
     }
+
+    #[test]
+    fn snapshot_is_independent_copy() {
+        let c = PeAllowlistCache::new();
+        c.replace(["spiffe://t/ns/n/sa/a".into()]);
+        let snap = c.snapshot();
+        c.replace(["spiffe://t/ns/n/sa/b".into()]);
+        assert!(snap.contains("spiffe://t/ns/n/sa/a"));
+        assert!(!snap.contains("spiffe://t/ns/n/sa/b"));
+        assert!(c.contains("spiffe://t/ns/n/sa/b"));
+    }
 }

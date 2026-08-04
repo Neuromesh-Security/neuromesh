@@ -258,4 +258,17 @@ mod tests {
         assert!(t.remove_by_pod("old").is_empty());
         assert_eq!(t.remove_by_pod("new").len(), 1);
     }
+
+    #[test]
+    fn clear_drains_all_indexes() {
+        let mut t = SideTable::new();
+        t.insert(1, auto_entry("u1", "/cg/1", 1, "spiffe://t/ns/n/sa/a"));
+        t.insert(2, entry("u2", "/cg/2", 2));
+        let drained = t.clear();
+        assert_eq!(drained.len(), 2);
+        assert!(t.is_empty());
+        assert!(t
+            .cgroup_id_for_path(std::path::Path::new("/cg/1"))
+            .is_none());
+    }
 }

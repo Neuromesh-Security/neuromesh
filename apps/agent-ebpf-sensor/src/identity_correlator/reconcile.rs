@@ -60,6 +60,49 @@ pub fn apply_revoke_plan(table: &mut SideTable, ids: &[u64]) -> Vec<(u64, PathBu
     out
 }
 
+/// If the pod's SPIFFE is not in the PE cache, purge its side-table rows.
+///
+/// Returns `Some((cgroup_ids, paths))` when a purge is required; `None` when
+/// the SPIFFE is allowed (caller proceeds to container upsert).
+pub fn take_pod_if_not_allowed(
+    table: &mut SideTable,
+    pod_uid: &str,
+    spiffe: &str,
+    allowlist: &PeAllowlistCache,
+) -> Option<(Vec<u64>, Vec<PathBuf>)> {
+    if allowlist.contains(spiffe) {
+        return None;
+    }
+    let removed = table.remove_by_pod(pod_uid);
+    if removed.is_empty() {
+        return Some((Vec::new(), Vec::new()));
+    }
+    let paths: Vec<_> = removed.iter().map(|(_, e)| e.cgroup_path.clone()).collect();
+    let ids: Vec<_> = removed.into_iter().map(|(id, _)| id).collect();
+    Some((ids, paths))
+}
+
+/// Build the side-table entry for a resolvable container leaf (no BPF I/O).
+pub fn side_entry_for_container(
+    pod: &PodView,
+    spiffe: &str,
+    leaf: PathBuf,
+    inode: u64,
+) -> SideEntry {
+    SideEntry {
+        pod_uid: pod.uid.clone(),
+        namespace: pod.namespace.clone(),
+        service_account: if pod.service_account.trim().is_empty() {
+            "default".into()
+        } else {
+            pod.service_account.clone()
+        },
+        spiffe_id: spiffe.to_string(),
+        cgroup_path: leaf,
+        inode,
+    }
+}
+
 /// Idempotent reconcile for one pod (Linux: resolves inodes + writes BPF).
 #[cfg(target_os = "linux")]
 pub async fn reconcile_pod(
@@ -76,14 +119,11 @@ pub async fn reconcile_pod(
 
     let spiffe = construct_spiffe_id(trust_domain, &pod.namespace, &pod.service_account);
 
-    if !allowlist.contains(&spiffe) {
-        let (ids, paths) = {
-            let mut table = state.side_table.lock().await;
-            let removed = table.remove_by_pod(&pod.uid);
-            let paths: Vec<_> = removed.iter().map(|(_, e)| e.cgroup_path.clone()).collect();
-            let ids: Vec<_> = removed.into_iter().map(|(id, _)| id).collect();
-            (ids, paths)
-        };
+    let purge = {
+        let mut table = state.side_table.lock().await;
+        take_pod_if_not_allowed(&mut table, &pod.uid, &spiffe, allowlist)
+    };
+    if let Some((ids, paths)) = purge {
         for p in paths {
             let _ = teardown_tx.send(TeardownCmd::Unwatch(p));
         }
@@ -115,18 +155,7 @@ pub async fn reconcile_pod(
             }
         };
 
-        let entry = SideEntry {
-            pod_uid: pod.uid.clone(),
-            namespace: pod.namespace.clone(),
-            service_account: if pod.service_account.trim().is_empty() {
-                "default".into()
-            } else {
-                pod.service_account.clone()
-            },
-            spiffe_id: spiffe.clone(),
-            cgroup_path: leaf.clone(),
-            inode,
-        };
+        let entry = side_entry_for_container(pod, &spiffe, leaf.clone(), inode);
 
         let outcome = {
             let mut table = state.side_table.lock().await;
@@ -240,7 +269,22 @@ pub async fn clear_side_table_hygiene(
 mod tests {
     use super::*;
     use crate::identity_correlator::side_table::SideEntry;
+    use std::fs;
     use std::path::PathBuf;
+
+    fn temp_base(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "nm-recon-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        base
+    }
 
     #[test]
     fn eligible_requires_id_or_running() {
@@ -316,5 +360,149 @@ mod tests {
         let no = construct_spiffe_id("neuromesh.security", "default", "nope");
         assert!(cache.contains(&yes));
         assert!(!cache.contains(&no));
+    }
+
+    #[test]
+    fn resolve_cgroupfs_leaf_and_skip_empty_id() {
+        let base = temp_base("cgroupfs");
+        let uid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let raw = "81591f675f72aabbccddeeff00112233445566778899aabbccddeeff00112233";
+        let pod = base.join("kubepods").join(format!("pod{uid}"));
+        fs::create_dir_all(pod.join(raw)).unwrap();
+
+        let found = resolve_container_cgroup_path(
+            &base,
+            uid,
+            &ContainerStatusView {
+                name: "app".into(),
+                container_id: Some(format!("containerd://{raw}")),
+                running: true,
+            },
+        );
+        assert_eq!(found.unwrap().file_name().unwrap().to_string_lossy(), raw);
+
+        // Null/empty containerID while not Running → skip (not an error).
+        assert!(resolve_container_cgroup_path(
+            &base,
+            uid,
+            &ContainerStatusView {
+                name: "init".into(),
+                container_id: None,
+                running: false,
+            },
+        )
+        .is_none());
+
+        // Running without containerID still eligible, but no raw id → skip match.
+        assert!(resolve_container_cgroup_path(
+            &base,
+            uid,
+            &ContainerStatusView {
+                name: "app2".into(),
+                container_id: Some("".into()),
+                running: true,
+            },
+        )
+        .is_none());
+
+        // Missing pod dir → no-op.
+        assert!(resolve_container_cgroup_path(
+            &base,
+            "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee",
+            &ContainerStatusView {
+                name: "app".into(),
+                container_id: Some(format!("containerd://{raw}")),
+                running: true,
+            },
+        )
+        .is_none());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolve_systemd_scope_leaf() {
+        let base = temp_base("systemd");
+        let uid = "11111111-2222-3333-4444-555555555555";
+        let uid_under = uid.replace('-', "_");
+        let raw = "abc123def4567890abc123def4567890abc123def4567890abc123def4567890";
+        let pod = base
+            .join("kubepods.slice")
+            .join("kubepods-burstable.slice")
+            .join(format!("kubepods-burstable-pod{uid_under}.slice"));
+        let scope = format!("cri-containerd-{raw}.scope");
+        fs::create_dir_all(pod.join(&scope)).unwrap();
+
+        let found = resolve_container_cgroup_path(
+            &base,
+            uid,
+            &ContainerStatusView {
+                name: "main".into(),
+                container_id: Some(format!("containerd://{raw}")),
+                running: true,
+            },
+        );
+        assert_eq!(found.unwrap().file_name().unwrap().to_string_lossy(), scope);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn take_pod_purges_when_spiffe_absent() {
+        let cache = PeAllowlistCache::new();
+        cache.replace(["spiffe://t/ns/default/sa/other".into()]);
+        let mut t = SideTable::new();
+        t.insert(
+            9,
+            SideEntry {
+                pod_uid: "pod-x".into(),
+                namespace: "default".into(),
+                service_account: "victim".into(),
+                spiffe_id: "spiffe://t/ns/default/sa/victim".into(),
+                cgroup_path: PathBuf::from("/cg/x"),
+                inode: 9,
+            },
+        );
+        let purge =
+            take_pod_if_not_allowed(&mut t, "pod-x", "spiffe://t/ns/default/sa/victim", &cache);
+        let (ids, paths) = purge.expect("must purge");
+        assert_eq!(ids, vec![9]);
+        assert_eq!(paths, vec![PathBuf::from("/cg/x")]);
+        assert!(t.is_empty());
+    }
+
+    #[test]
+    fn take_pod_none_when_allowed() {
+        let cache = PeAllowlistCache::new();
+        let spiffe = "spiffe://t/ns/default/sa/ok".to_string();
+        cache.replace([spiffe.clone()]);
+        let mut t = SideTable::new();
+        t.insert(
+            1,
+            SideEntry {
+                pod_uid: "pod-y".into(),
+                namespace: "default".into(),
+                service_account: "ok".into(),
+                spiffe_id: spiffe.clone(),
+                cgroup_path: PathBuf::from("/cg/y"),
+                inode: 1,
+            },
+        );
+        assert!(take_pod_if_not_allowed(&mut t, "pod-y", &spiffe, &cache).is_none());
+        assert!(t.get(1).is_some());
+    }
+
+    #[test]
+    fn side_entry_defaults_empty_sa() {
+        let pod = PodView {
+            uid: "u".into(),
+            namespace: "ns".into(),
+            service_account: "  ".into(),
+            containers: vec![],
+        };
+        let e =
+            side_entry_for_container(&pod, "spiffe://t/ns/ns/sa/default", PathBuf::from("/p"), 7);
+        assert_eq!(e.service_account, "default");
+        assert_eq!(e.inode, 7);
+        assert_eq!(e.spiffe_id, "spiffe://t/ns/ns/sa/default");
     }
 }
