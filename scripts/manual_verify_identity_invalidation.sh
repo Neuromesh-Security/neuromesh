@@ -60,12 +60,12 @@ u64_le_hex() {
   python3 -c "import struct,sys; print(' '.join(f'{b:02x}' for b in struct.pack('<Q', int(sys.argv[1]))))" "$1"
 }
 
-map_has_key() {
-  local id="$1"
-  local key
-  key="$(u64_le_hex "$id")"
+# Lookup only — caller must pass precomputed `key hex` bytes.
+# Do NOT call u64_le_hex here: the teardown poll loop would spawn python3+bpftool
+# every tick (~200 proc pairs/sec at 5ms), starving the agent on 1-vCPU hosts.
+map_has_key_hex() {
   # shellcheck disable=SC2086
-  bpftool map lookup name ID_ALLOW_CGROUP key hex $key >/dev/null 2>&1
+  bpftool map lookup name ID_ALLOW_CGROUP key hex $1 >/dev/null 2>&1
 }
 
 # Minimal PE stub so VALID can be fresh (exceptions matter for allow path;
@@ -138,14 +138,17 @@ kill -0 "$AGENT_PID" 2>/dev/null || {
   fail "agent failed to stay up (see log)"
 }
 
+# Precompute map key once (avoids python3-per-poll in the hot loops below).
+CG_KEY_HEX="$(u64_le_hex "$CG_ID")"
+
 # Wait until allow map contains seeded key.
 for _ in $(seq 1 50); do
-  if map_has_key "$CG_ID"; then
+  if map_has_key_hex "$CG_KEY_HEX"; then
     break
   fi
   sleep 0.1
 done
-map_has_key "$CG_ID" || {
+map_has_key_hex "$CG_KEY_HEX" || {
   echo "---- agent log ----"
   tail -n 120 "$AGENT_LOG" || true
   fail "seeded cgroup_id $CG_ID not in ID_ALLOW_CGROUP"
@@ -173,20 +176,30 @@ pass "correlator side-table + inotify watch armed for seeded cgroup"
 echo "== (A) measure cgroup teardown → map delete latency =="
 START_NS="$(date +%s%N)"
 rmdir "$CG_BASE/tracked"
-# Spin until key gone or timeout 2s
+# Spin until key gone or timeout 2s.
+# Poll every 50ms (not 5ms): still ≤2s budget (~40 bpftool lookups), but avoids
+# python3+bpftool spawn storms that can starve the agent on 1-vCPU droplets.
 GONE=0
-for _ in $(seq 1 400); do
-  if ! map_has_key "$CG_ID"; then
+for _ in $(seq 1 40); do
+  if ! map_has_key_hex "$CG_KEY_HEX"; then
     END_NS="$(date +%s%N)"
     GONE=1
     break
   fi
-  # 5ms steps
-  sleep 0.005
+  sleep 0.050
 done
 test "$GONE" -eq 1 || {
-  echo "---- agent log (teardown did not clear map) ----"
-  tail -n 200 "$AGENT_LOG" || true
+  echo "---- agent log (teardown did not clear map within 2s) ----"
+  grep -E 'armed inotify teardown watch|invalidated IDENTITY_ALLOW_CGROUPS|cgroup_teardown|Side-table registered' "$AGENT_LOG" || true
+  echo "---- (post-timeout 3s observe: late delete?) ----"
+  sleep 3
+  if ! map_has_key_hex "$CG_KEY_HEX"; then
+    echo "NOTE: map key GONE after extra 3s — delete was late (possible CPU contention), not absent"
+  else
+    echo "NOTE: map key STILL present after extra 3s — delete never happened"
+  fi
+  grep -E 'invalidated IDENTITY_ALLOW_CGROUPS|cgroup_teardown' "$AGENT_LOG" || true
+  tail -n 80 "$AGENT_LOG" || true
   fail "map entry still present >2s after cgroup teardown"
 }
 ELAPSED_NS=$((END_NS - START_NS))
