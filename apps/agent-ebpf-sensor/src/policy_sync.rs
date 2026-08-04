@@ -14,6 +14,9 @@ use crate::identity_allow::{
     self, apply_identity_validity, invalidate_if_expired, IdentityAllowMaps,
     IdentitySectionValidity,
 };
+use crate::identity_correlator::{
+    clear_side_table_hygiene, revoke_not_in_allowlist, IdentityPolicyHooks,
+};
 use crate::path_deny::{
     apply_deny_entries, PathDenyMaps, PolicySyncState, POLICY_STALE_AFTER, POLICY_SYNC_INTERVAL,
 };
@@ -105,7 +108,11 @@ pub async fn fetch_policy_bundle(
         .context("failed to read policy-bundle body")
 }
 
-/// Fetch + apply one policy bundle (deny + identity validity).
+/// Fetch + apply one policy bundle (deny + identity validity + PE allowlist cache).
+///
+/// Updates `hooks.allowlist` when present. Caller must run
+/// [`revoke_not_in_allowlist`] / [`clear_side_table_hygiene`] **after** releasing
+/// `identity_maps` locks (those helpers re-lock the maps).
 pub async fn sync_once(
     client: &reqwest::Client,
     base_url: &str,
@@ -114,7 +121,8 @@ pub async fn sync_once(
     identity_maps: &mut IdentityAllowMaps,
     state: &mut PolicySyncState,
     identity_expires_at: &mut Option<SystemTime>,
-) -> Result<()> {
+    hooks: Option<&IdentityPolicyHooks>,
+) -> Result<IdentitySectionValidity> {
     let body = fetch_policy_bundle(client, base_url, bearer_token).await?;
     let parsed = identity_allow::parse_policy_bundle_json(&body)?;
 
@@ -126,14 +134,27 @@ pub async fn sync_once(
         IdentitySectionValidity::Invalid { .. } => None,
     };
 
+    // Slice 2b-ii-A: refresh PE allowlist cache on every Fresh apply (including
+    // unchanged-version TTL refresh).
+    if let Some(hooks) = hooks {
+        match &parsed.identity {
+            IdentitySectionValidity::Fresh(s) => {
+                hooks.allowlist.replace(s.spiffe_ids.iter().cloned());
+            }
+            IdentitySectionValidity::Invalid { .. } => {
+                hooks.allowlist.clear();
+            }
+        }
+    }
+
     if parsed.version == state.last_version {
-        state.mark_success(parsed.version);
+        state.mark_success(parsed.version.clone());
         tracing::debug!(
             target: "neuromesh::policy_sync",
             version = %state.last_version,
             "policy bundle unchanged (identity TTL refreshed)"
         );
-        return Ok(());
+        return Ok(parsed.identity);
     }
 
     let mut entries = Vec::with_capacity(parsed.deny_path_prefixes.len());
@@ -151,7 +172,51 @@ pub async fn sync_once(
         identity_fresh = matches!(parsed.identity, IdentitySectionValidity::Fresh(_)),
         "applied path-prefix deny list + identity validity from zt-policy-engine"
     );
-    Ok(())
+    Ok(parsed.identity)
+}
+
+async fn run_allowlist_followup(hooks: &IdentityPolicyHooks, identity: &IdentitySectionValidity) {
+    #[cfg(feature = "orchestrator")]
+    let metrics = hooks.metrics.as_ref().map(|m| m.as_ref());
+    match identity {
+        IdentitySectionValidity::Fresh(_) => {
+            if let Err(e) = revoke_not_in_allowlist(
+                &hooks.allowlist,
+                &hooks.state,
+                &hooks.maps,
+                #[cfg(target_os = "linux")]
+                hooks.teardown_tx.as_ref(),
+                #[cfg(feature = "orchestrator")]
+                metrics,
+            )
+            .await
+            {
+                tracing::warn!(
+                    target: "neuromesh::policy_sync",
+                    error = %e,
+                    "PE allowlist revoke reconcile failed"
+                );
+            }
+        }
+        IdentitySectionValidity::Invalid { .. } => {
+            if let Err(e) = clear_side_table_hygiene(
+                &hooks.state,
+                &hooks.maps,
+                #[cfg(target_os = "linux")]
+                hooks.teardown_tx.as_ref(),
+                #[cfg(feature = "orchestrator")]
+                metrics,
+            )
+            .await
+            {
+                tracing::warn!(
+                    target: "neuromesh::policy_sync",
+                    error = %e,
+                    "side-table hygiene clear on Invalid failed"
+                );
+            }
+        }
+    }
 }
 
 /// Spawn the background sync loop. Errors are logged; deny maps keep last-known-good.
@@ -162,6 +227,7 @@ pub fn spawn_policy_sync(
     deny_maps: PathDenyMaps,
     identity_maps: Arc<Mutex<IdentityAllowMaps>>,
     mut state: PolicySyncState,
+    hooks: Option<IdentityPolicyHooks>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let deny_maps = Arc::new(Mutex::new(deny_maps));
@@ -184,6 +250,16 @@ pub fn spawn_policy_sync(
                             reason: "policy sync disabled".into(),
                         },
                     );
+                }
+                if let Some(ref h) = hooks {
+                    h.allowlist.clear();
+                    run_allowlist_followup(
+                        h,
+                        &IdentitySectionValidity::Invalid {
+                            reason: "policy sync disabled".into(),
+                        },
+                    )
+                    .await;
                 }
                 loop {
                     tokio::select! {
@@ -213,6 +289,16 @@ pub fn spawn_policy_sync(
                             reason: "token unavailable".into(),
                         },
                     );
+                }
+                if let Some(ref h) = hooks {
+                    h.allowlist.clear();
+                    run_allowlist_followup(
+                        h,
+                        &IdentitySectionValidity::Invalid {
+                            reason: "token unavailable".into(),
+                        },
+                    )
+                    .await;
                 }
                 loop {
                     tokio::select! {
@@ -256,49 +342,57 @@ pub fn spawn_policy_sync(
             tokio::select! {
                 _ = shutdown.cancelled() => return,
                 _ = interval.tick() => {
-                    let mut deny_guard = deny_maps.lock().await;
-                    let mut id_guard = identity_maps.lock().await;
-                    // TTL gate every tick — outage past expires_at kills ALL exceptions.
-                    let _ = invalidate_if_expired(
-                        &mut id_guard,
-                        identity_expires_at,
-                        SystemTime::now(),
-                    );
-                    match sync_once(
-                        &client,
-                        &base_url,
-                        &bearer_token,
-                        &mut deny_guard,
-                        &mut id_guard,
-                        &mut state,
-                        &mut identity_expires_at,
-                    )
-                    .await
-                    {
-                        Ok(()) => {}
-                        Err(error) => {
-                            state.refresh_stale_flag();
-                            let _ = invalidate_if_expired(
-                                &mut id_guard,
-                                identity_expires_at,
-                                SystemTime::now(),
-                            );
-                            if state.stale {
-                                tracing::warn!(
-                                    target: "neuromesh::policy_sync",
-                                    %error,
-                                    last_version = %state.last_version,
-                                    "policy sync failed; deny list STALE — continuing with last-known-good"
+                    let identity_outcome = {
+                        let mut deny_guard = deny_maps.lock().await;
+                        let mut id_guard = identity_maps.lock().await;
+                        // TTL gate every tick — outage past expires_at kills ALL exceptions.
+                        let _ = invalidate_if_expired(
+                            &mut id_guard,
+                            identity_expires_at,
+                            SystemTime::now(),
+                        );
+                        match sync_once(
+                            &client,
+                            &base_url,
+                            &bearer_token,
+                            &mut deny_guard,
+                            &mut id_guard,
+                            &mut state,
+                            &mut identity_expires_at,
+                            hooks.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(identity) => Some(identity),
+                            Err(error) => {
+                                state.refresh_stale_flag();
+                                let _ = invalidate_if_expired(
+                                    &mut id_guard,
+                                    identity_expires_at,
+                                    SystemTime::now(),
                                 );
-                            } else {
-                                tracing::warn!(
-                                    target: "neuromesh::policy_sync",
-                                    %error,
-                                    last_version = %state.last_version,
-                                    "policy sync failed — retaining last-known-good deny list"
-                                );
+                                if state.stale {
+                                    tracing::warn!(
+                                        target: "neuromesh::policy_sync",
+                                        %error,
+                                        last_version = %state.last_version,
+                                        "policy sync failed; deny list STALE — continuing with last-known-good"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        target: "neuromesh::policy_sync",
+                                        %error,
+                                        last_version = %state.last_version,
+                                        "policy sync failed — retaining last-known-good deny list"
+                                    );
+                                }
+                                None
                             }
                         }
+                    };
+                    // Maps unlocked — safe to revoke/clear (re-locks maps).
+                    if let (Some(ref h), Some(ref identity)) = (hooks.as_ref(), identity_outcome) {
+                        run_allowlist_followup(h, identity).await;
                     }
                 }
             }

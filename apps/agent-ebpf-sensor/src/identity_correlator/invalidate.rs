@@ -9,6 +9,8 @@ pub enum InvalidationReason {
     CgroupTeardown,
     /// Forced resync discovered a missing path / gone pod.
     ResyncSweep,
+    /// PE `spiffe_ids` no longer contains this entry's SPIFFE (Slice 2b-ii-A).
+    PeAllowlistRevoke,
 }
 
 impl InvalidationReason {
@@ -17,6 +19,7 @@ impl InvalidationReason {
             Self::PodDelete => "pod_delete",
             Self::CgroupTeardown => "cgroup_teardown",
             Self::ResyncSweep => "resync_sweep",
+            Self::PeAllowlistRevoke => "pe_allowlist_revoke",
         }
     }
 }
@@ -71,6 +74,9 @@ mod tests {
     fn entry(uid: &str, path: &str, inode: u64) -> SideEntry {
         SideEntry {
             pod_uid: uid.to_string(),
+            namespace: String::new(),
+            service_account: String::new(),
+            spiffe_id: String::new(),
             cgroup_path: PathBuf::from(path),
             inode,
         }
@@ -100,6 +106,10 @@ mod tests {
         assert_eq!(
             InvalidationReason::PodDelete.as_metric_label(),
             "pod_delete"
+        );
+        assert_eq!(
+            InvalidationReason::PeAllowlistRevoke.as_metric_label(),
+            "pe_allowlist_revoke"
         );
         assert_eq!(
             ResyncReason::InotifyOverflow.as_metric_label(),

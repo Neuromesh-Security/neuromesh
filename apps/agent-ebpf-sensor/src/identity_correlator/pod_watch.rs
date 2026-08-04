@@ -1,9 +1,8 @@
-//! Kubernetes Pod watch scoped to this node (Slice 2b-i).
+//! Kubernetes Pod watch scoped to this node (Slice 2b-i + 2b-ii-A).
 //!
 //! Uses `fieldSelector=spec.nodeName=<NEUROMESH_NODE_NAME>`.
 //! Implemented with **reqwest** against the Kubernetes HTTP API — intentionally
-//! **not** the `kube` crate, which pulled unmaintained advisories
-//! (`backoff` / `instant` / `rustls-pemfile`) into cargo-deny (PR #93).
+//! **not** the `kube` crate (cargo-deny / unmaintained deps).
 
 use anyhow::{bail, Context, Result};
 use reqwest::Certificate;
@@ -26,10 +25,36 @@ pub struct K8sClient {
     token: String,
 }
 
+/// One container status entry (main / init / ephemeral).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContainerStatusView {
+    pub name: String,
+    pub container_id: Option<String>,
+    /// True when `state.running` is present.
+    pub running: bool,
+}
+
+/// Pod fields needed for 2b-ii-A reconcile + 2b-i DELETE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PodView {
+    pub uid: String,
+    pub namespace: String,
+    pub service_account: String,
+    pub containers: Vec<ContainerStatusView>,
+}
+
+/// Watch / reconcile trigger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PodWatchEvent {
+    /// ADDED or MODIFIED — run idempotent `reconcile_pod`.
+    Upsert(PodView),
+    Deleted { uid: String },
+}
+
 #[derive(Debug, Deserialize)]
 struct PodList {
     #[serde(default)]
-    items: Vec<PodItem>,
+    items: Vec<serde_json::Value>,
     metadata: Option<ListMeta>,
 }
 
@@ -37,16 +62,6 @@ struct PodList {
 struct ListMeta {
     #[serde(rename = "resourceVersion", default)]
     resource_version: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PodItem {
-    metadata: ObjectMeta,
-}
-
-#[derive(Debug, Deserialize)]
-struct ObjectMeta {
-    uid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,7 +120,6 @@ impl K8sClient {
                 "SA CA missing at {SA_CA_PATH} — TLS verify may fail"
             );
         }
-        // Touch namespace file so misconfigured pods fail early (optional).
         let _ = std::fs::read_to_string(SA_NS_PATH);
 
         let http = builder.build().context("build in-cluster reqwest client")?;
@@ -135,6 +149,60 @@ impl K8sClient {
     }
 }
 
+/// Parse a Pod JSON object into [`PodView`].
+pub fn parse_pod_view(obj: &serde_json::Value) -> Option<PodView> {
+    let uid = obj.pointer("/metadata/uid")?.as_str()?.to_string();
+    let namespace = obj
+        .pointer("/metadata/namespace")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let service_account = obj
+        .pointer("/spec/serviceAccountName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mut containers = Vec::new();
+    for key in [
+        "/status/containerStatuses",
+        "/status/initContainerStatuses",
+        "/status/ephemeralContainerStatuses",
+    ] {
+        if let Some(arr) = obj.pointer(key).and_then(|v| v.as_array()) {
+            for c in arr {
+                containers.push(parse_container_status(c));
+            }
+        }
+    }
+
+    Some(PodView {
+        uid,
+        namespace,
+        service_account,
+        containers,
+    })
+}
+
+fn parse_container_status(c: &serde_json::Value) -> ContainerStatusView {
+    let name = c
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let container_id = c
+        .get("containerID")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty());
+    let running = c.pointer("/state/running").is_some();
+    ContainerStatusView {
+        name,
+        container_id,
+        running,
+    }
+}
+
 /// List pod UIDs currently scheduled on `node_name` (all namespaces).
 pub async fn list_pod_uids_on_node(client: &K8sClient, node_name: &str) -> Result<HashSet<String>> {
     let selector = urlencoding_field_selector(node_name);
@@ -142,20 +210,20 @@ pub async fn list_pod_uids_on_node(client: &K8sClient, node_name: &str) -> Resul
     let value = client.get_json(&path).await?;
     let list: PodList = serde_json::from_value(value).context("decode PodList")?;
     let mut out = HashSet::new();
-    for pod in list.items {
-        if let Some(uid) = pod.metadata.uid {
-            out.insert(uid);
+    for item in list.items {
+        if let Some(uid) = item.pointer("/metadata/uid").and_then(|v| v.as_str()) {
+            out.insert(uid.to_string());
         }
     }
     Ok(out)
 }
 
-/// Spawn a background watch; sends deleted pod UIDs on the returned channel.
-pub fn spawn_pod_delete_watch(
+/// Spawn a background watch; ADDED/MODIFIED → [`PodWatchEvent::Upsert`], DELETED → uid.
+pub fn spawn_pod_watch(
     client: K8sClient,
     node_name: String,
     shutdown: CancellationToken,
-) -> mpsc::UnboundedReceiver<String> {
+) -> mpsc::UnboundedReceiver<PodWatchEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         if let Err(e) = watch_loop(client, node_name, tx, shutdown).await {
@@ -172,7 +240,7 @@ pub fn spawn_pod_delete_watch(
 async fn watch_loop(
     client: K8sClient,
     node_name: String,
-    tx: mpsc::UnboundedSender<String>,
+    tx: mpsc::UnboundedSender<PodWatchEvent>,
     shutdown: CancellationToken,
 ) -> Result<()> {
     let selector = urlencoding_field_selector(&node_name);
@@ -206,7 +274,6 @@ async fn watch_loop(
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            // 410 Gone → reset resourceVersion
             if status.as_u16() == 410 {
                 tracing::warn!(
                     target: "neuromesh::identity_correlator",
@@ -241,12 +308,29 @@ async fn watch_loop(
             {
                 resource_version = rv.to_string();
             }
-            if ev.event_type == "DELETED" {
-                if let Some(uid) = ev.object.pointer("/metadata/uid").and_then(|v| v.as_str()) {
-                    if tx.send(uid.to_string()).is_err() {
-                        return Ok(());
+            let event = match ev.event_type.as_str() {
+                "ADDED" | "MODIFIED" => {
+                    let Some(view) = parse_pod_view(&ev.object) else {
+                        continue;
+                    };
+                    PodWatchEvent::Upsert(view)
+                }
+                "DELETED" => {
+                    let Some(uid) = ev
+                        .object
+                        .pointer("/metadata/uid")
+                        .and_then(|v| v.as_str())
+                    else {
+                        continue;
+                    };
+                    PodWatchEvent::Deleted {
+                        uid: uid.to_string(),
                     }
                 }
+                _ => continue,
+            };
+            if tx.send(event).is_err() {
+                return Ok(());
             }
         }
     }
@@ -254,7 +338,6 @@ async fn watch_loop(
 }
 
 fn urlencoding_field_selector(node_name: &str) -> String {
-    // fieldSelector value; encode `=` and keep node name safe.
     let raw = format!("spec.nodeName={node_name}");
     raw.chars()
         .map(|c| match c {
@@ -303,5 +386,39 @@ mod tests {
     fn field_selector_encoding_keeps_eq() {
         let s = urlencoding_field_selector("worker-1");
         assert_eq!(s, "spec.nodeName=worker-1");
+    }
+
+    #[test]
+    fn parse_pod_view_extracts_fields() {
+        let obj = serde_json::json!({
+            "metadata": {
+                "uid": "uid-1",
+                "namespace": "default"
+            },
+            "spec": { "serviceAccountName": "agent-ebpf-sensor" },
+            "status": {
+                "containerStatuses": [{
+                    "name": "app",
+                    "containerID": "containerd://abc123",
+                    "state": { "running": { "startedAt": "2026-01-01T00:00:00Z" } }
+                }],
+                "initContainerStatuses": [{
+                    "name": "init",
+                    "containerID": "containerd://init99",
+                    "state": { "terminated": { "exitCode": 0 } }
+                }]
+            }
+        });
+        let v = parse_pod_view(&obj).unwrap();
+        assert_eq!(v.uid, "uid-1");
+        assert_eq!(v.namespace, "default");
+        assert_eq!(v.service_account, "agent-ebpf-sensor");
+        assert_eq!(v.containers.len(), 2);
+        assert!(v.containers[0].running);
+        assert_eq!(
+            v.containers[0].container_id.as_deref(),
+            Some("containerd://abc123")
+        );
+        assert!(!v.containers[1].running);
     }
 }

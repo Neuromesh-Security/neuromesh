@@ -1,7 +1,9 @@
 use agent_ebpf_sensor::btf_offsets::{self, ResolvedOffsets};
 use agent_ebpf_sensor::bytecode_attestation::{self, EmbeddedArtifact};
 use agent_ebpf_sensor::identity_allow::{self, IdentityAllowMaps};
-use agent_ebpf_sensor::identity_correlator::{self, CorrelatorState, IdentityCorrelatorConfig};
+use agent_ebpf_sensor::identity_correlator::{
+    self, CorrelatorState, IdentityCorrelatorConfig, IdentityPolicyHooks, PeAllowlistCache,
+};
 use agent_ebpf_sensor::ingestion;
 use agent_ebpf_sensor::lsm_pin::{
     self, attach_and_pin_lsm_fail_closed, classify_enforcement_pins, deny_map_seed_plan,
@@ -194,17 +196,18 @@ async fn main() -> Result<(), anyhow::Error> {
         );
     }
 
-    // Shared with policy_sync + Slice 2b-i correlator invalidation.
+    // Shared with policy_sync + Slice 2b correlator (invalidation + auto-insert).
     let identity_maps = Arc::new(Mutex::new(identity_maps));
     let correlator_cfg = IdentityCorrelatorConfig::from_env()
         .context("invalid identity correlator configuration")?;
     let correlator_state = CorrelatorState::new();
+    let pe_allowlist = Arc::new(PeAllowlistCache::new());
 
     // Metrics before correlator so invalidation counters are live from first event.
     let metrics = AgentMetrics::new()?;
 
     #[cfg(target_os = "linux")]
-    let _correlator = {
+    let (correlator_teardown_tx, _correlator) = {
         if !manual_seeds.is_empty() && !correlator_cfg.enabled {
             anyhow::bail!(
                 "NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS is set ({} id(s) written to BPF) but \
@@ -218,6 +221,7 @@ async fn main() -> Result<(), anyhow::Error> {
             correlator_cfg.clone(),
             Arc::clone(&identity_maps),
             Arc::clone(&correlator_state),
+            Arc::clone(&pe_allowlist),
             Arc::clone(&metrics),
             shutdown.clone(),
         );
@@ -237,7 +241,7 @@ async fn main() -> Result<(), anyhow::Error> {
                      (BPF map was seeded; side table/inotify arming failed)",
                 )?;
             }
-            Some(handle)
+            (Some(teardown_tx), Some(handle))
         } else {
             if !manual_seeds.is_empty() {
                 anyhow::bail!(
@@ -245,24 +249,36 @@ async fn main() -> Result<(), anyhow::Error> {
                      side table/inotify not armed; refusing to run with un-watched allow entries"
                 );
             }
-            None
+            (None, None)
         }
     };
     #[cfg(not(target_os = "linux"))]
     let _correlator = {
-        let _ = (correlator_cfg, correlator_state, &manual_seeds);
+        let _ = (&correlator_cfg, &manual_seeds);
         identity_correlator::spawn_identity_correlator(
             IdentityCorrelatorConfig {
                 enabled: false,
                 node_name: String::new(),
                 cgroup_root: PathBuf::from("/sys/fs/cgroup"),
+                trust_domain: identity_correlator::DEFAULT_SPIFFE_TRUST_DOMAIN.to_string(),
             },
             Arc::clone(&identity_maps),
-            CorrelatorState::new(),
+            Arc::clone(&correlator_state),
+            Arc::clone(&pe_allowlist),
             Arc::clone(&metrics),
             shutdown.clone(),
         );
         Option::<()>::None
+    };
+
+    let policy_hooks = IdentityPolicyHooks {
+        allowlist: Arc::clone(&pe_allowlist),
+        state: Arc::clone(&correlator_state),
+        maps: Arc::clone(&identity_maps),
+        #[cfg(target_os = "linux")]
+        teardown_tx: correlator_teardown_tx,
+        #[cfg(feature = "orchestrator")]
+        metrics: Some(Arc::clone(&metrics)),
     };
 
     let active_count = lsm_pin::active_deny_count(&deny_maps)?;
@@ -300,6 +316,7 @@ async fn main() -> Result<(), anyhow::Error> {
         deny_maps,
         Arc::clone(&identity_maps),
         policy_state,
+        Some(policy_hooks),
         shutdown.clone(),
     );
 

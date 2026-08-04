@@ -183,9 +183,14 @@ pub const PATH_DENY_COUNT_MAP: &str = bpf_obj_name("PATH_DENY_COUNT");
 /// `zt-policy-engine`'s `/v1/policy-bundle` export.
 pub const BOOTSTRAP_PATH_DENY_PREFIXES: &[&[u8]] = &[b"/tmp/", b"/dev/shm/", b"/var/tmp/"];
 
-/// Max entries in `ID_ALLOW_CGROUP` (Slice 2a). Sized for dense nodes
-/// with headroom; only allowlisted workloads are seeded (see threat-model).
-pub const IDENTITY_ALLOW_CGROUPS_MAX_ENTRIES: u32 = 4096;
+/// Max entries in `ID_ALLOW_CGROUP`.
+///
+/// Slice 2b-ii keys **one entry per container-leaf cgroup** (not one per pod).
+/// Typical allowlisted service-mesh pods run ~2–4 containers (app + sidecar ±
+/// init); 16384 restores ~4096-pod equivalent headroom at N≈4 while keeping
+/// the BPF `HashMap<u64,u8>` under ~1–1.4 MiB prealloc (see 2b-ii capacity
+/// decision). Only PE-allowlisted workloads on this node are inserted.
+pub const IDENTITY_ALLOW_CGROUPS_MAX_ENTRIES: u32 = 16384;
 
 /// BPF map: cgroup_id → allow (`1` = excepted for `/tmp/` when VALID=1).
 /// Kernel name ≤15 (`IDENTITY_ALLOW_CGROUPS` exceeded `BPF_OBJ_NAME_LEN`).
