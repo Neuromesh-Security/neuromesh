@@ -311,6 +311,18 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn drain_until(w: &mut TeardownWatcher) -> TeardownBatch {
+        let mut batch = TeardownBatch::default();
+        for _ in 0..50 {
+            batch = w.drain_events().unwrap();
+            if !batch.torn_down_paths.is_empty() || batch.overflow {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        batch
+    }
+
     #[test]
     fn detects_directory_teardown_via_parent_delete() {
         let base = std::env::temp_dir().join(format!("nm-inotify-{}", std::process::id()));
@@ -323,19 +335,60 @@ mod tests {
         w.watch_path(&leaf).unwrap();
         fs::remove_dir(&leaf).unwrap();
 
-        let mut batch = TeardownBatch::default();
-        for _ in 0..50 {
-            batch = w.drain_events().unwrap();
-            if !batch.torn_down_paths.is_empty() || batch.overflow {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        let batch = drain_until(&mut w);
         assert!(
             batch.torn_down_paths.iter().any(|p| p == &leaf),
             "expected teardown of {leaf:?}, got {:?}",
             batch.torn_down_paths
         );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Parent watches see DELETE for *any* sibling. Only the tracked leaf name
+    /// must produce a teardown path — unrelated siblings must be ignored.
+    #[test]
+    fn unrelated_sibling_delete_does_not_invalidate_tracked_child() {
+        let base = std::env::temp_dir().join(format!(
+            "nm-inotify-sib-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let tracked = base.join("tracked-cgroup");
+        let sibling = base.join("unrelated-sibling");
+        fs::create_dir_all(&tracked).unwrap();
+        fs::create_dir_all(&sibling).unwrap();
+
+        let mut w = TeardownWatcher::new().unwrap();
+        assert!(w.watch_path(&tracked).unwrap());
+
+        // Sibling teardown under the same parent watch — must NOT match.
+        fs::remove_dir(&sibling).unwrap();
+        let after_sibling = drain_until(&mut w);
+        assert!(
+            after_sibling.torn_down_paths.is_empty(),
+            "unrelated sibling delete must not invalidate; got {:?}",
+            after_sibling.torn_down_paths
+        );
+        assert!(
+            w.by_path.contains_key(&tracked),
+            "tracked path must remain registered after sibling delete"
+        );
+
+        // Tracked leaf teardown — must match only that full path.
+        fs::remove_dir(&tracked).unwrap();
+        let after_tracked = drain_until(&mut w);
+        assert_eq!(
+            after_tracked.torn_down_paths,
+            vec![tracked.clone()],
+            "only the tracked child name must invalidate"
+        );
+        assert!(!w.by_path.contains_key(&tracked));
+
         let _ = fs::remove_dir_all(&base);
     }
 }
