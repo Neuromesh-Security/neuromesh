@@ -183,7 +183,7 @@ Neuromesh follows an **Open Core** strategy: the runtime sensor and deterministi
 | Post-Quantum Cryptography signed telemetry envelopes | Planned — no PQC (Kyber/Dilithium or otherwise) code exists yet. |
 | Fleet Management (multi-cluster policy sync) | Planned — `zt-policy-engine` is currently a single-node policy evaluator; no multi-cluster sync exists yet. |
 | OIDC / SAML SSO, audited admin dashboards | Partial — RBAC, session verification, and structured access-decision logging are implemented (`security-dashboard/src/middleware.ts`, `src/lib/auth/rbac.ts`); the OIDC/SAML authentication handshake (callback endpoint, authorization-code/token exchange) is not yet implemented. |
-| 24×7 SLA, dedicated TAM, custom MITRE detection packs | Yes |
+| 24×7 SLA, dedicated TAM, custom MITRE detection packs | Planned — no support staff, TAM, or productized custom detection-pack service exists today (solo-maintained project). No committed timeline. |
 
 **Pricing:** [draganflaviusfx@gmail.com](mailto:draganflaviusfx@gmail.com)
 
