@@ -51,24 +51,21 @@ CG_ID="$(stat -c '%i' "$CG_BASE/tracked")"
 test -n "$CG_ID" && test "$CG_ID" -gt 0
 echo "tracked cgroup inode/cgroup_id=$CG_ID path=$CG_BASE/tracked"
 
+# Little-endian u64 key bytes for bpftool `key hex` (same helper as
+# manual_verify_identity_exception.sh). Do NOT parse bpftool -j dump with
+# bytes(key_list): newer bpftool emits hex *strings* in the key array, and
+# bytes(["af", ...]) raises TypeError: 'str' object cannot be interpreted as
+# an integer — a harness false-negative that masks a present map entry.
+u64_le_hex() {
+  python3 -c "import struct,sys; print(' '.join(f'{b:02x}' for b in struct.pack('<Q', int(sys.argv[1]))))" "$1"
+}
+
 map_has_key() {
   local id="$1"
-  bpftool -j map dump name ID_ALLOW_CGROUP 2>/dev/null | python3 -c '
-import json,sys,struct
-want=int(sys.argv[1])
-data=json.load(sys.stdin)
-for e in data:
-    k=e.get("key", e)
-    if isinstance(k, dict):
-        # bpftool sometimes emits {"value":[...]} nested — fall through
-        continue
-    if isinstance(k, list):
-        raw=bytes(k)
-        if len(raw)>=8 and struct.unpack("<Q", raw[:8])[0]==want:
-            sys.exit(0)
-print("missing")
-sys.exit(1)
-' "$id"
+  local key
+  key="$(u64_le_hex "$id")"
+  # shellcheck disable=SC2086
+  bpftool map lookup name ID_ALLOW_CGROUP key hex $key >/dev/null 2>&1
 }
 
 # Minimal PE stub so VALID can be fresh (exceptions matter for allow path;
