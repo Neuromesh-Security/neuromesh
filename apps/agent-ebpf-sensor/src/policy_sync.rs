@@ -113,6 +113,7 @@ pub async fn fetch_policy_bundle(
 /// Updates `hooks.allowlist` when present. Caller must run
 /// [`revoke_not_in_allowlist`] / [`clear_side_table_hygiene`] **after** releasing
 /// `identity_maps` locks (those helpers re-lock the maps).
+#[allow(clippy::too_many_arguments)] // deny/identity maps + optional PE hooks stay explicit
 pub async fn sync_once(
     client: &reqwest::Client,
     base_url: &str,
@@ -391,7 +392,7 @@ pub fn spawn_policy_sync(
                         }
                     };
                     // Maps unlocked — safe to revoke/clear (re-locks maps).
-                    if let (Some(ref h), Some(ref identity)) = (hooks.as_ref(), identity_outcome) {
+                    if let (Some(h), Some(ref identity)) = (hooks.as_ref(), identity_outcome) {
                         run_allowlist_followup(h, identity).await;
                     }
                 }
