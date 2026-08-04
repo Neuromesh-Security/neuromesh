@@ -3,7 +3,7 @@
 //! Watches each side-table `cgroup_path` for `DELETE_SELF` / `MOVE_SELF`.
 //! On `Q_OVERFLOW`, signals the correlator to run a forced fail-closed resync.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, RawFd};
@@ -42,12 +42,19 @@ impl TeardownWatcher {
     }
 
     /// Watch an absolute cgroup directory for teardown.
-    pub fn watch_path(&mut self, path: &Path) -> Result<()> {
+    ///
+    /// Returns `true` when a new inotify watch was installed, `false` if this
+    /// path was already watched. Missing paths are an error (caller must not
+    /// claim the watch is armed).
+    pub fn watch_path(&mut self, path: &Path) -> Result<bool> {
         if self.by_path.contains_key(path) {
-            return Ok(());
+            return Ok(false);
         }
         if !path.exists() {
-            return Ok(());
+            bail!(
+                "cannot inotify-watch {}: path does not exist",
+                path.display()
+            );
         }
         let mask = WatchMask::DELETE_SELF | WatchMask::MOVE_SELF | WatchMask::ONLYDIR;
         let wd = self
@@ -57,7 +64,7 @@ impl TeardownWatcher {
             .with_context(|| format!("inotify add_watch {}", path.display()))?;
         self.by_path.insert(path.to_path_buf(), wd.clone());
         self.by_wd.insert(wd, path.to_path_buf());
-        Ok(())
+        Ok(true)
     }
 
     pub fn unwatch_path(&mut self, path: &Path) -> Result<()> {
@@ -78,14 +85,26 @@ impl TeardownWatcher {
     }
 
     /// Re-arm watches for every path currently in the side table (post-resync).
+    ///
+    /// An **empty** path list is a no-op: it must not `clear_all_watches`. Startup
+    /// races with `register_manual_seed_ids` — if the correlator samples an empty
+    /// side table and Rearms `[]` after seeds already armed watches, clearing
+    /// would silently disarm lab/production invalidation.
     pub fn rearm_paths<I, P>(&mut self, paths: I) -> Result<()>
     where
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
+        let paths: Vec<PathBuf> = paths
+            .into_iter()
+            .map(|p| p.as_ref().to_path_buf())
+            .collect();
+        if paths.is_empty() {
+            return Ok(());
+        }
         self.clear_all_watches()?;
-        for p in paths {
-            self.watch_path(p.as_ref())?;
+        for p in &paths {
+            self.watch_path(p)?;
         }
         Ok(())
     }

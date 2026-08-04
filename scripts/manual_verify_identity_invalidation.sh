@@ -121,6 +121,8 @@ export NEUROMESH_NODE_NAME="${NEUROMESH_NODE_NAME:-slice2bi-manual-node}"
 export NEUROMESH_ZT_POLICY_ENGINE_URL="http://127.0.0.1:${PE_PORT}"
 export NEUROMESH_POLICY_BUNDLE_TOKEN="$BUNDLE_TOKEN"
 export NEUROMESH_BPF_PIN_ROOT="$PIN_ROOT"
+# Ensure correlator INFO lines (Side-table registered / armed inotify) appear in AGENT_LOG.
+export RUST_LOG="${RUST_LOG:-info}"
 # Correlator will try kube Config::infer — for teardown-only hosts without a
 # cluster, set NEUROMESH_IDENTITY_CORRELATOR_TEARDOWN_ONLY after implementing
 # that flag; until then prefer a kubeconfig pointing at kind/droplet cluster.
@@ -143,8 +145,30 @@ for _ in $(seq 1 50); do
   fi
   sleep 0.1
 done
-map_has_key "$CG_ID" || fail "seeded cgroup_id $CG_ID not in ID_ALLOW_CGROUP"
+map_has_key "$CG_ID" || {
+  echo "---- agent log ----"
+  tail -n 120 "$AGENT_LOG" || true
+  fail "seeded cgroup_id $CG_ID not in ID_ALLOW_CGROUP"
+}
 pass "seeded cgroup_id present in IDENTITY_ALLOW_CGROUPS"
+
+# Fail closed if BPF was seeded but correlator never armed the side table/watch.
+# Brief wait: inotify worker polls cmds on a ≤200ms cadence after register returns.
+armed=0
+for _ in $(seq 1 30); do
+  if grep -q "Side-table registered seeded cgroup_id=${CG_ID}" "$AGENT_LOG" \
+    && grep -q "armed inotify teardown watch path=" "$AGENT_LOG"; then
+    armed=1
+    break
+  fi
+  sleep 0.1
+done
+if [ "$armed" -ne 1 ]; then
+  echo "---- agent log (correlator bridge missing) ----"
+  tail -n 200 "$AGENT_LOG" || true
+  fail "BPF seed present but correlator did not log Side-table register + armed inotify for cgroup_id=$CG_ID"
+fi
+pass "correlator side-table + inotify watch armed for seeded cgroup"
 
 echo "== (A) measure cgroup teardown → map delete latency =="
 START_NS="$(date +%s%N)"
@@ -160,7 +184,11 @@ for _ in $(seq 1 400); do
   # 5ms steps
   sleep 0.005
 done
-test "$GONE" -eq 1 || fail "map entry still present >2s after cgroup teardown"
+test "$GONE" -eq 1 || {
+  echo "---- agent log (teardown did not clear map) ----"
+  tail -n 200 "$AGENT_LOG" || true
+  fail "map entry still present >2s after cgroup teardown"
+}
 ELAPSED_NS=$((END_NS - START_NS))
 ELAPSED_MS="$(python3 -c "print(f'{int('$ELAPSED_NS')/1e6:.3f}')")"
 echo "MEASURED_INVALIDATION_LATENCY_MS=$ELAPSED_MS"

@@ -102,7 +102,8 @@ pub enum TeardownCmd {
 
 /// Register a manually seeded cgroup_id into the side table.
 ///
-/// Resolves path via cgroup walk; parses pod UID when the path is a K8s layout.
+/// Resolves path via cgroup walk; parses pod UID when the path is a K8s layout
+/// (empty `pod_uid` for lab synthetic cgroups is OK — teardown watch still arms).
 /// BPF map must already contain the allow entry (Slice 2a seed path).
 #[cfg(target_os = "linux")]
 pub async fn register_seeded_cgroup(
@@ -137,9 +138,44 @@ pub async fn register_seeded_cgroup(
         }
     }
     if let Some(tx) = teardown_tx {
-        let _ = tx.send(TeardownCmd::Watch(path));
+        tx.send(TeardownCmd::Watch(path.clone()))
+            .map_err(|_| anyhow::anyhow!("inotify worker channel closed — cannot arm watch"))?;
     }
     Ok(entry)
+}
+
+/// Arm side table + inotify for every lab-seeded cgroup_id (Slice 2a → 2b-i bridge).
+///
+/// `identity_allow::apply_manual_cgroup_seeds_from_env` only writes the BPF map.
+/// Without this call, teardown/Pod-DELETE invalidation never sees those ids.
+#[cfg(target_os = "linux")]
+pub async fn register_manual_seed_ids(
+    state: &CorrelatorState,
+    cgroup_root: &Path,
+    cgroup_ids: &[u64],
+    teardown_tx: &tokio::sync::mpsc::UnboundedSender<TeardownCmd>,
+) -> Result<Vec<SideEntry>> {
+    let mut out = Vec::with_capacity(cgroup_ids.len());
+    for id in cgroup_ids {
+        let entry = register_seeded_cgroup(state, cgroup_root, *id, Some(teardown_tx)).await?;
+        tracing::info!(
+            target: "neuromesh::identity_correlator",
+            cgroup_id = *id,
+            path = %entry.cgroup_path.display(),
+            pod_uid = %entry.pod_uid,
+            "Side-table registered seeded cgroup; inotify watch queued"
+        );
+        // Also via `log` so default RUST_LOG=info agent consoles always show it
+        // (matches other startup `info!` lines in main).
+        log::info!(
+            "Side-table registered seeded cgroup_id={} path={} pod_uid={:?} (inotify watch queued)",
+            id,
+            entry.cgroup_path.display(),
+            entry.pod_uid
+        );
+        out.push(entry);
+    }
+    Ok(out)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -283,13 +319,37 @@ fn inotify_worker_loop(
         while let Ok(cmd) = rx_cmd.try_recv() {
             match cmd {
                 TeardownCmd::Watch(path) => {
-                    if let Err(e) = watcher.watch_path(&path) {
-                        tracing::warn!(
-                            target: "neuromesh::identity_correlator",
-                            path = %path.display(),
-                            error = %e,
-                            "failed to watch cgroup path"
-                        );
+                    match watcher.watch_path(&path) {
+                        Ok(true) => {
+                            log::info!(
+                                "armed inotify teardown watch path={}",
+                                path.display()
+                            );
+                            tracing::info!(
+                                target: "neuromesh::identity_correlator",
+                                path = %path.display(),
+                                "armed inotify teardown watch"
+                            );
+                        }
+                        Ok(false) => {
+                            tracing::debug!(
+                                target: "neuromesh::identity_correlator",
+                                path = %path.display(),
+                                "inotify watch already armed for path"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "neuromesh::identity_correlator",
+                                path = %path.display(),
+                                error = %e,
+                                "failed to watch cgroup path"
+                            );
+                            log::warn!(
+                                "failed to watch cgroup path={}: {e}",
+                                path.display()
+                            );
+                        }
                     }
                 }
                 TeardownCmd::Unwatch(path) => {
@@ -595,5 +655,51 @@ mod overflow_resync_tests {
         let ids = plan_missing_path_sweep(&mut table);
         assert_eq!(ids, vec![1]);
         assert!(table.is_empty());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod manual_seed_bridge_tests {
+    use super::*;
+    use std::fs;
+
+    /// Lab manual-seed path must populate the side table AND queue an inotify Watch
+    /// — BPF map seeding alone is not enough (Slice 2a vs 2b-i bridge).
+    #[tokio::test]
+    async fn register_manual_seed_ids_fills_side_table_and_queues_watch() {
+        let root = std::env::temp_dir().join(format!(
+            "neuromesh-manual-seed-bridge-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let leaf = root.join("tracked");
+        fs::create_dir_all(&leaf).unwrap();
+        let cgroup_id = cgroup_resolve::inode_of_path(&leaf).unwrap();
+
+        let state = CorrelatorState::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TeardownCmd>();
+
+        let entries = register_manual_seed_ids(&state, &root, &[cgroup_id], &tx)
+            .await
+            .expect("register_manual_seed_ids");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].cgroup_path, leaf);
+        assert_eq!(entries[0].inode, cgroup_id);
+        // Synthetic lab path is not kubepods — empty pod_uid is expected.
+        assert!(entries[0].pod_uid.is_empty());
+
+        {
+            let table = state.side_table.lock().await;
+            let got = table.get(cgroup_id).expect("side-table entry missing");
+            assert_eq!(got.cgroup_path, leaf);
+        }
+
+        match rx.try_recv() {
+            Ok(TeardownCmd::Watch(p)) => assert_eq!(p, leaf),
+            other => panic!("expected TeardownCmd::Watch({leaf:?}), got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

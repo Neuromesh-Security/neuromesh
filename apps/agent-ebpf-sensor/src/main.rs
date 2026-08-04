@@ -205,6 +205,15 @@ async fn main() -> Result<(), anyhow::Error> {
 
     #[cfg(target_os = "linux")]
     let _correlator = {
+        if !manual_seeds.is_empty() && !correlator_cfg.enabled {
+            anyhow::bail!(
+                "NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS is set ({} id(s) written to BPF) but \
+                 NEUROMESH_IDENTITY_CORRELATOR is disabled — side table/inotify will not arm; \
+                 teardown invalidation cannot run for lab seeds. Enable the correlator \
+                 (NEUROMESH_IDENTITY_CORRELATOR=1) or unset the manual seed env.",
+                manual_seeds.len()
+            );
+        }
         let spawned = identity_correlator::spawn_identity_correlator(
             correlator_cfg.clone(),
             Arc::clone(&identity_maps),
@@ -213,36 +222,29 @@ async fn main() -> Result<(), anyhow::Error> {
             shutdown.clone(),
         );
         if let Some((handle, teardown_tx)) = spawned {
-            for id in &manual_seeds {
-                match identity_correlator::register_seeded_cgroup(
+            // Slice 2a BPF seed alone does not inform the correlator. Bridge every
+            // manual seed into the side table + inotify watch (lab/2b-i test support).
+            if !manual_seeds.is_empty() {
+                identity_correlator::register_manual_seed_ids(
                     &correlator_state,
                     &correlator_cfg.cgroup_root,
-                    *id,
-                    Some(&teardown_tx),
+                    &manual_seeds,
+                    &teardown_tx,
                 )
                 .await
-                {
-                    Ok(entry) => {
-                        info!(
-                            "📋 Side-table registered seeded cgroup_id={} path={} pod_uid={:?}",
-                            id,
-                            entry.cgroup_path.display(),
-                            entry.pod_uid
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "neuromesh::identity_correlator",
-                            cgroup_id = *id,
-                            error = %e,
-                            "failed to register seeded cgroup in side table \
-                             (BPF seed remains; invalidation may be incomplete for this id)"
-                        );
-                    }
-                }
+                .context(
+                    "failed to register manual cgroup seeds with identity correlator \
+                     (BPF map was seeded; side table/inotify arming failed)",
+                )?;
             }
             Some(handle)
         } else {
+            if !manual_seeds.is_empty() {
+                anyhow::bail!(
+                    "manual cgroup seeds applied to BPF but identity correlator did not start — \
+                     side table/inotify not armed; refusing to run with un-watched allow entries"
+                );
+            }
             None
         }
     };

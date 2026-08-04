@@ -250,8 +250,12 @@ pub fn emit_manual_seed_security_warning(ids: &[u64]) {
     );
 }
 
-/// Load manual seeds from env; emit warning if any; write into map.
+/// Load manual seeds from env; emit warning if any; write into **BPF map only**.
+///
 /// Does **not** set VALID=1 — PE freshness still required.
+/// Does **not** arm Slice 2b-i side table / inotify — callers (see `main` /
+/// [`crate::identity_correlator::register_manual_seed_ids`]) MUST register each
+/// returned id with the correlator or invalidation will never fire for lab seeds.
 pub fn apply_manual_cgroup_seeds_from_env(maps: &mut IdentityAllowMaps) -> Result<Vec<u64>> {
     let Ok(raw) = std::env::var(IDENTITY_ALLOW_CGROUP_IDS_ENV) else {
         return Ok(Vec::new());
