@@ -322,13 +322,13 @@ fn inotify_worker_loop(
                     match watcher.watch_path(&path) {
                         Ok(true) => {
                             log::info!(
-                                "armed inotify teardown watch path={}",
+                                "armed inotify teardown watch path={} (parent DELETE/MOVED_FROM)",
                                 path.display()
                             );
                             tracing::info!(
                                 target: "neuromesh::identity_correlator",
                                 path = %path.display(),
-                                "armed inotify teardown watch"
+                                "armed inotify teardown watch (parent DELETE/MOVED_FROM)"
                             );
                         }
                         Ok(false) => {
@@ -515,18 +515,41 @@ async fn run_correlator(
                         let mut table = state.side_table.lock().await;
                         match table.cgroup_id_for_path(&path) {
                             Some(cid) => plan_teardown(&mut table, cid),
-                            None => None,
+                            None => {
+                                log::warn!(
+                                    "inotify teardown path={} not in side table — no BPF delete",
+                                    path.display()
+                                );
+                                tracing::warn!(
+                                    target: "neuromesh::identity_correlator",
+                                    path = %path.display(),
+                                    "inotify teardown path not in side table — no BPF delete"
+                                );
+                                None
+                            }
                         }
                     };
                     let _ = tx_cmd.send(TeardownCmd::Unwatch(path));
                     if let Some(id) = id {
-                        let _ = apply_invalidations(
+                        if let Err(e) = apply_invalidations(
                             &maps,
                             &[id],
                             InvalidationReason::CgroupTeardown,
                             #[cfg(feature = "orchestrator")]
                             Some(metrics.as_ref()),
-                        ).await;
+                        )
+                        .await
+                        {
+                            log::error!(
+                                "failed to apply cgroup_teardown invalidation for cgroup_id={id}: {e}"
+                            );
+                            tracing::error!(
+                                target: "neuromesh::identity_correlator",
+                                cgroup_id = id,
+                                error = %e,
+                                "failed to apply cgroup_teardown invalidation"
+                            );
+                        }
                     }
                 }
             }

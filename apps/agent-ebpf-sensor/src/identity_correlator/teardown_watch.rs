@@ -1,11 +1,28 @@
 //! inotify-based cgroup directory teardown watch (Slice 2b-i).
 //!
-//! Watches each side-table `cgroup_path` for `DELETE_SELF` / `MOVE_SELF`.
+//! ## Why parent watches (not `DELETE_SELF` on the leaf)
+//!
+//! Regular filesystems (tmpfs/ext4) deliver `IN_DELETE_SELF` / `IN_IGNORED` when
+//! the watched directory itself is `rmdir`'d — see `inotify(7)` and
+//! `WatchMask::DELETE_SELF` in the `inotify` crate.
+//!
+//! **cgroupfs is kernfs.** Kernfs historically does **not** emit
+//! `IN_DELETE_SELF` / `IN_IGNORED` on cgroup directory removal even when
+//! `inotify_add_watch(..., IN_DELETE_SELF)` succeeds (LKML 2023 thread
+//! "KernFS: Missing IN_DELETE_SELF or IN_IGNORED"; kernfs patches to add those
+//! events are far newer than typical droplet/Azure kernels ~6.8). Symptom:
+//! watch appears armed, `rmdir` of the cgroup happens, **zero events**.
+//!
+//! VFS still notifies the **parent** directory with `IN_DELETE` /
+//! `IN_MOVED_FROM` when a child is removed. So we watch the parent for those
+//! masks and match the child basename.
+//!
 //! On `Q_OVERFLOW`, signals the correlator to run a forced fail-closed resync.
 
 use anyhow::{bail, Context, Result};
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 
@@ -18,11 +35,21 @@ pub struct TeardownBatch {
     pub overflow: bool,
 }
 
-/// Tracks inotify watches for registered cgroup directories.
+struct ParentWatch {
+    wd: WatchDescriptor,
+    /// Child directory names under this parent we care about.
+    children: HashSet<OsString>,
+}
+
+/// Tracks inotify watches for registered cgroup directories (via their parents).
 pub struct TeardownWatcher {
     inotify: Inotify,
+    /// Watch descriptor → parent path.
     by_wd: HashMap<WatchDescriptor, PathBuf>,
-    by_path: HashMap<PathBuf, WatchDescriptor>,
+    /// Parent path → active watch + child set.
+    by_parent: HashMap<PathBuf, ParentWatch>,
+    /// Full cgroup path → (parent, child name) for unwatch.
+    by_path: HashMap<PathBuf, (PathBuf, OsString)>,
 }
 
 impl AsRawFd for TeardownWatcher {
@@ -33,19 +60,20 @@ impl AsRawFd for TeardownWatcher {
 
 impl TeardownWatcher {
     pub fn new() -> Result<Self> {
+        // `Inotify::init` sets IN_CLOEXEC | IN_NONBLOCK (inotify 0.11 docs).
         let inotify = Inotify::init().context("inotify_init1 failed")?;
         Ok(Self {
             inotify,
             by_wd: HashMap::new(),
+            by_parent: HashMap::new(),
             by_path: HashMap::new(),
         })
     }
 
     /// Watch an absolute cgroup directory for teardown.
     ///
-    /// Returns `true` when a new inotify watch was installed, `false` if this
-    /// path was already watched. Missing paths are an error (caller must not
-    /// claim the watch is armed).
+    /// Returns `true` when this full path was newly registered, `false` if it
+    /// was already tracked. Missing paths / missing parents are errors.
     pub fn watch_path(&mut self, path: &Path) -> Result<bool> {
         if self.by_path.contains_key(path) {
             return Ok(false);
@@ -56,23 +84,66 @@ impl TeardownWatcher {
                 path.display()
             );
         }
-        let mask = WatchMask::DELETE_SELF | WatchMask::MOVE_SELF | WatchMask::ONLYDIR;
+        let parent = path.parent().ok_or_else(|| {
+            anyhow::anyhow!("cannot inotify-watch {}: no parent directory", path.display())
+        })?;
+        let child = path.file_name().ok_or_else(|| {
+            anyhow::anyhow!("cannot inotify-watch {}: no file name component", path.display())
+        })?;
+        let child = child.to_os_string();
+        let parent_buf = parent.to_path_buf();
+
+        if let Some(pw) = self.by_parent.get_mut(&parent_buf) {
+            pw.children.insert(child.clone());
+            self.by_path
+                .insert(path.to_path_buf(), (parent_buf, child));
+            return Ok(true);
+        }
+
+        // Parent watch: child unlink/rename — works on cgroupfs/kernfs where
+        // DELETE_SELF on the leaf does not.
+        let mask = WatchMask::DELETE | WatchMask::MOVED_FROM | WatchMask::ONLYDIR;
         let wd = self
             .inotify
             .watches()
-            .add(path, mask)
-            .with_context(|| format!("inotify add_watch {}", path.display()))?;
-        self.by_path.insert(path.to_path_buf(), wd.clone());
-        self.by_wd.insert(wd, path.to_path_buf());
+            .add(&parent_buf, mask)
+            .with_context(|| {
+                format!(
+                    "inotify add_watch parent {} (for child {})",
+                    parent_buf.display(),
+                    Path::new(&child).display()
+                )
+            })?;
+
+        let mut children = HashSet::new();
+        children.insert(child.clone());
+        self.by_wd.insert(wd.clone(), parent_buf.clone());
+        self.by_parent.insert(
+            parent_buf.clone(),
+            ParentWatch {
+                wd,
+                children,
+            },
+        );
+        self.by_path
+            .insert(path.to_path_buf(), (parent_buf, child));
         Ok(true)
     }
 
     pub fn unwatch_path(&mut self, path: &Path) -> Result<()> {
-        let Some(wd) = self.by_path.remove(path) else {
+        let Some((parent, child)) = self.by_path.remove(path) else {
             return Ok(());
         };
-        self.by_wd.remove(&wd);
-        let _ = self.inotify.watches().remove(wd);
+        let Some(mut pw) = self.by_parent.remove(&parent) else {
+            return Ok(());
+        };
+        pw.children.remove(&child);
+        if pw.children.is_empty() {
+            self.by_wd.remove(&pw.wd);
+            let _ = self.inotify.watches().remove(pw.wd);
+        } else {
+            self.by_parent.insert(parent, pw);
+        }
         Ok(())
     }
 
@@ -86,10 +157,7 @@ impl TeardownWatcher {
 
     /// Re-arm watches for every path currently in the side table (post-resync).
     ///
-    /// An **empty** path list is a no-op: it must not `clear_all_watches`. Startup
-    /// races with `register_manual_seed_ids` — if the correlator samples an empty
-    /// side table and Rearms `[]` after seeds already armed watches, clearing
-    /// would silently disarm lab/production invalidation.
+    /// An **empty** path list is a no-op: it must not `clear_all_watches`.
     pub fn rearm_paths<I, P>(&mut self, paths: I) -> Result<()>
     where
         I: IntoIterator<Item = P>,
@@ -122,6 +190,44 @@ impl TeardownWatcher {
             let mut saw_any = false;
             for ev in events {
                 saw_any = true;
+                let mask_bits = ev.mask.bits();
+                let parent = self.by_wd.get(&ev.wd).cloned();
+                let name = ev
+                    .name
+                    .as_ref()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+
+                // Diagnostic: every raw event (even ignored ones) so droplet
+                // runs can distinguish "never fires" vs "fires but filtered".
+                log::info!(
+                    "inotify raw event wd={} mask=0x{:x} parent={} name={:?} \
+                     DELETE={} MOVED_FROM={} DELETE_SELF={} IGNORED={} Q_OVERFLOW={}",
+                    ev.wd.get_watch_descriptor_id(),
+                    mask_bits,
+                    parent
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<unknown-wd>".into()),
+                    name,
+                    ev.mask.contains(EventMask::DELETE),
+                    ev.mask.contains(EventMask::MOVED_FROM),
+                    ev.mask.contains(EventMask::DELETE_SELF),
+                    ev.mask.contains(EventMask::IGNORED),
+                    ev.mask.contains(EventMask::Q_OVERFLOW),
+                );
+                tracing::info!(
+                    target: "neuromesh::identity_correlator",
+                    wd = ev.wd.get_watch_descriptor_id(),
+                    mask = format_args!("0x{mask_bits:x}"),
+                    parent = %parent
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<unknown-wd>".into()),
+                    name = %name,
+                    "inotify raw event"
+                );
+
                 if ev.mask.contains(EventMask::Q_OVERFLOW) {
                     batch.overflow = true;
                     tracing::error!(
@@ -130,15 +236,68 @@ impl TeardownWatcher {
                     );
                     continue;
                 }
-                if ev.mask.contains(EventMask::DELETE_SELF)
-                    || ev.mask.contains(EventMask::MOVE_SELF)
-                    || ev.mask.contains(EventMask::IGNORED)
-                {
-                    if let Some(path) = self.by_wd.remove(&ev.wd) {
-                        self.by_path.remove(&path);
-                        batch.torn_down_paths.push(path);
+
+                // Parent lost a child (cgroupfs-compatible path).
+                let is_child_gone = ev.mask.contains(EventMask::DELETE)
+                    || ev.mask.contains(EventMask::MOVED_FROM);
+                if !is_child_gone {
+                    log::info!(
+                        "inotify event mask=0x{:x} for parent={} name={:?} — \
+                         not DELETE/MOVED_FROM child teardown, ignoring",
+                        mask_bits,
+                        parent
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<unknown>".into()),
+                        name
+                    );
+                    continue;
+                }
+
+                let Some(parent_path) = parent else {
+                    log::warn!(
+                        "inotify DELETE/MOVED_FROM for unknown wd={} name={:?} — ignoring",
+                        ev.wd.get_watch_descriptor_id(),
+                        name
+                    );
+                    continue;
+                };
+                if name.is_empty() {
+                    log::info!(
+                        "inotify DELETE/MOVED_FROM on parent={} with empty name — ignoring",
+                        parent_path.display()
+                    );
+                    continue;
+                }
+                let child = OsString::from(&name);
+                let should_drop_parent = {
+                    let Some(pw) = self.by_parent.get_mut(&parent_path) else {
+                        continue;
+                    };
+                    if !pw.children.remove(&child) {
+                        log::info!(
+                            "inotify child teardown parent={} name={:?} — not in tracked set, ignoring",
+                            parent_path.display(),
+                            name
+                        );
+                        continue;
+                    }
+                    pw.children.is_empty()
+                };
+                let full = parent_path.join(&child);
+                self.by_path.remove(&full);
+                if should_drop_parent {
+                    if let Some(pw) = self.by_parent.remove(&parent_path) {
+                        self.by_wd.remove(&pw.wd);
+                        // Watch may already be IGNORED by kernel; ignore rm errors.
+                        let _ = self.inotify.watches().remove(pw.wd);
                     }
                 }
+                log::info!(
+                    "inotify child teardown matched full path={}",
+                    full.display()
+                );
+                batch.torn_down_paths.push(full);
             }
             if !saw_any || batch.overflow {
                 break;
@@ -154,7 +313,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn detects_directory_teardown() {
+    fn detects_directory_teardown_via_parent_delete() {
         let base = std::env::temp_dir().join(format!("nm-inotify-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
