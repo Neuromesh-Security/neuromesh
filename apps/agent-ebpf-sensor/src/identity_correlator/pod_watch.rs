@@ -48,7 +48,9 @@ pub struct PodView {
 pub enum PodWatchEvent {
     /// ADDED or MODIFIED — run idempotent `reconcile_pod`.
     Upsert(PodView),
-    Deleted { uid: String },
+    Deleted {
+        uid: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,10 +318,7 @@ async fn watch_loop(
                     PodWatchEvent::Upsert(view)
                 }
                 "DELETED" => {
-                    let Some(uid) = ev
-                        .object
-                        .pointer("/metadata/uid")
-                        .and_then(|v| v.as_str())
+                    let Some(uid) = ev.object.pointer("/metadata/uid").and_then(|v| v.as_str())
                     else {
                         continue;
                     };

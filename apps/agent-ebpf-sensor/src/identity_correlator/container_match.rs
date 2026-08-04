@@ -160,7 +160,9 @@ mod tests {
                 .as_nanos()
         ));
         let _ = fs::remove_dir_all(&base);
-        let pod = base.join("kubepods").join("podaaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        let pod = base
+            .join("kubepods")
+            .join("podaaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         let leaf_name = "81591f675f72aabbccddeeff00112233445566778899aabbccddeeff00112233";
         fs::create_dir_all(pod.join(leaf_name)).unwrap();
         let pod_dir = find_existing_pod_dir(&base, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
