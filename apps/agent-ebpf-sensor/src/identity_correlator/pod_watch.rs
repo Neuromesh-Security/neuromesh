@@ -76,7 +76,9 @@ struct WatchEvent {
 impl K8sClient {
     /// Prefer in-cluster ServiceAccount; fall back to `KUBERNETES_SERVICE_HOST`/`PORT`
     /// with token from SA paths. Explicit `NEUROMESH_K8S_API_URL` +
-    /// `NEUROMESH_K8S_BEARER_TOKEN` override for lab/kind.
+    /// `NEUROMESH_K8S_BEARER_TOKEN` override for host-agent / lab (does **not**
+    /// read `KUBECONFIG`). Optional `NEUROMESH_K8S_CA_FILE` PEM for private CA
+    /// (k3s `server-ca.crt`) — required for TLS verify against local apiserver.
     pub async fn connect() -> Result<Self> {
         if let (Ok(url), Ok(token)) = (
             std::env::var("NEUROMESH_K8S_API_URL"),
@@ -87,10 +89,18 @@ impl K8sClient {
             if url.is_empty() || token.is_empty() {
                 bail!("NEUROMESH_K8S_API_URL / NEUROMESH_K8S_BEARER_TOKEN empty");
             }
-            let http = reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .context("build reqwest client")?;
+            let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
+            if let Ok(ca_path) = std::env::var("NEUROMESH_K8S_CA_FILE") {
+                let ca_path = ca_path.trim();
+                if !ca_path.is_empty() {
+                    let ca = std::fs::read(ca_path)
+                        .with_context(|| format!("read NEUROMESH_K8S_CA_FILE at {ca_path}"))?;
+                    let cert =
+                        Certificate::from_pem(&ca).context("parse NEUROMESH_K8S_CA_FILE PEM")?;
+                    builder = builder.add_root_certificate(cert);
+                }
+            }
+            let http = builder.build().context("build reqwest client")?;
             return Ok(Self {
                 http,
                 base_url: url,
@@ -239,6 +249,97 @@ pub fn spawn_pod_watch(
     rx
 }
 
+/// Accumulates HTTP body chunks and yields complete NDJSON lines (no trailing `\n`).
+#[derive(Default)]
+struct NdjsonLineBuf {
+    buf: Vec<u8>,
+}
+
+impl NdjsonLineBuf {
+    /// Push a chunk; return every full line completed by this chunk (may be empty).
+    fn push_chunk(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
+        self.buf.extend_from_slice(chunk);
+        let mut lines = Vec::new();
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let mut line: Vec<u8> = self.buf.drain(..=pos).collect();
+            line.pop(); // drop '\n'
+            if !line.is_empty() {
+                lines.push(line);
+            }
+        }
+        lines
+    }
+}
+
+/// Decode one Kubernetes watch NDJSON line into optional RV update + channel event.
+///
+/// Returns `None` when the line is malformed or a non-actionable type (e.g. BOOKMARK
+/// without a parseable pod object — RV still updated when present).
+fn decode_watch_line(line: &[u8]) -> Option<(Option<String>, Option<PodWatchEvent>)> {
+    let ev: WatchEvent = match serde_json::from_slice(line) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!(
+                target: "neuromesh::identity_correlator",
+                error = %e,
+                "skip malformed watch line"
+            );
+            return None;
+        }
+    };
+    let rv = ev
+        .object
+        .pointer("/metadata/resourceVersion")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let event = match ev.event_type.as_str() {
+        "ADDED" | "MODIFIED" => parse_pod_view(&ev.object).map(PodWatchEvent::Upsert),
+        "DELETED" => ev
+            .object
+            .pointer("/metadata/uid")
+            .and_then(|v| v.as_str())
+            .map(|uid| PodWatchEvent::Deleted {
+                uid: uid.to_string(),
+            }),
+        _ => None,
+    };
+    Some((rv, event))
+}
+
+/// Stream-consume a watch body: parse each complete NDJSON line as chunks arrive
+/// and `send` immediately — **must not** wait for the HTTP response to finish.
+async fn consume_watch_byte_stream<S, E>(
+    stream: S,
+    tx: &mpsc::UnboundedSender<PodWatchEvent>,
+    resource_version: &mut String,
+) -> Result<()>
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, E>>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    use futures_util::StreamExt;
+
+    futures_util::pin_mut!(stream);
+    let mut line_buf = NdjsonLineBuf::default();
+    while let Some(item) = stream.next().await {
+        let chunk = item.context("watch stream chunk")?;
+        for line in line_buf.push_chunk(&chunk) {
+            let Some((rv, event)) = decode_watch_line(&line) else {
+                continue;
+            };
+            if let Some(rv) = rv {
+                *resource_version = rv;
+            }
+            if let Some(event) = event {
+                if tx.send(event).is_err() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn watch_loop(
     client: K8sClient,
     node_name: String,
@@ -263,6 +364,8 @@ async fn watch_loop(
             "/api/v1/pods?watch=1&allowWatchBookmarks=true&fieldSelector={selector}&resourceVersion={resource_version}&timeoutSeconds=30"
         );
         let url = format!("{}{path}", client.base_url);
+        // Per-request timeout must exceed timeoutSeconds so the stream can run
+        // to server close; never buffer the full body before parsing.
         let resp = tokio::select! {
             _ = shutdown.cancelled() => break,
             r = client
@@ -270,7 +373,7 @@ async fn watch_loop(
                 .get(&url)
                 .bearer_auth(&client.token)
                 .header(reqwest::header::ACCEPT, "application/json")
-                .timeout(Duration::from_secs(60))
+                .timeout(Duration::from_secs(90))
                 .send() => r.with_context(|| format!("watch GET {url}"))?,
         };
         if !resp.status().is_success() {
@@ -287,49 +390,11 @@ async fn watch_loop(
             bail!("watch HTTP {status}: {}", truncate(&body, 500));
         }
 
-        let bytes = resp.bytes().await.context("read watch body")?;
-        for line in bytes.split(|b| *b == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            let ev: WatchEvent = match serde_json::from_slice(line) {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::debug!(
-                        target: "neuromesh::identity_correlator",
-                        error = %e,
-                        "skip malformed watch line"
-                    );
-                    continue;
-                }
-            };
-            if let Some(rv) = ev
-                .object
-                .pointer("/metadata/resourceVersion")
-                .and_then(|v| v.as_str())
-            {
-                resource_version = rv.to_string();
-            }
-            let event = match ev.event_type.as_str() {
-                "ADDED" | "MODIFIED" => {
-                    let Some(view) = parse_pod_view(&ev.object) else {
-                        continue;
-                    };
-                    PodWatchEvent::Upsert(view)
-                }
-                "DELETED" => {
-                    let Some(uid) = ev.object.pointer("/metadata/uid").and_then(|v| v.as_str())
-                    else {
-                        continue;
-                    };
-                    PodWatchEvent::Deleted {
-                        uid: uid.to_string(),
-                    }
-                }
-                _ => continue,
-            };
-            if tx.send(event).is_err() {
-                return Ok(());
+        let stream = resp.bytes_stream();
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            result = consume_watch_byte_stream(stream, &tx, &mut resource_version) => {
+                result?;
             }
         }
     }
@@ -369,6 +434,10 @@ pub fn validate_node_name(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use std::io;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn rejects_empty_node_name() {
@@ -419,5 +488,108 @@ mod tests {
             Some("containerd://abc123")
         );
         assert!(!v.containers[1].running);
+    }
+
+    #[test]
+    fn ndjson_buf_splits_across_chunks() {
+        let mut buf = NdjsonLineBuf::default();
+        assert!(buf.push_chunk(b"{\"type\":\"").is_empty());
+        let lines = buf.push_chunk(b"ADDED\"}\n{\"type\":\"DELETED\"}\n");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], br#"{"type":"ADDED"}"#);
+        assert_eq!(lines[1], br#"{"type":"DELETED"}"#);
+    }
+
+    #[test]
+    fn decode_watch_line_added_and_deleted() {
+        let added = serde_json::json!({
+            "type": "ADDED",
+            "object": {
+                "metadata": { "uid": "u1", "namespace": "ns", "resourceVersion": "9" },
+                "spec": { "serviceAccountName": "sa" },
+                "status": { "containerStatuses": [] }
+            }
+        });
+        let line = serde_json::to_vec(&added).unwrap();
+        let (rv, ev) = decode_watch_line(&line).unwrap();
+        assert_eq!(rv.as_deref(), Some("9"));
+        match ev.unwrap() {
+            PodWatchEvent::Upsert(p) => assert_eq!(p.uid, "u1"),
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let deleted = serde_json::json!({
+            "type": "DELETED",
+            "object": { "metadata": { "uid": "u2", "resourceVersion": "10" } }
+        });
+        let line = serde_json::to_vec(&deleted).unwrap();
+        let (rv, ev) = decode_watch_line(&line).unwrap();
+        assert_eq!(rv.as_deref(), Some("10"));
+        match ev.unwrap() {
+            PodWatchEvent::Deleted { uid } => assert_eq!(uid, "u2"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// A complete NDJSON line arriving mid-stream must be forwarded on the
+    /// channel **before** the HTTP stream closes (the old `resp.bytes()` bug).
+    #[tokio::test]
+    async fn mid_stream_line_forwarded_before_connection_closes() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (chunk_tx, chunk_rx) = mpsc::channel::<Bytes>(4);
+        let stream_closed = Arc::new(AtomicBool::new(false));
+        let closed_flag = stream_closed.clone();
+
+        let mut line = serde_json::to_vec(&serde_json::json!({
+            "type": "MODIFIED",
+            "object": {
+                "metadata": {
+                    "uid": "mid-stream-uid",
+                    "namespace": "default",
+                    "resourceVersion": "42"
+                },
+                "spec": { "serviceAccountName": "default" },
+                "status": {
+                    "containerStatuses": [{
+                        "name": "main",
+                        "containerID": "containerd://abc",
+                        "state": { "running": {} }
+                    }]
+                }
+            }
+        }))
+        .unwrap();
+        line.push(b'\n');
+        let first = Bytes::from(line);
+
+        let join = tokio::spawn(async move {
+            let stream = futures_util::stream::unfold(chunk_rx, |mut rx| async {
+                rx.recv().await.map(|b| (Ok::<_, io::Error>(b), rx))
+            });
+            let mut rv = "0".to_string();
+            let result = consume_watch_byte_stream(stream, &tx, &mut rv).await;
+            closed_flag.store(true, Ordering::SeqCst);
+            result.map(|_| rv)
+        });
+
+        chunk_tx.send(first).await.expect("send first chunk");
+        let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for mid-stream event")
+            .expect("channel closed");
+        match ev {
+            PodWatchEvent::Upsert(p) => {
+                assert_eq!(p.uid, "mid-stream-uid");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(
+            !stream_closed.load(Ordering::SeqCst),
+            "event must be forwarded BEFORE the watch stream ends"
+        );
+        drop(chunk_tx); // close stream (simulates HTTP body EOF)
+        let rv = join.await.expect("join").expect("consume");
+        assert_eq!(rv, "42");
+        assert!(stream_closed.load(Ordering::SeqCst));
     }
 }

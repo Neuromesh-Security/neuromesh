@@ -171,7 +171,36 @@ pub async fn reconcile_pod(
                 );
                 continue;
             }
-            InsertOutcome::Inserted | InsertOutcome::Replaced => {}
+            // Re-delivery / MODIFIED after insert: side table already has this
+            // cgroup_id — idempotent no-op for map cardinality; still ensure BPF
+            // key exists and inotify stays armed.
+            InsertOutcome::Replaced => {
+                {
+                    let mut guard = maps.lock().await;
+                    if let Err(e) = seed_allow_cgroup(&mut guard, inode) {
+                        tracing::error!(
+                            target: "neuromesh::identity_correlator",
+                            cgroup_id = inode,
+                            error = %e,
+                            "BPF re-seed failed during idempotent reconcile_pod"
+                        );
+                        let mut table = state.side_table.lock().await;
+                        let _ = table.remove_by_cgroup(inode);
+                        continue;
+                    }
+                }
+                let _ = teardown_tx.send(TeardownCmd::Watch(leaf));
+                tracing::debug!(
+                    target: "neuromesh::identity_correlator",
+                    cgroup_id = inode,
+                    pod_uid = %pod.uid,
+                    spiffe = %spiffe,
+                    container = %c.name,
+                    "reconcile_pod idempotent replace (already tracked)"
+                );
+                continue;
+            }
+            InsertOutcome::Inserted => {}
         }
 
         {
