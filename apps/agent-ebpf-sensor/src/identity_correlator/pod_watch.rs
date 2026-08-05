@@ -76,7 +76,9 @@ struct WatchEvent {
 impl K8sClient {
     /// Prefer in-cluster ServiceAccount; fall back to `KUBERNETES_SERVICE_HOST`/`PORT`
     /// with token from SA paths. Explicit `NEUROMESH_K8S_API_URL` +
-    /// `NEUROMESH_K8S_BEARER_TOKEN` override for lab/kind.
+    /// `NEUROMESH_K8S_BEARER_TOKEN` override for host-agent / lab (does **not**
+    /// read `KUBECONFIG`). Optional `NEUROMESH_K8S_CA_FILE` PEM for private CA
+    /// (k3s `server-ca.crt`) — required for TLS verify against local apiserver.
     pub async fn connect() -> Result<Self> {
         if let (Ok(url), Ok(token)) = (
             std::env::var("NEUROMESH_K8S_API_URL"),
@@ -87,10 +89,18 @@ impl K8sClient {
             if url.is_empty() || token.is_empty() {
                 bail!("NEUROMESH_K8S_API_URL / NEUROMESH_K8S_BEARER_TOKEN empty");
             }
-            let http = reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .context("build reqwest client")?;
+            let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
+            if let Ok(ca_path) = std::env::var("NEUROMESH_K8S_CA_FILE") {
+                let ca_path = ca_path.trim();
+                if !ca_path.is_empty() {
+                    let ca = std::fs::read(ca_path)
+                        .with_context(|| format!("read NEUROMESH_K8S_CA_FILE at {ca_path}"))?;
+                    let cert = Certificate::from_pem(&ca)
+                        .context("parse NEUROMESH_K8S_CA_FILE PEM")?;
+                    builder = builder.add_root_certificate(cert);
+                }
+            }
+            let http = builder.build().context("build reqwest client")?;
             return Ok(Self {
                 http,
                 base_url: url,
