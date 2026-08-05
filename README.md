@@ -136,6 +136,7 @@ Reproducible evidence lives in-repo:
 |----------|-------------------|
 | LSM enforcement survives agent death | [`scripts/manual_verify_lsm_pin.sh`](scripts/manual_verify_lsm_pin.sh) — [Issue #44](https://github.com/Neuromesh-Security/neuromesh/issues/44) / [PR #72](https://github.com/Neuromesh-Security/neuromesh/pull/72) |
 | Runtime tamper detection of pinned artifacts | [`scripts/manual_verify_runtime_integrity.sh`](scripts/manual_verify_runtime_integrity.sh) — [PR #74](https://github.com/Neuromesh-Security/neuromesh/pull/74) / [PR #76](https://github.com/Neuromesh-Security/neuromesh/pull/76) |
+| Identity exceptions end-to-end (auto-correlation) | [`scripts/manual_verify_identity_2bii_correlation.sh`](scripts/manual_verify_identity_2bii_correlation.sh) — [Issue #95](https://github.com/Neuromesh-Security/neuromesh/issues/95) / [PR #98](https://github.com/Neuromesh-Security/neuromesh/pull/98); see also 2b-i teardown [`scripts/manual_verify_identity_invalidation.sh`](scripts/manual_verify_identity_invalidation.sh) |
 
 **What was verified live (not unit-test-only):**
 
@@ -143,11 +144,13 @@ Reproducible evidence lives in-repo:
 
 2. **Runtime tamper detection of pinned enforcement artifacts.** Post-start removal of a pinned deny-map artifact is detected by the integrity monitor and surfaced (metrics / alert path) within the configured integrity interval. Verified live via the runtime integrity script (PR #74 / PR #76).
 
+3. **Identity exceptions — auto-correlation end-to-end (Slice 2a + 2b).** On a single-node k3s droplet with the host agent (not nested), a real 3-container pod was SPIFFE-gated into `IDENTITY_ALLOW_CGROUPS` without manual seed; map entries cleared on Pod DELETE (`reason=pod_delete`) and on PE allowlist revoke while the pod was still Running (`reason=pe_allowlist_revoke`). Confirmed via agent log lines and `identity_correlator_invalidation_total` metrics. Single-sample latencies from that run (not p50/p99): insert ~2.3 s, delete ~0.9 s, revoke ~11.8 s (PE sync-gated by design). Manual seeding is **not** required for this verified path. Details and honest residuals: [`docs/threat-model.md`](docs/threat-model.md).
+
 **Scope limits (read before treating this as a procurement claim):**
 
-- These results are **operator-reproducible engineering checks**, not an external audit.
-- They cover the specific failure modes exercised by the scripts above (pin survival after abrupt agent death; detection of post-start pin / on-disk path manipulation). They do not imply complete coverage of every residual risk in [`docs/threat-model.md`](docs/threat-model.md).
-- Identity-exception work (Slice 2a) is **out of scope for “verified production-ready” claims here**: Slice 2a alone is **not** production-safe without Slice 2b (cgroup↔pod↔SPIFFE correlator and recycle invalidation). See the threat model.
+- These results are **operator-reproducible engineering checks**, not an external audit, certification, or multi-node production soak under real load.
+- They cover the specific failure modes exercised by the scripts above (pin survival after abrupt agent death; detection of post-start pin / on-disk path manipulation; identity auto-insert / delete / PE revoke on one k3s node). They do not imply complete coverage of every residual risk in [`docs/threat-model.md`](docs/threat-model.md).
+- Latency numbers above are **one droplet sample** each — recommend repeated runs before any SLA or procurement claim.
 
 ---
 

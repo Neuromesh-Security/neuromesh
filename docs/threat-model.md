@@ -2,7 +2,7 @@
 
 **Status:** Living document  
 **Release scope:** `v0.1.0-core`  
-**Last updated:** 2026-07-20  
+**Last updated:** 2026-08-05  
 **Component:** `apps/agent-ebpf-sensor` — kernel hooks, telemetry contracts, user-space detection pipeline
 
 ---
@@ -197,10 +197,30 @@ SPIFFE mTLS was evaluated and deferred: this repo does not ship SPIRE on nodes t
 | **Scope** | Exceptions apply **only** when path starts with `/tmp/` (agent rejects any other `scope_path_prefix`) |
 | **SPIFFE IDs** | Path-form only (`spiffe://{trust}/ns/{ns}/sa/{sa}`) — matches Rego + real SPIRE SVIDs |
 | **TTL** | `expires_at = issued_at + 90s` (3× sync interval). When exceeded → `IDENTITY_EXCEPTIONS_VALID=0` for **ALL** exceptions including manual seeds — **intentional, no grace period** |
-| **Kernel maps** | `IDENTITY_ALLOW_CGROUPS` (HashMap u64→u8, max 4096), `IDENTITY_EXCEPTIONS_VALID` (Array@1) — **not pinned** (die with agent) |
+| **Kernel maps** | `IDENTITY_ALLOW_CGROUPS` (HashMap u64→u8, max **16384** as of Slice 2b-ii-A), `IDENTITY_EXCEPTIONS_VALID` (Array@1) — **not pinned** (die with agent) |
 | **LSM order** | deny-list hit → `/tmp/` only → VALID fresh → cgroup allow → else DENY |
-| **Manual seed** | `NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS` lab/test only; loud `SECURITY WARNING`; **absent from all `deploy/kubernetes/` manifests**. Slice **2b-i** adds invalidation (pod DELETE + cgroup teardown); Slice **2b-ii** = production auto-correlation/insert |
-| **Production readiness** | Slice 2a alone is **not** production-safe. Slice 2b-i alone is **not** production-safe (invalidation without auto-correlation). Production-safe requires **2b-ii**. |
+| **Manual seed** | `NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS` remains **lab/test only**; loud `SECURITY WARNING`; **absent from all `deploy/kubernetes/` manifests**. Production path is Slice **2b-ii** auto-correlation (cgroup↔pod↔SPIFFE ∩ PE allowlist) — manual seed is **not** required for the verified insert path |
+| **Production readiness (engineering)** | Slice **2a + 2b-i + 2b-ii (A/B/C)** are merged and **live-verified end-to-end** on a single-node k3s droplet (see below). That is **engineering verification**, not a multi-node soak, multi-tenant production cluster under load, or external audit. Manual seeding is no longer required for the auto-correlation path that was proven live. |
+
+#### Slice 2b correlator — live verification status (2b-ii-C)
+
+| Slice | What shipped | Status |
+|-------|--------------|--------|
+| **2a** | PE `identity_allow_exceptions`, LSM `/tmp/` gate, VALID TTL, lab manual seed | Merged |
+| **2b-i** | Pod DELETE informer + cgroup teardown invalidation + side table | Merged; teardown residual measured earlier (see §7) |
+| **2b-ii-A** | Auto-insert (SPIFFE path-form ∩ PE allowlist), PE revoke-on-sync, map capacity 16384 | Merged ([Issue #95](https://github.com/Neuromesh-Security/neuromesh/issues/95) / PR #96) |
+| **2b-ii-B** | Multi-container burst teardown | Merged (PR #97) |
+| **2b-ii-C** | Host-agent ↔ k3s live gate | Merged (PR #98); script [`scripts/manual_verify_identity_2bii_correlation.sh`](../scripts/manual_verify_identity_2bii_correlation.sh) |
+
+**2b-ii-C live run (single droplet sample — not a distribution):** host agent on the same node as k3s (`neuromesh-dev-lab`), real multi-container pod (main + 2 sidecars), SPIFFE `spiffe://neuromesh.security/ns/default/sa/default`, **no** `NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS`. Confirmed via **agent log evidence** and Prometheus `identity_correlator_invalidation_total{reason=…}` — not script PASS lines alone:
+
+| Scenario | Path / evidence | Measured latency (one sample) |
+|----------|-----------------|-------------------------------|
+| Auto-insert (3 container cgroup_ids) | `auto-inserted IDENTITY_ALLOW_CGROUPS entry (2b-ii-A)` ×3 | **~2.3 s** (Ready → all map keys present; includes apiserver watch + cgroup resolve) |
+| Delete invalidation | `reason=pod_delete` (and/or teardown race) | **~0.9 s** (`terminationGracePeriodSeconds: 0`) |
+| PE revoke while pod **Running** | `reason=pe_allowlist_revoke` | **~11.8 s** (gated by `POLICY_SYNC_INTERVAL` ≈ 30 s — **by design**, not watch lag) |
+
+These are **single-sample** numbers from one droplet run. Do **not** treat them as p50/p99 or an SLA. Recommend repeating 5–10× (and broader environments) before any procurement/SLA claim. This verification is **single-node k3s**, not multi-node / multi-tenant production under real load, and does **not** replace a full production soak or external audit.
 
 Agent behavior (`apps/agent-ebpf-sensor/src/policy_sync.rs`, `path_deny.rs`, `identity_allow.rs`):
 
@@ -223,26 +243,25 @@ These are **policy decisions**, not implementation details, recorded before Slic
    `/dev/shm/` and `/var/tmp/` remain **hard-denied for every workload**, identity
    irrelevant. Widening that set requires an explicit Rego + threat-model change —
    not an accidental side effect of Phase 2 plumbing.
-2. **`cgroup_id` recycling (Slice 2b):** Kernel cgroup IDs can be reused after a
-   pod/container is deleted and a new one is scheduled. Identity maps keyed by
-   `cgroup_id` **must** invalidate entries on pod deletion **and** cgroup teardown,
-   **not** rely on TTL expiry alone. **Slice 2b-i** implements: (1) node-local Pod
-   informer (`fieldSelector=spec.nodeName=…`) → side-table lookup → BPF map delete;
-   (2) inotify cgroup-directory teardown watch (parent `DELETE`/`MOVED_FROM` on
-   cgroupfs + systemd path layouts) as the primary recycle-race closer. **Measured
-   residual (cgroup teardown → BPF map delete):** **23.235 ms** on droplet hardware
-   — **one** real sample via [`scripts/manual_verify_identity_invalidation.sh`](../scripts/manual_verify_identity_invalidation.sh),
-   **not** a statistical distribution (see §7). Follow-up: run the measurement 5–10
-   times to establish a realistic range/p99 before treating any single number as
-   definitive. **KNOWN GAP:** the Pod DELETE informer path is unit-tested only and
-   was **not** live-verified on that droplet run (no Kubernetes cluster); a
-   kind-cluster live test is an explicit follow-up before claiming full 2b-i
-   invalidation coverage. This update closes the 2b-i **invalidation-plumbing**
-   verification gap for the teardown path only — it does **not** make identity
-   exceptions production-safe. **Slice 2b-ii** (automatic cgroup↔pod↔SPIFFE
-   insertion) remains required for that claim. A stale allow entry surviving until
-   TTL could otherwise let a newly scheduled untrusted pod transiently inherit a
-   deleted trusted pod’s recycled `cgroup_id` and its allow status.
+2. **`cgroup_id` recycling (Slice 2b — complete for engineering verification):** Kernel
+   cgroup IDs can be reused after a pod/container is deleted and a new one is scheduled.
+   Identity maps keyed by `cgroup_id` **must** invalidate entries on pod deletion **and**
+   cgroup teardown, **not** rely on TTL expiry alone. **Slice 2b-i** implements: (1)
+   node-local Pod informer (`fieldSelector=spec.nodeName=…`) → side-table lookup → BPF
+   map delete; (2) inotify cgroup-directory teardown watch (parent `DELETE`/`MOVED_FROM`
+   on cgroupfs + systemd path layouts) as the primary recycle-race closer. **Measured
+   residual (lab cgroup teardown → BPF map delete):** **23.235 ms** on droplet hardware —
+   **one** real sample via [`scripts/manual_verify_identity_invalidation.sh`](../scripts/manual_verify_identity_invalidation.sh),
+   **not** a statistical distribution (see §7). **Slice 2b-ii** adds auto-insert
+   (SPIFFE ∩ PE) and PE revoke-on-sync; **2b-ii-C** live-verified Pod DELETE
+   (`reason=pod_delete`) and PE revoke (`reason=pe_allowlist_revoke`) on real k3s with
+   agent log + metrics evidence (see Slice 2b table above). Follow-up: repeat latency
+   samples 5–10× for range/p99 before any SLA claim. A stale allow entry surviving until
+   TTL could otherwise let a newly scheduled untrusted pod transiently inherit a deleted
+   trusted pod’s recycled `cgroup_id` and its allow status. **Honest residual:**
+   sub-second-to-tens-of-ms windows remain possible under agent CPU starvation or inotify
+   overflow (overflow → fail-closed forced resync). **Not** claimed zero-window; **not**
+   claimed multi-node production soak.
 ---
 
 ## 5. Network telemetry (`tcp_connect`)
@@ -312,10 +331,10 @@ Integration tests run via `cargo test -p neuromesh-integration-tests` **without*
 | Agent exit tore down LSM deny (unpinned link) | High → **Mitigated (PR #72)** | **Resolved for survival:** LSM link pinned at `{NEUROMESH_BPF_PIN_ROOT}/neuromesh_lsm_exec_guard_link` and deny maps at `PATH_DENY_LIST` / `PATH_DENY_COUNT` (bpffs forbids `.` in pin basenames); pin failure aborts startup (fail-closed). Empirically verified: deny survives `kill -9` of the agent on a live BPF-LSM kernel. | Dragan Flavius (@DraganFlavius) | Closed via [#44](https://github.com/Neuromesh-Security/neuromesh/issues/44) / PR #72 |
 | Agent tampering by root | High → **Mitigated (Phase 1 + Phase 2 + on-disk path)** | **Phase 1 (PR #62):** Cosign-static-key signed bytecode manifest verified fail-closed at startup *before* any BPF load — three embedded objects (`sys_exec.bpf.o`, `network_filter.bpf.o`, LSM enforcement ELF). **Agent binary:** not in that manifest (circular by design). **Expected digest for Phase 2 / #75 (default):** the agent **self-hashes `/proc/self/exe` once when the integrity monitor arms** and remembers that value for the process lifetime — this is **not** an independent operator-published Cosign-adjacent source of truth. Optional override `NEUROMESH_AGENT_EXE_DIGEST=sha256:<hex>` exists in code but has **no** README/runbook / published digest artifact today, so production behavior is the self-baseline. **Limitation:** a self-established baseline does **not** detect day-zero compromise (binary already tampered *before* first start); it only detects **later** drift of the running inode and/or on-disk install path vs that first-start snapshot. Day-zero agent-binary provenance remains image Cosign (admission) + Phase 1 bytecode objects, not this env. **PR #72:** pinned LSM link + deny maps so exit/crash does not drop enforcement. **Phase 2 (PR #74):** periodic monitor re-hashes `/proc/self/exe` (running inode), confirms pinned LSM link via `PinnedLink::from_pin` + `FdLink::info()`, and confirms deny-map pins. **On-disk residual closed ([#75](https://github.com/Neuromesh-Security/neuromesh/issues/75)):** second independent check opens the install path **by name** (`readlink(/proc/self/exe)` at arm time, strip ` (deleted)`, or `NEUROMESH_AGENT_ON_DISK_PATH`) and compares to the same expected digest — detects `unlink`+replace that `/proc/self/exe` alone misses. Failures increment `agent_integrity_failure_total{reason=exe_digest\|on_disk_binary\|lsm_link\|pinned_map}`; default **alert + exit** (`NEUROMESH_INTEGRITY_EXIT_ON_FAILURE=true`). Evidence-only (TOCTOU between hash and exit possible). Production install path is `/usr/local/bin/agent-ebpf-sensor` (Dockerfile + DaemonSet `command`) but is resolved at runtime, not hardcoded. Does **not** stop a determined root who also controls the alert channel or re-signs with a stolen key. Live droplet scenarios in `scripts/manual_verify_runtime_integrity.sh` (pinned_map + unlink+replace) gate merge approval. | Dragan Flavius (@DraganFlavius) | Closed via [#44](https://github.com/Neuromesh-Security/neuromesh/issues/44) + [#75](https://github.com/Neuromesh-Security/neuromesh/issues/75) |
 | Unauthenticated `GET /v1/policy-bundle` | Low → **Mitigated (Slice 0)** | **Resolved for auth:** endpoint requires shared Bearer token (`NEUROMESH_POLICY_BUNDLE_TOKEN` / `_FILE`); agent never falls back to unauthenticated sync; auth failure retains last-known-good deny maps. Residual: static shared secret must be provisioned/rotated (same class as Cosign static keys) until SPIRE-based mTLS is operable in deploy. Identity allowlist content ships in Slice 2a (schema_version 2) over this authenticated path. | Dragan Flavius (@DraganFlavius) | Tracked in [#55](https://github.com/Neuromesh-Security/neuromesh/issues/55) |
-| Phase 2 identity exceptions without correlator | Medium | Slice 2a ships PE export + LSM `/tmp/` exception + manual cgroup seed (lab only). **Slice 2b-i** adds pod-DELETE + cgroup-teardown **invalidation** of `IDENTITY_ALLOW_CGROUPS` (Issue [#92](https://github.com/Neuromesh-Security/neuromesh/issues/92)). **Still not production-ready** until **Slice 2b-ii** auto-correlates cgroup↔pod↔SPIFFE and inserts allow entries (manual seed remains lab-only). Manual seed env must never appear in `deploy/kubernetes/`. | Unassigned | Slice 2b-ii |
-| Phase 2 `cgroup_id` recycling | Medium → **Mitigated (2b-i teardown path; residual window)** | **Slice 2b-i:** invalidate on Pod DELETE (node fieldSelector informer) **and** on cgroup directory teardown (inotify parent `DELETE`/`MOVED_FROM`), with side table `cgroup_id↔(pod UID, path/inode)`. TTL alone remains insufficient (unchanged). **Measured residual (cgroup teardown → BPF map delete):** **23.235 ms** on droplet hardware — **one** real sample via [`scripts/manual_verify_identity_invalidation.sh`](../scripts/manual_verify_identity_invalidation.sh), **not** a distribution (not p50/p99). Recommend repeating 5–10× in a follow-up to establish range/p99; do not treat one sample as definitive. Window can stretch under agent CPU starvation or inotify queue overflow (overflow → fail-closed forced resync + `identity_correlator_resync_total{reason=inotify_overflow}`). **Not** claimed zero-window. Closes the 2b-i **invalidation-plumbing** verification gap for the teardown path only. Identity exceptions overall remain **not** production-safe until **2b-ii** (auto-correlation/insert). | Unassigned | Issue #92 / Slice 2b-i |
-| Slice 2b-i Pod DELETE informer live verification | Medium — **KNOWN GAP** | Secondary invalidation path (API-level Pod DELETE → side-table → BPF map delete) is **unit-tested only** and has **not** been live-verified. Droplet measurement run skipped this path (no available Kubernetes cluster). Explicit follow-up: kind-cluster (or equivalent) live test before claiming **full** 2b-i invalidation coverage. Does **not** change the production-safety gate: overall identity exceptions still require **2b-ii**. | Unassigned | Issue #92 / Slice 2b-i follow-up |
-| Slice 2b-i correlator RBAC pod visibility | Low–Medium | DaemonSet SA gains ClusterRole `get/list/watch` on `pods` (no secrets/exec/proxy/writes). Kubernetes RBAC cannot scope to “this node only”; `spec.nodeName` fieldSelector is data-plane filtering only. Same class as other node agents. | Unassigned | Issue #92 |
+| Phase 2 identity exceptions / correlator | Medium → **Mitigated (engineering verification; Slice 2a+2b)** | Slice 2a (PE exceptions + LSM `/tmp/` gate) + **2b-i** (DELETE + teardown invalidation) + **2b-ii A/B/C** (auto-insert SPIFFE ∩ PE, multi-container teardown, live k3s gate) are **merged**. Live-proven on single-node k3s without manual seed: insert, `pod_delete`, `pe_allowlist_revoke` (agent log + `identity_correlator_invalidation_total`). Manual seed env must never appear in `deploy/kubernetes/`. **Not** a production soak / external audit. | Dragan Flavius (@DraganFlavius) | Closed via [#92](https://github.com/Neuromesh-Security/neuromesh/issues/92) + [#95](https://github.com/Neuromesh-Security/neuromesh/issues/95) / PRs #96–#98 |
+| Phase 2 `cgroup_id` recycling | Medium → **Mitigated (2b-i + 2b-ii; residual window)** | Invalidate on Pod DELETE **and** cgroup teardown; auto-insert + PE revoke-on-sync live-verified (2b-ii-C). Lab teardown residual sample **23.235 ms** (one sample). Live delete ~0.9 s / revoke ~11.8 s on one droplet run (revoke PE-sync-gated). Overflow → fail-closed resync. **Not** zero-window; repeat samples before SLA claims. | Dragan Flavius (@DraganFlavius) | Issue [#92](https://github.com/Neuromesh-Security/neuromesh/issues/92) / [#95](https://github.com/Neuromesh-Security/neuromesh/issues/95) |
+| Slice 2b-i Pod DELETE informer live verification | Medium → **Mitigated (2b-ii-C)** | Previously unit-test-only. **Closed** by Slice 2b-ii-C live run on k3s: Pod DELETE invalidation observed with `reason=pod_delete` (agent log + metrics) on a real multi-container pod. Same engineering-scope limits as the 2b-ii-C table (single node, single sample). | Dragan Flavius (@DraganFlavius) | Closed via [#95](https://github.com/Neuromesh-Security/neuromesh/issues/95) / PR #98 |
+| Slice 2b correlator RBAC pod visibility | Low–Medium | DaemonSet SA gains ClusterRole `get/list/watch` on `pods` (no secrets/exec/proxy/writes). Kubernetes RBAC cannot scope to “this node only”; `spec.nodeName` fieldSelector is data-plane filtering only. Same class as other node agents. | Unassigned | Issue [#92](https://github.com/Neuromesh-Security/neuromesh/issues/92) |
 | CI coverage gate | Low | ≥70% line coverage on core crates; Ring 0 not measured | — | — |
 
 ---
