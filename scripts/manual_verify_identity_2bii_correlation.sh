@@ -419,6 +419,8 @@ metadata:
 spec:
   serviceAccountName: default
   restartPolicy: Never
+  # Isolate scenario-6 delete latency from the default 30s graceful-drain window.
+  terminationGracePeriodSeconds: 0
   nodeName: ${NODE_NAME}
   containers:
     - name: main
@@ -563,6 +565,7 @@ metadata:
 spec:
   serviceAccountName: default
   restartPolicy: Never
+  terminationGracePeriodSeconds: 0
   nodeName: ${NODE_NAME}
   containers:
     - name: main
