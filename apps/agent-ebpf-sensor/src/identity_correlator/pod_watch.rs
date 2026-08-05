@@ -564,10 +564,7 @@ mod tests {
 
         let join = tokio::spawn(async move {
             let stream = futures_util::stream::unfold(chunk_rx, |mut rx| async {
-                match rx.recv().await {
-                    Some(b) => Some((Ok::<_, io::Error>(b), rx)),
-                    None => None,
-                }
+                rx.recv().await.map(|b| (Ok::<_, io::Error>(b), rx))
             });
             let mut rv = "0".to_string();
             let result = consume_watch_byte_stream(stream, &tx, &mut rv).await;
