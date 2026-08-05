@@ -5,6 +5,7 @@
 #   - Agent on the SAME host as k3s (not nested in a pod / kind node)
 #   - Real Pod informer + PE allowlist ∩ SPIFFE path-form → BPF auto-insert
 #   - Multi-container pod (main + 2 sidecars) exercises 2b-ii-B N-key path
+#     (status.containerStatuses only — CRI pause/sandbox leaf is excluded)
 #   - Delete invalidation (pod_delete and/or cgroup_teardown — report which wins)
 #   - PE allowlist revoke while pod STILL RUNNING (revoke-on-sync, not delete)
 #
@@ -110,14 +111,55 @@ map_missing_all_ids() {
   return 0
 }
 
-# Resolve container-level cgroup inodes for a Running pod (cri-containerd scopes).
+# Resolve cgroup inodes for named containers only (agent insert surface).
+#
+# Distinguisher (NOT a basename pattern — sandbox uses the same
+# cri-containerd-<id>.scope naming as app containers on containerd/k3s):
+#   KEEP  = leaf whose id appears in status.containerStatuses /
+#           initContainerStatuses / ephemeralContainerStatuses (same arrays
+#           pod_watch::parse_pod_view walks for reconcile_pod).
+#   SKIP  = any other cri-*.scope / raw-id leaf under the pod slice — almost
+#           always the CRI pause/sandbox (PodSandbox), which K8s deliberately
+#           omits from containerStatuses. Agent correctly never inserts it
+#           (no SPIFFE/name to bind; never a reconcile candidate → no log line).
 collect_pod_cgroup_ids() {
   local uid="$1"
-  python3 - "$uid" <<'PY'
-import os, sys
+  local ns="$2"
+  local pod="$3"
+  local pod_json
+  pod_json="$(kubectl -n "$ns" get "pod/${pod}" -o json)" \
+    || fail "kubectl get pod/${pod} failed"
+  POD_JSON="$pod_json" python3 - "$uid" <<'PY'
+import json, os, sys
+
 uid = sys.argv[1].strip()
 uid_under = uid.replace("-", "_")
 root = os.environ.get("NEUROMESH_CGROUP_ROOT", "/sys/fs/cgroup")
+pod = json.loads(os.environ["POD_JSON"])
+
+def strip_runtime(cid: str):
+    s = (cid or "").strip()
+    if not s:
+        return None
+    if "://" in s:
+        s = s.split("://", 1)[1].strip()
+    return s or None
+
+status_ids = []
+status_names = []
+for key in ("containerStatuses", "initContainerStatuses", "ephemeralContainerStatuses"):
+    for c in pod.get("status", {}).get(key) or []:
+        raw = strip_runtime(c.get("containerID") or "")
+        if raw:
+            status_ids.append(raw)
+            status_names.append(c.get("name") or "?")
+
+if len(status_ids) < 2:
+    sys.stderr.write(
+        f"need >=2 status containerIDs (got {len(status_ids)}: {status_names})\n"
+    )
+    sys.exit(2)
+
 candidates = [
     os.path.join(root, "kubepods.slice", "kubepods-besteffort.slice",
                  f"kubepods-besteffort-pod{uid_under}.slice"),
@@ -131,30 +173,57 @@ candidates = [
 pod_dir = next((p for p in candidates if os.path.isdir(p)), None)
 if not pod_dir:
     sys.stderr.write(f"no pod cgroup dir for uid={uid}\n")
-    sys.exit(2)
-ids = []
-for name in sorted(os.listdir(pod_dir)):
-    path = os.path.join(pod_dir, name)
-    if not os.path.isdir(path):
-        continue
-    # container leaves: cri-containerd-<id>.scope / crio-*.scope / docker-*.scope
-    # or cgroupfs raw container-id directory names (64 hex).
+    sys.exit(3)
+
+def is_container_leaf(name: str) -> bool:
     is_scope = name.endswith(".scope") and (
         "containerd" in name or name.startswith("crio-") or name.startswith("docker-")
     )
     is_raw = len(name) >= 12 and all(c in "0123456789abcdef" for c in name[:12])
-    if not (is_scope or is_raw):
+    return is_scope or is_raw
+
+def leaf_matches_status(name: str, raw_id: str) -> bool:
+    if name == raw_id:
+        return True
+    if raw_id and raw_id in name and name.endswith(".scope"):
+        return True
+    if len(raw_id) >= 12 and name.startswith(raw_id[:12]):
+        return True
+    return False
+
+ids = []
+matched_names = []
+skipped = []
+for name in sorted(os.listdir(pod_dir)):
+    path = os.path.join(pod_dir, name)
+    if not os.path.isdir(path) or not is_container_leaf(name):
         continue
+    hit = next((rid for rid in status_ids if leaf_matches_status(name, rid)), None)
     try:
-        ids.append(str(os.stat(path).st_ino))
+        ino = str(os.stat(path).st_ino)
     except OSError as e:
         sys.stderr.write(f"stat failed {path}: {e}\n")
-        sys.exit(3)
-if len(ids) < 2:
-    sys.stderr.write(f"expected >=2 container leaves under {pod_dir}, got {ids}\n")
-    sys.exit(4)
+        sys.exit(4)
+    if hit is None:
+        skipped.append(f"{name} inode={ino}")
+        continue
+    ids.append(ino)
+    matched_names.append(name)
+
+if len(ids) != len(status_ids):
+    sys.stderr.write(
+        f"status has {len(status_ids)} containerIDs {status_names} but matched "
+        f"{len(ids)} leaves under {pod_dir}; matched={matched_names}; "
+        f"skipped_sandbox_or_orphan={skipped}\n"
+    )
+    sys.exit(5)
+
 print(" ".join(ids))
-print(f"# pod_dir={pod_dir} n={len(ids)}", file=sys.stderr)
+print(
+    f"# pod_dir={pod_dir} status_n={len(status_ids)} matched_n={len(ids)} "
+    f"skipped_sandbox_or_orphan={skipped}",
+    file=sys.stderr,
+)
 PY
 }
 
@@ -378,16 +447,16 @@ echo "pod Ready uid=$POD_UID at READY_NS=$READY_NS"
 
 # Give container statuses a moment to populate containerIDs + cgroup leaves.
 sleep 1
-CG_IDS_STR="$(collect_pod_cgroup_ids "$POD_UID")" || {
+CG_IDS_STR="$(collect_pod_cgroup_ids "$POD_UID" "$POD_NS" "$POD_NAME")" || {
   echo "---- cgroup tree hint ----"
   find /sys/fs/cgroup/kubepods.slice -maxdepth 3 -type d -name "*${POD_UID//-/_}*" 2>/dev/null | head || true
-  fail "could not resolve container cgroup_ids for pod uid=$POD_UID"
+  fail "could not resolve status-matched container cgroup_ids for pod uid=$POD_UID"
 }
 # shellcheck disable=SC2206
 CG_IDS=($CG_IDS_STR)
-echo "container cgroup_ids (${#CG_IDS[@]}): ${CG_IDS[*]}"
-test "${#CG_IDS[@]}" -ge 3 || fail "expected 3 container cgroup_ids, got ${#CG_IDS[@]}: ${CG_IDS[*]}"
-pass "scenario 4b: resolved ${#CG_IDS[@]} container-level cgroup_ids under kubepods"
+echo "status-matched container cgroup_ids (${#CG_IDS[@]}): ${CG_IDS[*]}"
+test "${#CG_IDS[@]}" -eq 3 || fail "expected exactly 3 status-matched cgroup_ids (main+2 sidecars), got ${#CG_IDS[@]}: ${CG_IDS[*]}"
+pass "scenario 4b: resolved ${#CG_IDS[@]} status-matched container cgroup_ids (sandbox/pause excluded)"
 
 echo "== scenario 5: poll BPF until ALL container keys auto-inserted =="
 INSERT_OK=0
@@ -511,9 +580,11 @@ kubectl -n "$POD_NS" wait --for=condition=Ready "pod/${POD_NAME}" --timeout=120s
   || fail "revoke-scenario pod never Ready"
 POD_UID="$(kubectl -n "$POD_NS" get "pod/${POD_NAME}" -o jsonpath='{.metadata.uid}')"
 sleep 1
-CG_IDS_STR="$(collect_pod_cgroup_ids "$POD_UID")" || fail "revoke scenario: cgroup_id resolve failed"
+CG_IDS_STR="$(collect_pod_cgroup_ids "$POD_UID" "$POD_NS" "$POD_NAME")" \
+  || fail "revoke scenario: status-matched cgroup_id resolve failed"
 # shellcheck disable=SC2206
 CG_IDS=($CG_IDS_STR)
+test "${#CG_IDS[@]}" -eq 3 || fail "revoke scenario: expected 3 status-matched ids, got ${#CG_IDS[@]}"
 deadline=$((SECONDS + INSERT_WAIT_SECS))
 while (( SECONDS < deadline )); do
   map_has_all_ids "${CG_IDS[@]}" && break
