@@ -733,6 +733,43 @@ mod overflow_resync_tests {
         assert_eq!(ids, vec![1]);
         assert!(table.is_empty());
     }
+
+    /// Slice 2b-ii-B: Q_OVERFLOW → forced resync must clear *all* missing
+    /// tracked entries in one sweep (N>1), not just a single orphan.
+    #[test]
+    fn overflow_sweep_clears_all_three_tracked_missing_paths() {
+        let mut table = SideTable::new();
+        for (i, name) in ["ctr-0", "ctr-1", "ctr-2"].iter().enumerate() {
+            let id = (200 + i) as u64;
+            table.insert(
+                id,
+                SideEntry {
+                    pod_uid: "pod-overflow-uid".into(),
+                    namespace: "default".into(),
+                    service_account: "sa".into(),
+                    spiffe_id: "spiffe://t/ns/default/sa/sa".into(),
+                    cgroup_path: PathBuf::from(format!(
+                        "/nonexistent/neuromesh-overflow-burst/{name}"
+                    )),
+                    inode: id,
+                },
+            );
+        }
+        assert_eq!(table.len(), 3);
+
+        // Correlator overflow path: fail-closed resync via missing-path sweep.
+        let mut ids = plan_missing_path_sweep(&mut table);
+        ids.sort_unstable();
+        assert_eq!(ids, vec![200, 201, 202]);
+        assert!(
+            table.is_empty(),
+            "by_cgroup/by_path/by_pod must be empty after multi-entry overflow sweep"
+        );
+        assert_eq!(
+            ResyncReason::InotifyOverflow.as_metric_label(),
+            "inotify_overflow"
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
