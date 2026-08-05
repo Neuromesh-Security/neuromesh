@@ -214,6 +214,23 @@ mod tests {
     }
 
     #[test]
+    fn insert_same_cgroup_id_is_replaced_not_duplicated() {
+        // Watch redelivery / MODIFIED after ADDED must not grow the side table.
+        let mut t = SideTable::new();
+        let e = auto_entry(
+            "pod-a",
+            "/cg/a",
+            10,
+            "spiffe://neuromesh.security/ns/default/sa/default",
+        );
+        assert_eq!(t.insert(10, e.clone()), InsertOutcome::Inserted);
+        assert_eq!(t.insert(10, e), InsertOutcome::Replaced);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t.remove_by_pod("pod-a").len(), 1);
+        assert!(t.is_empty());
+    }
+
+    #[test]
     fn remove_by_pod_clears_all_cgroups() {
         let mut t = SideTable::new();
         t.insert(1, entry("uid-1", "/cg/1", 1));
