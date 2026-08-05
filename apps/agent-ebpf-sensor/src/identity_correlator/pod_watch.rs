@@ -95,8 +95,8 @@ impl K8sClient {
                 if !ca_path.is_empty() {
                     let ca = std::fs::read(ca_path)
                         .with_context(|| format!("read NEUROMESH_K8S_CA_FILE at {ca_path}"))?;
-                    let cert = Certificate::from_pem(&ca)
-                        .context("parse NEUROMESH_K8S_CA_FILE PEM")?;
+                    let cert =
+                        Certificate::from_pem(&ca).context("parse NEUROMESH_K8S_CA_FILE PEM")?;
                     builder = builder.add_root_certificate(cert);
                 }
             }
