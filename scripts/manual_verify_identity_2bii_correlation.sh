@@ -111,6 +111,72 @@ map_missing_all_ids() {
   return 0
 }
 
+# Extract invalidation reason from agent log after line $2.
+#
+# Real tracing_subscriber::fmt line shape (from apply_invalidations):
+#   TIMESTAMP  WARN neuromesh::identity_correlator: invalidated IDENTITY_ALLOW_CGROUPS entry cgroup_id=<u64> reason=<label>
+# where <label> is Display of as_metric_label() — unquoted, e.g. reason=pe_allowlist_revoke
+# Also accepted: reason="pe_allowlist_revoke" / reason: pe_allowlist_revoke (defensive).
+#
+# $3 = preferred reason(s), pipe-separated. Scans ALL matching lines in the window
+# and returns the first preferred hit (avoids head -n 1 grabbing a stale
+# cgroup_teardown/pod_delete flushed after the revoke LOG_MARK). Empty $3 → first hit.
+extract_invalidation_reason() {
+  local log_file="$1"
+  local from_line="$2"
+  local prefer="${3:-}"
+  python3 - "$log_file" "$from_line" "$prefer" <<'PY'
+import re, sys
+
+path, from_line, prefer = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+ansi_re = re.compile(r"\x1b\[[0-9;]*[mK]")
+# Do NOT use reason[=:\s\"]+ — the old class ate quotes/spaces greedily and
+# missed common shapes; also head -n 1 picked the wrong line in mixed windows.
+reason_re = re.compile(
+    r'reason\s*[=:]\s*"?(pod_delete|cgroup_teardown|pe_allowlist_revoke|resync_sweep)"?'
+)
+needle = "invalidated IDENTITY_ALLOW_CGROUPS entry"
+found = []
+with open(path, "r", errors="replace") as f:
+    for i, line in enumerate(f, 1):
+        if i <= from_line:
+            continue
+        raw = ansi_re.sub("", line)
+        if needle not in raw:
+            continue
+        m = reason_re.search(raw)
+        if m:
+            found.append(m.group(1))
+
+if prefer:
+    prefs = [p for p in prefer.split("|") if p]
+    for r in found:
+        if r in prefs:
+            print(r)
+            raise SystemExit(0)
+print(found[0] if found else "unknown")
+PY
+}
+
+# Golden-line self-check (matches agent fmt Display &str — no quotes required).
+_verify_reason_parser() {
+  local tmp
+  tmp="$(mktemp)"
+  printf '%s\n' \
+    '2026-08-05T12:04:39.123456Z  WARN neuromesh::identity_correlator: invalidated IDENTITY_ALLOW_CGROUPS entry cgroup_id=191094 reason=cgroup_teardown' \
+    '2026-08-05T12:05:10.000000Z  WARN neuromesh::identity_correlator: invalidated IDENTITY_ALLOW_CGROUPS entry cgroup_id=191095 reason=pe_allowlist_revoke' \
+    '2026-08-05T12:05:10.000001Z  WARN neuromesh::identity_correlator: invalidated IDENTITY_ALLOW_CGROUPS entry cgroup_id=191096 reason="pe_allowlist_revoke"' \
+    >"$tmp"
+  local got
+  got="$(extract_invalidation_reason "$tmp" 0 "pe_allowlist_revoke")"
+  rm -f "$tmp"
+  [[ "$got" == "pe_allowlist_revoke" ]] \
+    || fail "reason-parser self-check failed (got='$got'; expected pe_allowlist_revoke)"
+}
+
+_verify_reason_parser
+pass "preflight: invalidation reason parser golden lines"
+
 # Resolve cgroup inodes for named containers only (agent insert surface).
 #
 # Distinguisher (NOT a basename pattern — sandbox uses the same
@@ -376,7 +442,14 @@ export NEUROMESH_BPF_PIN_ROOT="$PIN_ROOT"
 export NEUROMESH_INTEGRITY_EXIT_ON_FAILURE="${NEUROMESH_INTEGRITY_EXIT_ON_FAILURE:-false}"
 export RUST_LOG="${RUST_LOG:-info,neuromesh::identity_correlator=info,neuromesh::policy_sync=info}"
 
-"$AGENT_BIN" >"$AGENT_LOG" 2>&1 &
+# Line-buffer agent logs so invalidation lines are visible as soon as map deletes
+# happen (fully-buffered stdout/stderr when redirected to a file otherwise races
+# the bpftool poll → reason parse).
+if command -v stdbuf >/dev/null 2>&1; then
+  stdbuf -oL -eL "$AGENT_BIN" >"$AGENT_LOG" 2>&1 &
+else
+  "$AGENT_BIN" >"$AGENT_LOG" 2>&1 &
+fi
 AGENT_PID=$!
 sleep 4
 kill -0 "$AGENT_PID" 2>/dev/null || {
@@ -524,26 +597,27 @@ DELETE_NS=$((DELETE_END_NS - DELETE_START_NS))
 MEASURED_DELETE_INVALIDATION_LATENCY_MS="$(python3 -c "print(f'{int('$DELETE_NS')/1e6:.3f}')")"
 echo "MEASURED_DELETE_INVALIDATION_LATENCY_MS=$MEASURED_DELETE_INVALIDATION_LATENCY_MS"
 
-# Which invalidation path fired first after delete?
-WINNER="$(
-  tail -n +"$((LOG_MARK + 1))" "$AGENT_LOG" \
-    | grep -E 'invalidated IDENTITY_ALLOW_CGROUPS entry' \
-    | head -n 1 \
-    | python3 -c '
-import re,sys
-line=sys.stdin.read()
-m=re.search(r"reason[=:\s\"]+(pod_delete|cgroup_teardown|pe_allowlist_revoke)", line)
-print(m.group(1) if m else "unknown")
-'
-)"
+# Brief settle so tracing lines reach the log file before we attribute the path.
+sleep 0.25
+# Prefer pod_delete|cgroup_teardown in the post-delete window (not head -n 1 of any
+# invalidated line — avoids stale/mis-ordered attribution).
+WINNER="$(extract_invalidation_reason "$AGENT_LOG" "$LOG_MARK" "pod_delete|cgroup_teardown")"
 echo "DELETE_INVALIDATION_PATH_WINNER=$WINNER"
 case "$WINNER" in
   pod_delete|cgroup_teardown)
     pass "scenario 6: all entries removed via ${WINNER} (MEASURED_DELETE_INVALIDATION_LATENCY_MS=$MEASURED_DELETE_INVALIDATION_LATENCY_MS)"
     ;;
   *)
-    # Still PASS map-empty if keys gone; warn on unknown reason parse.
     echo "WARN: could not parse winner from agent log (got='$WINNER'); map empty confirmed"
+    echo "---- invalidated lines after LOG_MARK=${LOG_MARK} ----"
+    python3 - "$AGENT_LOG" "$LOG_MARK" <<'PY' || true
+import sys
+path, mark = sys.argv[1], int(sys.argv[2])
+with open(path, errors="replace") as f:
+    for i, line in enumerate(f, 1):
+        if i > mark and "invalidated IDENTITY_ALLOW_CGROUPS entry" in line:
+            print(f"{i}:{line.rstrip()}")
+PY
     pass "scenario 6: all entries removed (winner parse='$WINNER'; MEASURED_DELETE_INVALIDATION_LATENCY_MS=$MEASURED_DELETE_INVALIDATION_LATENCY_MS)"
     ;;
 esac
@@ -623,23 +697,25 @@ REVOKE_NS=$((REVOKE_END_NS - REVOKE_START_NS))
 MEASURED_REVOKE_LATENCY_MS="$(python3 -c "print(f'{int('$REVOKE_NS')/1e6:.3f}')")"
 echo "MEASURED_REVOKE_LATENCY_MS=$MEASURED_REVOKE_LATENCY_MS"
 
-# Assert path was pe_allowlist_revoke (not pod_delete — pod still Running).
-REVOKE_REASON="$(
-  tail -n +"$((LOG_MARK + 1))" "$AGENT_LOG" \
-    | grep -E 'invalidated IDENTITY_ALLOW_CGROUPS entry' \
-    | head -n 1 \
-    | python3 -c '
-import re,sys
-line=sys.stdin.read()
-m=re.search(r"reason[=:\s\"]+(pod_delete|cgroup_teardown|pe_allowlist_revoke)", line)
-print(m.group(1) if m else "unknown")
-'
-)"
+sleep 0.25
+# Must find pe_allowlist_revoke in the revoke window — not head -n 1 of a mixed
+# window that may still contain delayed pod_delete/cgroup_teardown lines.
+REVOKE_REASON="$(extract_invalidation_reason "$AGENT_LOG" "$LOG_MARK" "pe_allowlist_revoke")"
 echo "REVOKE_INVALIDATION_PATH=$REVOKE_REASON"
 PHASE="$(kubectl -n "$POD_NS" get "pod/${POD_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null || echo missing)"
 [[ "$PHASE" == "Running" ]] || fail "pod phase=$PHASE — revoke must happen while Running (not via delete)"
-[[ "$REVOKE_REASON" == "pe_allowlist_revoke" ]] \
-  || fail "expected pe_allowlist_revoke, got '$REVOKE_REASON' (pod still $PHASE)"
+if [[ "$REVOKE_REASON" != "pe_allowlist_revoke" ]]; then
+  echo "---- invalidated lines after LOG_MARK=${LOG_MARK} ----"
+  python3 - "$AGENT_LOG" "$LOG_MARK" <<'PY' || true
+import sys
+path, mark = sys.argv[1], int(sys.argv[2])
+with open(path, errors="replace") as f:
+    for i, line in enumerate(f, 1):
+        if i > mark and "invalidated IDENTITY_ALLOW_CGROUPS entry" in line:
+            print(f"{i}:{line.rstrip()}")
+PY
+  fail "expected pe_allowlist_revoke, got '$REVOKE_REASON' (pod still $PHASE)"
+fi
 pass "scenario 7: PE revoke cleared all entries via pe_allowlist_revoke (MEASURED_REVOKE_LATENCY_MS=$MEASURED_REVOKE_LATENCY_MS; pod=$PHASE)"
 
 # Soft budgets (report always; hard-fail only on extreme outliers).
