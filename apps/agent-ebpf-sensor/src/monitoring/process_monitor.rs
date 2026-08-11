@@ -121,8 +121,12 @@ pub async fn start_process_monitor(
                     info!(target: "neuromesh::process_monitor", "process monitor poller exiting");
                     break;
                 }
+                // aya RingBuf + Tokio AsyncFd: empty drain MUST return WouldBlock
+                // so readiness is cleared (Issue #103). See ringbuf_async_io.rs.
                 poll_result = async_ring.async_io_mut(Interest::READABLE, |ring| {
+                    let mut drained_any = false;
                     while let Some(item) = ring.next() {
+                        drained_any = true;
                         let bytes = item.as_ref();
                         let Some(event) = crate::monitoring::ringbuf_decode::decode_exec_event(bytes)
                         else {
@@ -147,7 +151,7 @@ pub async fn start_process_monitor(
                             Err(TrySendError::Closed(_)) => return Ok(()),
                         }
                     }
-                    Ok(())
+                    crate::monitoring::ringbuf_drain_outcome(drained_any)
                 }) => {
                     if let Err(error) = poll_result {
                         warn!(

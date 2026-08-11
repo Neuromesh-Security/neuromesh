@@ -148,11 +148,15 @@ measure_window() {
     || fail " /proc/${measure_pid}/comm='${proc_comm}' != expected '${AGENT_COMM}'"
 
   rss_start_kb="$(awk '/^VmRSS:/{print $2}' "/proc/${measure_pid}/status")"
-  echo "== measure ${phase_label}: pidstat -u -r -h -p ${measure_pid} ${PIDSTAT_INTERVAL_SECS} ${WINDOW_SECS} =="
+  # Do NOT pass -h: sysstat documents -h as "no average statistics at the end
+  # of the report" (horizontal single-line samples only). We want Average: when
+  # available, and we also mean-average per-sample rows as a robust fallback.
+  # count = WINDOW_SECS / interval (integer) reports, not wall-clock alone.
+  local sample_count
+  sample_count="$(python3 -c "print(max(1, int('$WINDOW_SECS') // max(1, int('$PIDSTAT_INTERVAL_SECS'))))")"
+  echo "== measure ${phase_label}: pidstat -u -r -p ${measure_pid} ${PIDSTAT_INTERVAL_SECS} ${sample_count} =="
   pidstat_file="${TEST_ROOT}/pidstat_${phase_label}.txt"
-  # -u CPU, -r memory, -h omit average-only footer confusion on some versions;
-  # Average: lines are still emitted at end of the run.
-  pidstat -u -r -h -p "$measure_pid" "$PIDSTAT_INTERVAL_SECS" "$WINDOW_SECS" \
+  pidstat -u -r -p "$measure_pid" "$PIDSTAT_INTERVAL_SECS" "$sample_count" \
     >"$pidstat_file" 2>&1 \
     || fail "pidstat failed for phase=${phase_label} (see ${pidstat_file})"
 
@@ -162,63 +166,112 @@ measure_window() {
 
   parse="$(python3 - "$pidstat_file" <<'PY'
 import re, sys
+
 path = sys.argv[1]
 cpu_avgs = []
 rss_avgs = []
-# pidstat -h -u -r interleaves CPU and memory sample lines; Average: appears twice
-# (once per report type) or as combined depending on sysstat version.
-cpu_re = re.compile(
+cpu_samples = []
+rss_samples = []
+
+# Trailing Average: lines (present when -h is NOT used).
+cpu_avg_re = re.compile(
     r"^Average:\s+\S+\s+\d+\s+"
     r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\b"
 )
-# memory Average: UID PID minflt/s majflt/s VSZ RSS %MEM Command
-rss_re = re.compile(
+# Average: UID PID minflt/s majflt/s VSZ RSS %MEM Command
+rss_avg_re = re.compile(
     r"^Average:\s+\S+\s+\d+\s+"
     r"([\d.]+)\s+([\d.]+)\s+(\d+)\s+(\d+)\s+([\d.]+)\b"
 )
+
+# Per-interval sample rows (with or without -h). Skip headers / blank / comments.
+# CPU sample: Time UID PID %usr %system %guest %wait %CPU CPU Command
+# (Time may be HH:MM:SS or epoch seconds with -H.)
+cpu_sample_re = re.compile(
+    r"^\S+\s+\S+\s+\d+\s+"
+    r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"
+    r"(?:\d+|-)\s+\S+"
+)
+# Memory sample: Time UID PID minflt/s majflt/s VSZ RSS %MEM Command
+rss_sample_re = re.compile(
+    r"^\S+\s+\S+\s+\d+\s+"
+    r"([\d.]+)\s+([\d.]+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+\S+"
+)
+
 with open(path, "r", errors="replace") as f:
-    for line in f:
-        line = line.rstrip()
-        if not line.startswith("Average:"):
+    for raw in f:
+        line = raw.rstrip()
+        if not line or line.lstrip().startswith("#"):
             continue
-        # Prefer memory line when VSZ/RSS integers present (field shape).
-        m_rss = rss_re.match(line)
-        m_cpu = cpu_re.match(line)
-        if m_rss and int(m_rss.group(3)) > 1000:  # VSZ KB heuristic
-            rss_avgs.append(int(m_rss.group(4)))
+        if line.startswith("Linux ") or line.startswith("Average:"):
+            if line.startswith("Average:"):
+                m_rss = rss_avg_re.match(line)
+                m_cpu = cpu_avg_re.match(line)
+                if m_rss and int(m_rss.group(3)) > 1000:
+                    rss_avgs.append(int(m_rss.group(4)))
+                    continue
+                if m_cpu:
+                    cpu_avgs.append(float(m_cpu.group(5)))
+                    continue
+                parts = line.split()
+                if len(parts) >= 8:
+                    try:
+                        cpu_avgs.append(float(parts[7]))
+                    except ValueError:
+                        pass
+            continue
+
+        # Distinguish CPU vs memory sample by field shape (VSZ/RSS integers).
+        m_rss = rss_sample_re.match(line)
+        m_cpu = cpu_sample_re.match(line)
+        if m_rss and int(m_rss.group(3)) > 1000:
+            rss_samples.append(int(m_rss.group(4)))
             continue
         if m_cpu:
-            cpu_avgs.append(float(m_cpu.group(5)))  # %CPU
+            cpu_samples.append(float(m_cpu.group(5)))
             continue
-        # Fallback: last numeric % before Command on CPU Average lines.
-        parts = line.split()
-        if len(parts) >= 8:
-            try:
-                # Average: UID PID %usr %system %guest %wait %CPU ...
-                cpu_avgs.append(float(parts[7]))
-            except ValueError:
-                pass
 
-if not cpu_avgs:
-    sys.stderr.write(f"no CPU Average line parsed from {path}\n")
+def mean(xs):
+    return sum(xs) / len(xs) if xs else None
+
+if cpu_avgs:
+    cpu = cpu_avgs[-1]
+    src_cpu = "pidstat_Average"
+elif cpu_samples:
+    cpu = mean(cpu_samples)
+    src_cpu = f"mean_of_{len(cpu_samples)}_samples"
+else:
+    sys.stderr.write(f"no CPU Average or sample lines parsed from {path}\n")
     sys.exit(2)
-cpu = cpu_avgs[-1]
-rss = rss_avgs[-1] if rss_avgs else -1
-print(f"{cpu:.3f} {rss}")
+
+if rss_avgs:
+    rss = rss_avgs[-1]
+    src_rss = "pidstat_Average"
+elif rss_samples:
+    rss = mean(rss_samples)
+    src_rss = f"mean_of_{len(rss_samples)}_samples"
+else:
+    rss = -1
+    src_rss = "missing"
+
+print(f"{cpu:.3f} {int(rss) if rss != -1 else -1} {src_cpu} {src_rss}")
 PY
 )" || {
     echo "---- pidstat output ----" >&2
     cat "$pidstat_file" >&2 || true
-    fail "failed to parse pidstat Average for ${phase_label}"
+    fail "failed to parse pidstat CPU for ${phase_label}"
   }
 
-  local cpu_pct rss_kb
+  local cpu_pct rss_kb cpu_src rss_src
   cpu_pct="$(echo "$parse" | awk '{print $1}')"
   rss_kb="$(echo "$parse" | awk '{print $2}')"
+  cpu_src="$(echo "$parse" | awk '{print $3}')"
+  rss_src="$(echo "$parse" | awk '{print $4}')"
+  echo "PIDSTAT_PARSE_CPU_SRC=${cpu_src} PIDSTAT_PARSE_RSS_SRC=${rss_src}"
   if [[ "$rss_kb" == "-1" ]]; then
-    # Fallback: mean of /proc VmRSS start/end when pidstat -r Average missing.
+    # Fallback: mean of /proc VmRSS start/end when pidstat -r rows missing.
     rss_kb="$(python3 -c "print(int((int('$rss_start_kb')+int('$rss_end_kb'))/2))")"
-    echo "NOTE: pidstat RSS Average missing; using /proc VmRSS mid=(${rss_start_kb}+${rss_end_kb})/2=${rss_kb}"
+    echo "NOTE: pidstat RSS missing; using /proc VmRSS mid=(${rss_start_kb}+${rss_end_kb})/2=${rss_kb}"
   fi
 
   eval "MEASURED_${out_prefix}_CPU_PCT=${cpu_pct}"
