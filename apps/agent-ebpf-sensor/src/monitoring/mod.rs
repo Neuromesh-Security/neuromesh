@@ -4,6 +4,7 @@ pub mod correlation;
 pub mod event;
 pub mod exec_mapper;
 pub mod network_event;
+pub mod ringbuf_async_io;
 pub mod ringbuf_decode;
 
 #[cfg(feature = "orchestrator")]
@@ -19,6 +20,7 @@ pub use exec_mapper::{
     OtelExecAttributes,
 };
 pub use network_event::{NetworkEvent, NetworkEventHandler};
+pub use ringbuf_async_io::ringbuf_drain_outcome;
 
 #[cfg(feature = "orchestrator")]
 pub use network_monitor::start_network_monitor;
