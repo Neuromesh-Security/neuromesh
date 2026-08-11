@@ -40,8 +40,15 @@ curl -s -H "Authorization: Bearer $NEUROMESH_POLICY_BUNDLE_TOKEN" \
 
 ## Policy (Sprint)
 
-`internal/evaluator/policies/execution.rego` denies execution from `/tmp/`
-unless the workload SPIFFE ID is in the internal whitelist.
+`internal/evaluator/policies/execution.rego` denies execution from ephemeral
+staging prefixes `/tmp/`, `/dev/shm/`, and `/var/tmp/`. A SPIFFE whitelist
+exception exists **only** for `/tmp/`; `/dev/shm/` and `/var/tmp/` are
+hard-denied for every identity (matches the kernel LSM lock).
+
+**Important:** `POST /v1/evaluate` is a **control-plane advisory** API. It is
+**not** consulted by the eBPF LSM on the execve hot path. Kernel enforcement
+uses `PATH_DENY_LIST` synced from `GET /v1/policy-bundle` (or bootstrap
+defaults). Do not treat `/v1/evaluate` as the enforcement source of truth.
 
 ## Quickstart
 
@@ -119,11 +126,14 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
 
 ## Current limitations (honest)
 
-- `/v1/evaluate` is **not** called from the eBPF LSM hot path. Agent sync uses
-  authenticated `GET /v1/policy-bundle` (schema_version 2) for path-prefix deny
-  maps **and** identity-allow exception metadata (`identity_allow_exceptions`).
-  Kernel exceptions apply to `/tmp/` only — `/dev/shm/` and `/var/tmp/` stay
-  hard-denied. SPIFFE IDs are path-form (`/ns/.../sa/...`).
+- `/v1/evaluate` is a **control-plane advisory** endpoint only — **not** the
+  enforcement source of truth for execve. The eBPF LSM never calls it; agent
+  sync uses authenticated `GET /v1/policy-bundle` (schema_version 2) for
+  path-prefix deny maps **and** identity-allow exception metadata
+  (`identity_allow_exceptions`). Kernel exceptions apply to `/tmp/` only —
+  `/dev/shm/` and `/var/tmp/` stay hard-denied. SPIFFE IDs are path-form
+  (`/ns/.../sa/...`). See also root `SECURITY.md` (“Control-plane advisory vs
+  kernel enforcement”).
 - Slice 2a is **not production-ready** without Slice 2b (real cgroup↔pod↔SPIFFE
   correlator + pod-delete invalidation). Lab-only manual seeding via
   `NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS` must never appear in

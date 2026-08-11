@@ -75,6 +75,22 @@ If you conduct security research in accordance with this policy, Neuromesh
 considers your activities authorized. We will work with you to understand and
 resolve the issue quickly.
 
+## Control-plane advisory vs kernel enforcement
+
+`POST /v1/evaluate` on the zero-trust policy engine is a **control-plane advisory**
+endpoint (OPA/Rego + SPIFFE identity checks for operators, dashboards, and
+integration tests). It is **not** the source of truth for execve enforcement.
+
+Real-time blocking of ephemeral staging paths (`/tmp/`, `/dev/shm/`, `/var/tmp/`)
+is performed in-kernel by the eBPF LSM (`neuromesh_lsm_exec_guard`) against the
+agent-synced `PATH_DENY_LIST` / policy-bundle deny prefixes. Do **not** treat
+`/v1/evaluate` `allowed: true|false` as a substitute for LSM decisions when
+building real-time security controls.
+
+Identity exceptions (when enabled) are scoped to `/tmp/` only — `/dev/shm/` and
+`/var/tmp/` remain hard-denied for every SPIFFE identity, in both the LSM and
+the Rego policy.
+
 ## Security Contacts
 
 - **Vulnerability reports:** draganflaviusfx@gmail.com
@@ -82,4 +98,4 @@ resolve the issue quickly.
 
 ---
 
-*Last updated: 2026-07-12*
+*Last updated: 2026-08-11*

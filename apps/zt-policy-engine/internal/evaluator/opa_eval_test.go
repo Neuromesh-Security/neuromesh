@@ -21,7 +21,7 @@ func TestOPAEvaluator_AllowsBenignPath(t *testing.T) {
 		t.Fatalf("Evaluate: %v", err)
 	}
 	if !decision.Allowed {
-		t.Fatalf("expected allow for non-/tmp path, got deny: %q", decision.DenyReason)
+		t.Fatalf("expected allow for non-ephemeral path, got deny: %q", decision.DenyReason)
 	}
 }
 
@@ -64,7 +64,7 @@ func TestOPAEvaluator_AllowsTmpForWhitelistedIdentity(t *testing.T) {
 		t.Fatalf("Evaluate: %v", err)
 	}
 	if !decision.Allowed {
-		t.Fatalf("expected allow for whitelisted identity, got deny: %q", decision.DenyReason)
+		t.Fatalf("expected allow for whitelisted identity under /tmp/, got deny: %q", decision.DenyReason)
 	}
 }
 
@@ -86,5 +86,55 @@ func TestOPAEvaluator_DeniesTmpForFlatFormIdentity(t *testing.T) {
 	}
 	if decision.Allowed {
 		t.Fatal("expected deny for flat-form identity after path-form migration")
+	}
+}
+
+// Regression: /dev/shm/ and /var/tmp/ must be hard-denied for ALL identities,
+// including SPIFFE IDs that are whitelisted for the /tmp/-only exception.
+// Prior bug: tmp_execution only matched /tmp/, so `allow if { not tmp_execution }`
+// incorrectly allowed these prefixes via /v1/evaluate.
+func TestOPAEvaluator_HardDeniesDevShmAndVarTmpForAllIdentities(t *testing.T) {
+	t.Parallel()
+
+	evaluator, err := NewOPAEvaluator(context.Background(), DefaultExecutionPolicy)
+	if err != nil {
+		t.Fatalf("NewOPAEvaluator: %v", err)
+	}
+
+	whitelisted := "spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor"
+	untrusted := "spiffe://neuromesh.security/untrusted/workload"
+
+	cases := []struct {
+		name       string
+		binaryPath string
+		identity   string
+	}{
+		{"dev_shm_untrusted", "/dev/shm/evil.bin", untrusted},
+		{"dev_shm_whitelisted", "/dev/shm/evil.bin", whitelisted},
+		{"var_tmp_untrusted", "/var/tmp/evil.bin", untrusted},
+		{"var_tmp_whitelisted", "/var/tmp/evil.bin", whitelisted},
+		{"dev_shm_nested_whitelisted", "/dev/shm/nested/payload", whitelisted},
+		{"var_tmp_nested_whitelisted", "/var/tmp/nested/payload", whitelisted},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			decision, err := evaluator.Evaluate(context.Background(), PolicyInput{
+				BinaryPath: tc.binaryPath,
+				Identity:   tc.identity,
+			})
+			if err != nil {
+				t.Fatalf("Evaluate: %v", err)
+			}
+			if decision.Allowed {
+				t.Fatalf("expected allowed=false for %s identity=%s (hard-deny ephemeral prefix)",
+					tc.binaryPath, tc.identity)
+			}
+			if decision.DenyReason == "" {
+				t.Fatal("expected non-empty deny_reason")
+			}
+		})
 	}
 }
