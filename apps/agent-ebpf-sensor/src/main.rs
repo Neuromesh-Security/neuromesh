@@ -427,8 +427,12 @@ async fn main() -> Result<(), anyhow::Error> {
             _ = stats_interval.tick() => {
                 log_health_metrics(&stats_map)?;
             }
+            // aya RingBuf + Tokio AsyncFd: empty drain MUST return WouldBlock so
+            // readiness is cleared (Issue #103). See monitoring::ringbuf_async_io.
             result = async_ring.async_io_mut(Interest::READABLE, |ring| {
+                let mut drained_any = false;
                 while let Some(item) = ring.next() {
+                    drained_any = true;
                     let bytes = item.as_ref();
                     let Some(exec) = decode_exec_event(bytes) else {
                         continue;
@@ -440,7 +444,7 @@ async fn main() -> Result<(), anyhow::Error> {
                         log::warn!("telemetry pipeline failed: {error}");
                     }
                 }
-                Ok(())
+                agent_ebpf_sensor::monitoring::ringbuf_drain_outcome(drained_any)
             }) => {
                 result?;
             }
