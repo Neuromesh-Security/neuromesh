@@ -50,8 +50,12 @@ pub async fn start_network_monitor(
                     info!(target: "neuromesh::network_monitor", "network monitor exiting");
                     break;
                 }
+                // aya RingBuf + Tokio AsyncFd: empty drain MUST return WouldBlock
+                // so readiness is cleared (Issue #103). See ringbuf_async_io.rs.
                 poll_result = async_ring.async_io_mut(Interest::READABLE, |ring| {
+                    let mut drained_any = false;
                     while let Some(item) = ring.next() {
+                        drained_any = true;
                         let bytes = item.as_ref();
                         let Some(event) =
                             crate::monitoring::ringbuf_decode::decode_network_event(bytes)
@@ -63,7 +67,7 @@ pub async fn start_network_monitor(
                         }
                         handler.observe(event);
                     }
-                    Ok(())
+                    crate::monitoring::ringbuf_drain_outcome(drained_any)
                 }) => {
                     if let Err(error) = poll_result {
                         tracing::warn!(
