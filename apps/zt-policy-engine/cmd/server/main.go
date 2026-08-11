@@ -74,7 +74,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("policy-bundle authentication misconfigured (Issue #55): %v", err)
 	}
-	mux.HandleFunc("GET /v1/policy-bundle", policybundle.Handler(bundleToken))
+	bundleSigner, err := policybundle.LoadSignerFromEnv()
+	if err != nil {
+		log.Fatalf("policy-bundle signing misconfigured: %v", err)
+	}
+	mux.HandleFunc("GET /v1/policy-bundle", policybundle.Handler(bundleToken, bundleSigner))
 	query.RegisterRoutes(mux)
 
 	port, err := parseListenPort(os.Getenv("ZT_POLICY_ENGINE_PORT"))

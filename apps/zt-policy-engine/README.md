@@ -115,6 +115,7 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
 | `NEUROMESH_INSECURE_MOCK_IDENTITY` | unset / false | Exact value `true` enables insecure mock bypass |
 | `NEUROMESH_POLICY_BUNDLE_TOKEN` | _(required)_ | Shared Bearer token for `GET /v1/policy-bundle` (Issue #55) |
 | `NEUROMESH_POLICY_BUNDLE_TOKEN_FILE` | — | Preferred: absolute path to token file (Kubernetes Secret mount) |
+| `NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH` | _(required)_ | Absolute PKCS#8 PEM private key (ECDSA P-256 or Ed25519); signs exact `GET /v1/policy-bundle` body; header `X-Neuromesh-Policy-Bundle-Signature` |
 
 
 ## Current limitations (honest)
@@ -133,7 +134,7 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
   required before identity exceptions are production-safe.
 - A PE outage past the 90s identity `expires_at` sets
   `IDENTITY_EXCEPTIONS_VALID=0` for **all** exceptions (intentional).
-- `GET /v1/policy-bundle` requires a shared Bearer token (Issue #55). SPIFFE mTLS
+- `GET /v1/policy-bundle` requires a shared Bearer token (Issue #55) **and** a Cosign-compatible detached signature (`X-Neuromesh-Policy-Bundle-Signature` over exact body bytes). SPIFFE mTLS
   was not chosen for Slice 0 because this repo does not yet deploy SPIRE on nodes.
 - The insecure mock bypass still exists as an explicit env opt-in for local
   testing — it is fail-open for identity by design when enabled; treat enablement

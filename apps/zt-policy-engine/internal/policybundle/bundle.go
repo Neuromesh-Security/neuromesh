@@ -108,9 +108,11 @@ func contentVersion(prefixes, spiffeIDs []string, scope string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// Handler serves GET /v1/policy-bundle and requires a valid Bearer token.
-// expectedToken must be non-empty (loaded at process startup via LoadTokenFromEnv).
-func Handler(expectedToken string) http.HandlerFunc {
+// Handler serves GET /v1/policy-bundle and requires a valid Bearer token plus a
+// Cosign-compatible detached signature over the exact response body bytes.
+// expectedToken must be non-empty (LoadTokenFromEnv). signer must be non-nil
+// (LoadSignerFromEnv); a nil signer returns 503 (fail-closed, never unsigned).
+func Handler(expectedToken string, signer Signer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -120,14 +122,32 @@ func Handler(expectedToken string) http.HandlerFunc {
 			http.Error(w, "policy-bundle authentication not configured", http.StatusServiceUnavailable)
 			return
 		}
+		if signer == nil {
+			http.Error(w, "policy-bundle signing not configured", http.StatusServiceUnavailable)
+			return
+		}
 		if !authorizeBearer(r, expectedToken) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="neuromesh-policy-bundle"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(Current()); err != nil {
+
+		body, err := json.Marshal(Current())
+		if err != nil {
 			http.Error(w, "failed to encode policy bundle", http.StatusInternalServerError)
+			return
 		}
+		// Match historical json.Encoder trailing newline so signed bytes are stable.
+		body = append(body, '\n')
+
+		sigB64, err := signer.Sign(body)
+		if err != nil {
+			http.Error(w, "failed to sign policy bundle", http.StatusServiceUnavailable)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(HeaderPolicyBundleSignature, sigB64)
+		_, _ = w.Write(body)
 	}
 }

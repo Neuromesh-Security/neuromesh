@@ -1,7 +1,11 @@
 package policybundle
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +14,25 @@ import (
 	"testing"
 	"time"
 )
+
+
+func testEd25519Signer(t *testing.T) Signer {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8})
+	s, err := ParsePKCS8Signer(pemBytes)
+	if err != nil {
+		t.Fatalf("ParsePKCS8Signer: %v", err)
+	}
+	return s
+}
 
 func TestCurrentReturnsSchemaVersion2WithIdentity(t *testing.T) {
 	now := time.Date(2026, 7, 25, 19, 0, 0, 0, time.UTC)
@@ -84,7 +107,7 @@ func TestHandlerValidBearerReturnsBundle(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/policy-bundle", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rr := httptest.NewRecorder()
-	Handler(token).ServeHTTP(rr, req)
+	Handler(token, testEd25519Signer(t)).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status: got %d want %d body=%q", rr.Code, http.StatusOK, rr.Body.String())
@@ -103,12 +126,25 @@ func TestHandlerValidBearerReturnsBundle(t *testing.T) {
 	if len(got.DenyPathPrefixes) != 3 {
 		t.Fatalf("expected 3 prefixes, got %d", len(got.DenyPathPrefixes))
 	}
+	if rr.Header().Get(HeaderPolicyBundleSignature) == "" {
+		t.Fatal("expected X-Neuromesh-Policy-Bundle-Signature header")
+	}
+}
+
+func TestHandlerNilSignerUnavailable(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/policy-bundle", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rr := httptest.NewRecorder()
+	Handler("tok", nil).ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d want %d", rr.Code, http.StatusServiceUnavailable)
+	}
 }
 
 func TestHandlerMissingCredentialRejected(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/policy-bundle", nil)
 	rr := httptest.NewRecorder()
-	Handler("expected-token").ServeHTTP(rr, req)
+	Handler("expected-token", testEd25519Signer(t)).ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d want %d", rr.Code, http.StatusUnauthorized)
 	}
@@ -118,7 +154,7 @@ func TestHandlerInvalidCredentialRejected(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/policy-bundle", nil)
 	req.Header.Set("Authorization", "Bearer wrong-token")
 	rr := httptest.NewRecorder()
-	Handler("expected-token").ServeHTTP(rr, req)
+	Handler("expected-token", testEd25519Signer(t)).ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d want %d", rr.Code, http.StatusUnauthorized)
 	}
@@ -128,7 +164,7 @@ func TestHandlerEmptyConfiguredTokenUnavailable(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/policy-bundle", nil)
 	req.Header.Set("Authorization", "Bearer anything")
 	rr := httptest.NewRecorder()
-	Handler("").ServeHTTP(rr, req)
+	Handler("", testEd25519Signer(t)).ServeHTTP(rr, req)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status: got %d want %d", rr.Code, http.StatusServiceUnavailable)
 	}
@@ -138,7 +174,7 @@ func TestHandlerRejectsNonGET(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/policy-bundle", nil)
 	req.Header.Set("Authorization", "Bearer tok")
 	rr := httptest.NewRecorder()
-	Handler("tok").ServeHTTP(rr, req)
+	Handler("tok", testEd25519Signer(t)).ServeHTTP(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status: got %d want %d", rr.Code, http.StatusMethodNotAllowed)
 	}

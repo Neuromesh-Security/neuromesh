@@ -36,6 +36,19 @@ pub const POLICY_BUNDLE_TOKEN_ENV: &str = "NEUROMESH_POLICY_BUNDLE_TOKEN";
 /// Absolute path to a file containing the shared bearer token (Secret mount).
 pub const POLICY_BUNDLE_TOKEN_FILE_ENV: &str = "NEUROMESH_POLICY_BUNDLE_TOKEN_FILE";
 
+/// HTTP response header carrying Cosign sign-blob-compatible detached signature
+/// (standard base64) over the exact policy-bundle body bytes.
+pub const POLICY_BUNDLE_SIGNATURE_HEADER: &str = "X-Neuromesh-Policy-Bundle-Signature";
+
+/// Dedicated Cosign public key for policy-bundle verification (preferred).
+pub const POLICY_BUNDLE_PUBLIC_KEY_PATH_ENV: &str = "NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH";
+
+/// Fallback Cosign public key path (same as bytecode attestation).
+pub const COSIGN_PUBLIC_KEY_PATH_ENV: &str = "NEUROMESH_COSIGN_PUBLIC_KEY_PATH";
+
+/// Default Cosign public key mount when neither policy-bundle nor Cosign env is set.
+pub const DEFAULT_COSIGN_PUBLIC_KEY_PATH: &str = "/etc/neuromesh/cosign/cosign.pub";
+
 /// Load the shared policy-bundle bearer token from file (preferred) or env.
 pub fn load_bundle_token() -> Result<String> {
     if let Ok(path) = std::env::var(POLICY_BUNDLE_TOKEN_FILE_ENV) {
@@ -70,6 +83,74 @@ pub fn load_bundle_token() -> Result<String> {
     }
 }
 
+/// Load PEM public key for policy-bundle Cosign verify-blob.
+///
+/// Order: [`POLICY_BUNDLE_PUBLIC_KEY_PATH_ENV`] if set, else
+/// [`COSIGN_PUBLIC_KEY_PATH_ENV`] / [`DEFAULT_COSIGN_PUBLIC_KEY_PATH`].
+pub fn load_bundle_public_key_pem() -> Result<Vec<u8>> {
+    let path = if let Ok(p) = std::env::var(POLICY_BUNDLE_PUBLIC_KEY_PATH_ENV) {
+        let p = p.trim().to_string();
+        if !p.is_empty() {
+            PathBuf::from(p)
+        } else {
+            fallback_cosign_pubkey_path()
+        }
+    } else {
+        fallback_cosign_pubkey_path()
+    };
+    if !path.is_absolute() {
+        bail!(
+            "policy-bundle public key path must be absolute, got {}",
+            path.display()
+        );
+    }
+    let pem = std::fs::read(&path).with_context(|| {
+        format!(
+            "read policy-bundle public key at {} (set {POLICY_BUNDLE_PUBLIC_KEY_PATH_ENV} or {COSIGN_PUBLIC_KEY_PATH_ENV})",
+            path.display()
+        )
+    })?;
+    if pem.is_empty() {
+        bail!("policy-bundle public key at {} is empty", path.display());
+    }
+    Ok(pem)
+}
+
+fn fallback_cosign_pubkey_path() -> PathBuf {
+    match std::env::var(COSIGN_PUBLIC_KEY_PATH_ENV) {
+        Ok(p) if !p.trim().is_empty() => PathBuf::from(p.trim()),
+        _ => PathBuf::from(DEFAULT_COSIGN_PUBLIC_KEY_PATH),
+    }
+}
+
+/// Authenticated policy-bundle fetch result (body + detached signature header).
+#[derive(Debug, Clone)]
+pub struct FetchedBundle {
+    pub body: String,
+    pub signature_b64: Option<String>,
+}
+
+/// Verify Cosign sign-blob-compatible detached signature over exact body bytes.
+///
+/// Fail-closed: missing header => `signature_missing`; invalid => `signature_invalid`.
+pub fn verify_bundle_signature(public_key_pem: &[u8], body: &str, signature_b64: Option<&str>) -> Result<()> {
+    let Some(sig) = signature_b64.map(str::trim).filter(|s| !s.is_empty()) else {
+        bail!(
+            "policy-bundle signature_missing: required header {POLICY_BUNDLE_SIGNATURE_HEADER} absent or empty              — retaining last-known-good (no apply)"
+        );
+    };
+    crate::bytecode_attestation::verify_cosign_blob_signature(
+        public_key_pem,
+        body.as_bytes(),
+        sig.as_bytes(),
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "policy-bundle signature_invalid: Cosign verify-blob failed ({e}) — retaining last-known-good (no apply)"
+        )
+    })
+}
+
 /// Authenticated GET of the raw policy-bundle body.
 ///
 /// Always sends `Authorization: Bearer …`. Never falls back to an unauthenticated GET.
@@ -77,7 +158,7 @@ pub async fn fetch_policy_bundle(
     client: &reqwest::Client,
     base_url: &str,
     bearer_token: &str,
-) -> Result<String> {
+) -> Result<FetchedBundle> {
     if bearer_token.trim().is_empty() {
         bail!("refusing policy-bundle sync with empty bearer token (Issue #55)");
     }
@@ -94,18 +175,29 @@ pub async fn fetch_policy_bundle(
     let status = response.status();
     if status.as_u16() == 401 || status.as_u16() == 403 {
         bail!(
-            "GET {url} authentication rejected (HTTP {status}) — retaining last-known-good \
-             (no unauthenticated retry)"
+            "GET {url} authentication rejected (HTTP {status}) — retaining last-known-good              (no unauthenticated retry)"
         );
     }
     if !status.is_success() {
         bail!("GET {url} returned HTTP {status}");
     }
 
-    response
+    let signature_b64 = response
+        .headers()
+        .get(POLICY_BUNDLE_SIGNATURE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let body = response
         .text()
         .await
-        .context("failed to read policy-bundle body")
+        .context("failed to read policy-bundle body")?;
+
+    Ok(FetchedBundle {
+        body,
+        signature_b64,
+    })
 }
 
 /// Fetch + apply one policy bundle (deny + identity validity + PE allowlist cache).
@@ -118,14 +210,21 @@ pub async fn sync_once(
     client: &reqwest::Client,
     base_url: &str,
     bearer_token: &str,
+    public_key_pem: &[u8],
     deny_maps: &mut PathDenyMaps,
     identity_maps: &mut IdentityAllowMaps,
     state: &mut PolicySyncState,
     identity_expires_at: &mut Option<SystemTime>,
     hooks: Option<&IdentityPolicyHooks>,
 ) -> Result<IdentitySectionValidity> {
-    let body = fetch_policy_bundle(client, base_url, bearer_token).await?;
-    let parsed = identity_allow::parse_policy_bundle_json(&body)?;
+    let fetched = fetch_policy_bundle(client, base_url, bearer_token).await?;
+    // Verify BEFORE parse/apply — fail-closed: never call apply_* on unsigned/invalid.
+    verify_bundle_signature(
+        public_key_pem,
+        &fetched.body,
+        fetched.signature_b64.as_deref(),
+    )?;
+    let parsed = identity_allow::parse_policy_bundle_json(&fetched.body)?;
 
     // Always refresh identity validity from the live body (expires_at advances
     // even when content version is unchanged).
@@ -312,6 +411,44 @@ pub fn spawn_policy_sync(
             }
         };
 
+        let public_key_pem = match load_bundle_public_key_pem() {
+            Ok(pem) => pem,
+            Err(error) => {
+                tracing::error!(
+                    target: "neuromesh::policy_sync",
+                    %error,
+                    "policy-bundle public key unavailable — sync disabled;                      enforcing last-known-good bootstrap deny list (fail-closed)"
+                );
+                {
+                    let mut id = identity_maps.lock().await;
+                    let _ = apply_identity_validity(
+                        &mut id,
+                        &IdentitySectionValidity::Invalid {
+                            reason: "public key unavailable".into(),
+                        },
+                    );
+                }
+                if let Some(ref h) = hooks {
+                    h.allowlist.clear();
+                    run_allowlist_followup(
+                        h,
+                        &IdentitySectionValidity::Invalid {
+                            reason: "public key unavailable".into(),
+                        },
+                    )
+                    .await;
+                }
+                loop {
+                    tokio::select! {
+                        _ = shutdown.cancelled() => return,
+                        _ = tokio::time::sleep(POLICY_SYNC_INTERVAL) => {
+                            state.refresh_stale_flag();
+                        }
+                    }
+                }
+            }
+        };
+
         let client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
@@ -356,6 +493,7 @@ pub fn spawn_policy_sync(
                             &client,
                             &base_url,
                             &bearer_token,
+                            &public_key_pem,
                             &mut deny_guard,
                             &mut id_guard,
                             &mut state,
@@ -404,6 +542,11 @@ pub fn spawn_policy_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use ed25519_dalek::pkcs8::EncodePublicKey as Ed25519EncodePublicKey;
+    use ed25519_dalek::{Signer as Ed25519Signer, SigningKey as Ed25519SigningKey};
+    use p256::pkcs8::LineEnding;
+    use rand_core::OsRng;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::Mutex;
@@ -415,10 +558,47 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
     }
 
+    struct TestKey {
+        signing: Ed25519SigningKey,
+        pub_pem: Vec<u8>,
+        pub_path: PathBuf,
+        _dir: PathBuf,
+    }
+
+    fn generate_test_key() -> TestKey {
+        let signing = Ed25519SigningKey::generate(&mut OsRng);
+        let pem = signing
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .expect("pem");
+        let dir = std::env::temp_dir().join(format!(
+            "neuromesh-bundle-key-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pub_path = dir.join("bundle.pub");
+        std::fs::write(&pub_path, pem.as_bytes()).unwrap();
+        TestKey {
+            signing,
+            pub_pem: pem.into_bytes(),
+            pub_path: std::fs::canonicalize(&pub_path).unwrap(),
+            _dir: dir,
+        }
+    }
+
+    fn sign_body(sk: &Ed25519SigningKey, body: &str) -> String {
+        let sig = Ed25519Signer::sign(sk, body.as_bytes());
+        base64::engine::general_purpose::STANDARD.encode(sig.to_bytes())
+    }
+
     fn spawn_stub(
         expect_bearer: Option<&'static str>,
         status_line: &'static str,
         body: &'static str,
+        signature_b64: Option<String>,
     ) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -435,8 +615,12 @@ mod tests {
                     "expected bearer {token} in request:\n{req}"
                 );
             }
+            let sig_hdr = match signature_b64 {
+                Some(ref s) => format!("{POLICY_BUNDLE_SIGNATURE_HEADER}: {s}\r\n"),
+                None => String::new(),
+            };
             let resp = format!(
-                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "{status_line}\r\nContent-Type: application/json\r\n{sig_hdr}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             let _ = stream.write_all(resp.as_bytes());
@@ -478,15 +662,78 @@ mod tests {
         assert!(load_bundle_token().is_err());
     }
 
+    #[test]
+    fn load_bundle_public_key_prefers_policy_bundle_path() {
+        let _guard = env_lock();
+        let key = generate_test_key();
+        std::env::set_var(POLICY_BUNDLE_PUBLIC_KEY_PATH_ENV, &key.pub_path);
+        std::env::remove_var(COSIGN_PUBLIC_KEY_PATH_ENV);
+        let pem = load_bundle_public_key_pem().expect("pem");
+        assert_eq!(pem, key.pub_pem);
+        std::env::remove_var(POLICY_BUNDLE_PUBLIC_KEY_PATH_ENV);
+    }
+
+    #[test]
+    fn verify_bundle_signature_round_trip() {
+        let key = generate_test_key();
+        let body = sample_bundle_v2();
+        let sig = sign_body(&key.signing, body);
+        verify_bundle_signature(&key.pub_pem, body, Some(&sig)).expect("ok");
+    }
+
+    #[test]
+    fn verify_bundle_signature_missing() {
+        let key = generate_test_key();
+        let err = verify_bundle_signature(&key.pub_pem, sample_bundle_v2(), None).unwrap_err();
+        assert!(
+            err.to_string().contains("signature_missing"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_bundle_signature_invalid() {
+        let key = generate_test_key();
+        let err = verify_bundle_signature(&key.pub_pem, sample_bundle_v2(), Some("YWJjZGVm"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("signature_invalid"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_bundle_signature_tampered_body() {
+        let key = generate_test_key();
+        let body = sample_bundle_v2();
+        let sig = sign_body(&key.signing, body);
+        let tampered = body.replace("abad1dea", "deadbeef");
+        let err = verify_bundle_signature(&key.pub_pem, &tampered, Some(&sig)).unwrap_err();
+        assert!(
+            err.to_string().contains("signature_invalid"),
+            "got {err}"
+        );
+    }
+
     #[tokio::test]
-    async fn fetch_valid_token_returns_body() {
-        let (base, join) = spawn_stub(Some("good-token"), "HTTP/1.1 200 OK", sample_bundle_v2());
+    async fn fetch_valid_token_returns_body_and_signature() {
+        let key = generate_test_key();
+        let body = sample_bundle_v2();
+        let sig = sign_body(&key.signing, body);
+        let (base, join) = spawn_stub(
+            Some("good-token"),
+            "HTTP/1.1 200 OK",
+            body,
+            Some(sig.clone()),
+        );
         let client = reqwest::Client::new();
-        let body = fetch_policy_bundle(&client, &base, "good-token")
+        let fetched = fetch_policy_bundle(&client, &base, "good-token")
             .await
             .expect("fetch");
-        assert!(body.contains("deny_path_prefixes"));
-        let (version, entries) = crate::path_deny::entries_from_bundle_json(&body).unwrap();
+        assert!(fetched.body.contains("deny_path_prefixes"));
+        assert_eq!(fetched.signature_b64.as_deref(), Some(sig.as_str()));
+        let (version, entries) =
+            crate::path_deny::entries_from_bundle_json(&fetched.body).unwrap();
         assert_eq!(version, "sha256:abad1dea");
         assert_eq!(entries.len(), 3);
         join.join().unwrap();
@@ -494,7 +741,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_missing_token_rejected_no_unauthenticated_retry() {
-        let (base, join) = spawn_stub(None, "HTTP/1.1 401 Unauthorized", "unauthorized");
+        let (base, join) = spawn_stub(None, "HTTP/1.1 401 Unauthorized", "unauthorized", None);
         let client = reqwest::Client::new();
         let err = fetch_policy_bundle(&client, &base, "any-token")
             .await
@@ -509,7 +756,8 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_invalid_token_rejected() {
-        let (base, join) = spawn_stub(Some("wrong"), "HTTP/1.1 401 Unauthorized", "unauthorized");
+        let (base, join) =
+            spawn_stub(Some("wrong"), "HTTP/1.1 401 Unauthorized", "unauthorized", None);
         let client = reqwest::Client::new();
         let err = fetch_policy_bundle(&client, &base, "wrong")
             .await
@@ -524,6 +772,7 @@ mod tests {
             Some("expired-or-wrong"),
             "HTTP/1.1 401 Unauthorized",
             "unauthorized",
+            None,
         );
         let client = reqwest::Client::new();
         let mut state = PolicySyncState::fresh("sha256:last-known-good");
@@ -560,5 +809,17 @@ mod tests {
             .expect_err("empty");
         assert!(err.to_string().contains("empty bearer"));
         assert!(listener.accept().is_err(), "must not open a connection");
+    }
+
+    #[tokio::test]
+    async fn fetch_without_signature_header_yields_none() {
+        let (base, join) =
+            spawn_stub(Some("good-token"), "HTTP/1.1 200 OK", sample_bundle_v2(), None);
+        let client = reqwest::Client::new();
+        let fetched = fetch_policy_bundle(&client, &base, "good-token")
+            .await
+            .expect("fetch");
+        assert!(fetched.signature_b64.is_none());
+        join.join().unwrap();
     }
 }
