@@ -61,6 +61,14 @@ services:
       NEUROMESH_INSECURE_MOCK_IDENTITY: "true"
       # Issue #55: policy-bundle requires a shared bearer token (local-dev only).
       NEUROMESH_POLICY_BUNDLE_TOKEN: "local-dev-policy-bundle-token"
+      # Fail-closed Cosign-compatible detached signature (PKCS#8 PEM on host).
+      # Set NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_HOST_PATH (E2E script provisions ephemeral key).
+      NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH: /policy-bundle-signing.pem
+    volumes:
+      - type: bind
+        source: ${NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_HOST_PATH:?set NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_HOST_PATH to a PKCS#8 PEM}
+        target: /policy-bundle-signing.pem
+        read_only: true
     healthcheck:
       disable: true
     networks:

@@ -23,6 +23,33 @@ cleanup() {
 }
 trap cleanup EXIT
 
+dump_compose_logs() {
+  log "---- docker compose ps ----"
+  compose ps -a || true
+  log "---- docker compose logs (zt-policy-engine) ----"
+  compose logs --no-color --tail=200 zt-policy-engine || true
+}
+
+# Provision an ephemeral PKCS#8 Ed25519 signing key for fail-closed PE startup.
+# Exports NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_HOST_PATH for docker-compose bind mount.
+ensure_policy_bundle_signing_key() {
+  local key_dir key_path
+  key_dir="$(mktemp -d "${TMPDIR:-/tmp}/neuromesh-e2e-signing.XXXXXX")"
+  key_path="${key_dir}/policy-bundle-signing.pem"
+  if ! command -v openssl >/dev/null 2>&1; then
+    log "ERROR: openssl is required to provision NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH"
+    return 1
+  fi
+  if ! openssl genpkey -algorithm ED25519 -out "${key_path}" >/dev/null 2>&1; then
+    log "ERROR: openssl genpkey failed (need Ed25519 / PKCS#8 support)"
+    return 1
+  fi
+  # Distroless nonroot (uid 65532) must read the bind-mounted key.
+  chmod 644 "${key_path}"
+  export NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_HOST_PATH="${key_path}"
+  log "Provisioned ephemeral policy-bundle signing key for E2E"
+}
+
 wait_for_http() {
   local url="$1"
   local label="$2"
@@ -38,6 +65,7 @@ wait_for_http() {
   done
 
   log "ERROR: timed out waiting for ${label} (${url})"
+  dump_compose_logs
   return 1
 }
 
@@ -111,6 +139,8 @@ raise SystemExit(1)
 
 main() {
   cd "${ROOT_DIR}"
+
+  ensure_policy_bundle_signing_key
 
   log "Starting E2E stack (kafka, zt-policy-engine, ai-threat-detector)..."
   compose up -d --build kafka zt-policy-engine ai-threat-detector

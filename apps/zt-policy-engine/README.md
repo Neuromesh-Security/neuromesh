@@ -19,23 +19,39 @@ POST /v1/evaluate
 
 GET /v1/policy-bundle
     │
-    └─► Bearer token check (Issue #55) → compiled path-prefix deny list
-        for agent BPF map sync (Phase 1; no OPA / no SPIFFE on this path)
+    ├─► (1) Bearer token check — TRANSPORT AUTH (Issue #55)
+    │         Authorization: Bearer <token>
+    │
+    └─► (2) Cosign-compatible detached SIGN of exact response body
+              — CONTENT INTEGRITY (Issue #108 / external review P0)
+              Header: X-Neuromesh-Policy-Bundle-Signature
+              Agent verifies BEFORE apply_deny_entries /
+              apply_identity_validity (fail-closed; no unsigned apply)
+
+    Two independent controls. Bearer alone is NOT content integrity.
+    PE refuses to boot without NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH.
 ```
 
 ### Operator note — agent sync (Phase 1)
 
 When `NEUROMESH_ZT_POLICY_ENGINE_URL` is set on the agent (e.g. `http://zt-policy-engine:8080`),
-`agent-ebpf-sensor` polls authenticated `GET /v1/policy-bundle` every **30s** (shared
-Bearer via `NEUROMESH_POLICY_BUNDLE_TOKEN` / `_FILE`), writes prefixes into BPF maps,
-and keeps enforcing last-known-good on failure including auth rejection (STALE after
-5 minutes — enforcement is never disabled). If the URL is unset, the agent uses
-bootstrap defaults only (`/tmp/`, `/dev/shm/`, `/var/tmp/`). Full threat-model
-write-up: `docs/threat-model.md` §4.5.
+`agent-ebpf-sensor` polls `GET /v1/policy-bundle` every **30s** with **both**:
+
+1. **Transport auth** — shared Bearer (`NEUROMESH_POLICY_BUNDLE_TOKEN` / `_FILE`)
+2. **Content integrity** — Cosign `verify-blob` over exact body bytes using
+   `NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH` (fallback:
+   `NEUROMESH_COSIGN_PUBLIC_KEY_PATH`, default `/etc/neuromesh/cosign/cosign.pub`)
+
+Missing/invalid signature is a sync failure (`signature_missing` /
+`signature_invalid`): last-known-good deny maps are retained; enforcement is never
+disabled (STALE after 5 minutes). Auth rejection behaves the same. If the URL is
+unset, the agent uses bootstrap defaults only (`/tmp/`, `/dev/shm/`, `/var/tmp/`).
+Full threat-model write-up: `docs/threat-model.md` §4.5.
 
 ```bash
-curl -s -H "Authorization: Bearer $NEUROMESH_POLICY_BUNDLE_TOKEN" \
-  http://localhost:8080/v1/policy-bundle | jq .
+curl -s -D - -H "Authorization: Bearer $NEUROMESH_POLICY_BUNDLE_TOKEN" \
+  http://localhost:8080/v1/policy-bundle | tee /dev/stderr | jq .
+# Expect header: X-Neuromesh-Policy-Bundle-Signature: <base64>
 ```
 
 ## Policy (Sprint)
@@ -52,10 +68,24 @@ defaults). Do not treat `/v1/evaluate` as the enforcement source of truth.
 
 ## Quickstart
 
+**Mandatory (fail-closed):** PE will **not start** without a policy-bundle signing
+key. Missing or unreadable `NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH` → process
+fatal (`policy-bundle signing misconfigured`). Same class as the Issue #55 bearer
+token requirement — there is no unsigned serve path.
+
 ```bash
 cd apps/zt-policy-engine
 go test ./...
 go build -o bin/zt-policy-engine ./cmd/server
+
+# --- Local/dev: generate an Ed25519 PKCS#8 signing key (Cosign-compatible wire) ---
+# Prefer openssl 3.x. Keep the private key 0600; distribute only the .pub to agents.
+mkdir -p /tmp/neuromesh-dev-keys
+openssl genpkey -algorithm Ed25519 \
+  -out /tmp/neuromesh-dev-keys/policy-bundle-signing.pem
+openssl pkey -in /tmp/neuromesh-dev-keys/policy-bundle-signing.pem \
+  -pubout -out /tmp/neuromesh-dev-keys/policy-bundle.pub
+chmod 600 /tmp/neuromesh-dev-keys/policy-bundle-signing.pem
 
 # Production-shaped local run: static PEM trust bundle (required unless mock bypass).
 export ZT_POLICY_ENGINE_PORT=8080
@@ -64,8 +94,22 @@ export NEUROMESH_SPIFFE_TRUST_BUNDLE_MODE=static_file
 export NEUROMESH_SPIFFE_BUNDLE_PATH=/path/to/spiffe-trust-bundle.pem
 # Issue #55: required for GET /v1/policy-bundle (prefer Secret-mounted file in prod).
 export NEUROMESH_POLICY_BUNDLE_TOKEN=replace-me
+# Issue #108: required — absolute path to PKCS#8 PEM (ECDSA P-256 or Ed25519).
+# Without this, zt-policy-engine exits at startup (fail-closed; never serves unsigned).
+export NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH=/tmp/neuromesh-dev-keys/policy-bundle-signing.pem
 ./bin/zt-policy-engine
 ```
+
+On the agent (when sync is enabled), mount/set the matching public key:
+
+```bash
+export NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH=/tmp/neuromesh-dev-keys/policy-bundle.pub
+# Or reuse Cosign pubkey path if the same keypair is intentionally shared (lab only;
+# production should prefer a dedicated policy-bundle key for blast-radius isolation).
+```
+
+Live fail-closed proof (valid / corrupt / missing / tampered):  
+[`scripts/manual_verify_policy_bundle_signature.sh`](../../scripts/manual_verify_policy_bundle_signature.sh).
 
 ### Evaluate an execution request
 
@@ -120,8 +164,9 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
 | `NEUROMESH_SPIFFE_WORKLOAD_API_ADDR` | — | Optional Workload API socket override |
 | `NEUROMESH_SPIFFE_EXPECTED_ID_PATTERN` | — | Optional regexp on SPIFFE ID path |
 | `NEUROMESH_INSECURE_MOCK_IDENTITY` | unset / false | Exact value `true` enables insecure mock bypass |
-| `NEUROMESH_POLICY_BUNDLE_TOKEN` | _(required)_ | Shared Bearer token for `GET /v1/policy-bundle` (Issue #55) |
+| `NEUROMESH_POLICY_BUNDLE_TOKEN` | _(required)_ | Shared Bearer token for `GET /v1/policy-bundle` transport auth (Issue #55). Missing → PE fatal at startup. |
 | `NEUROMESH_POLICY_BUNDLE_TOKEN_FILE` | — | Preferred: absolute path to token file (Kubernetes Secret mount) |
+| `NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH` | _(required)_ | **Fail-closed.** Absolute PKCS#8 PEM private key (ECDSA P-256 or Ed25519). Signs exact `GET /v1/policy-bundle` body; header `X-Neuromesh-Policy-Bundle-Signature`. Missing/unreadable/unsupported → PE **refuses to boot** (Issue #108). Never serves unsigned bundles. |
 
 
 ## Current limitations (honest)
@@ -143,8 +188,13 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
   required before identity exceptions are production-safe.
 - A PE outage past the 90s identity `expires_at` sets
   `IDENTITY_EXCEPTIONS_VALID=0` for **all** exceptions (intentional).
-- `GET /v1/policy-bundle` requires a shared Bearer token (Issue #55). SPIFFE mTLS
-  was not chosen for Slice 0 because this repo does not yet deploy SPIRE on nodes.
+- `GET /v1/policy-bundle` requires **both** a shared Bearer token (Issue #55,
+  transport auth) **and** a Cosign-compatible detached signature
+  (`X-Neuromesh-Policy-Bundle-Signature` over exact body bytes — Issue #108,
+  content integrity). PE **refuses to boot** without
+  `NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH`. SPIFFE mTLS was not chosen for
+  Slice 0 because this repo does not yet deploy SPIRE on nodes. Live proof:
+  `scripts/manual_verify_policy_bundle_signature.sh`.
 - The insecure mock bypass still exists as an explicit env opt-in for local
   testing — it is fail-open for identity by design when enabled; treat enablement
   as a security incident outside developer laptops.

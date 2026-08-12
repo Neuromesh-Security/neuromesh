@@ -91,6 +91,28 @@ Identity exceptions (when enabled) are scoped to `/tmp/` only — `/dev/shm/` an
 `/var/tmp/` remain hard-denied for every SPIFFE identity, in both the LSM and
 the Rego policy.
 
+## Policy-bundle signing (mandatory — fail-closed)
+
+`GET /v1/policy-bundle` is protected by **two independent controls**:
+
+| Control | Mechanism | Failure mode |
+|---------|-----------|--------------|
+| Transport auth | Bearer token (`NEUROMESH_POLICY_BUNDLE_TOKEN` / `_FILE`) — Issue #55 | PE fatal if unset; agent never syncs unauthenticated |
+| Content integrity | Cosign-compatible detached signature over **exact** response body bytes (`X-Neuromesh-Policy-Bundle-Signature`) — Issue #108 / external review P0 (T-PB-02-class) | PE **refuses to boot** without a valid `NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH`; agent rejects missing/invalid signatures (`signature_missing` / `signature_invalid`) and retains last-known-good deny maps — **never** applies unsigned or tampered bundles |
+
+Bearer auth alone is **not** content integrity. An operator who deploys PE without
+the signing key will see an immediate fatal startup error
+(`policy-bundle signing misconfigured`) — this is intentional, not a soft warning.
+Do not weaken fail-closed startup to “make local demos easier”; generate a
+dev PKCS#8 key (see `apps/zt-policy-engine/README.md` Quickstart) or use
+[`scripts/manual_verify_policy_bundle_signature.sh`](scripts/manual_verify_policy_bundle_signature.sh)
+for the signed-vs-tampered live proof.
+
+Same documentation loudness bar as lab-only manual identity seeding
+(`NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS`): mandatory controls are explicit, fail-closed,
+and called out here — not buried in an env table alone. Full threat reasoning:
+`docs/threat-model.md` §4.5 and the residual-risk table (T-PB-02-class row).
+
 ## Security Contacts
 
 - **Vulnerability reports:** draganflaviusfx@gmail.com
@@ -98,4 +120,4 @@ the Rego policy.
 
 ---
 
-*Last updated: 2026-08-11*
+*Last updated: 2026-08-12*
