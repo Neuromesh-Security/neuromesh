@@ -124,6 +124,8 @@ Neuromesh separates security into two layers with explicit latency contracts:
 | **Fast Path** | eBPF LSM + tracepoints + user-space rules | Sub-millisecond (kernel) / sub-microsecond (user space) | Block staging-path execution; emit deterministic alerts |
 | **Slow Path** | Kafka → GNN inference (`ai-threat-detector`) | Seconds (async) | Lateral movement, anomaly correlation — never blocks syscall hot path |
 
+`POST /v1/evaluate` on `zt-policy-engine` is a **control-plane advisory** API (OPA + SPIFFE). It is **not** the execve enforcement source of truth — the LSM + policy-bundle `PATH_DENY_LIST` are. See [`SECURITY.md`](SECURITY.md) and [`apps/zt-policy-engine/README.md`](apps/zt-policy-engine/README.md).
+
 ---
 
 ## Security Verification
