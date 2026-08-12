@@ -154,8 +154,9 @@ pub fn bootstrap_deny_maps(maps: &mut PathDenyMaps) -> Result<PolicySyncState> {
 
 /// Parse a policy-bundle JSON body into deny entries.
 ///
-/// Accepts schema_version 1 or 2 (Slice 2a). Identity section is handled by
-/// [`crate::identity_allow`]; this function only extracts deny prefixes.
+/// Accepts schema_version 1, 2, or 3. Identity / temporal sections are handled
+/// by [`crate::identity_allow`] / [`crate::policy_sync`]; this function only
+/// extracts deny prefixes.
 pub fn entries_from_bundle_json(body: &str) -> Result<(String, Vec<PathDenyEntry>)> {
     let parsed = crate::identity_allow::parse_policy_bundle_json(body)?;
     let mut entries = Vec::with_capacity(parsed.deny_path_prefixes.len());
@@ -264,6 +265,17 @@ mod tests {
     fn parse_valid_bundle_schema_v2() {
         let (version, entries) = entries_from_bundle_json(
             r#"{"schema_version":2,"version":"sha256:dead","deny_path_prefixes":["/tmp/","/dev/shm/","/var/tmp/"],"identity_allow_exceptions":{"scope_path_prefix":"/tmp/","spiffe_ids":["spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor"],"issued_at":"2099-01-01T00:00:00Z","expires_at":"2099-01-01T00:01:30Z"}}"#,
+        )
+        .unwrap();
+        assert_eq!(version, "sha256:dead");
+        assert_eq!(entries.len(), 3);
+        assert!(map_backed_is_blacklisted(&window("/tmp/x"), &entries));
+    }
+
+    #[test]
+    fn parse_valid_bundle_schema_v3() {
+        let (version, entries) = entries_from_bundle_json(
+            r#"{"schema_version":3,"version":"sha256:dead","not_before":"2099-01-01T00:00:00Z","not_after":"2099-01-01T00:05:00Z","deny_path_prefixes":["/tmp/","/dev/shm/","/var/tmp/"],"identity_allow_exceptions":{"scope_path_prefix":"/tmp/","spiffe_ids":["spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor"],"issued_at":"2099-01-01T00:00:00Z","expires_at":"2099-01-01T00:01:30Z"}}"#,
         )
         .unwrap();
         assert_eq!(version, "sha256:dead");

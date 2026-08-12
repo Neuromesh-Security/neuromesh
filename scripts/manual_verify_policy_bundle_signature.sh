@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Manual verification: Cosign-compatible policy-bundle signature (fail-closed).
+# Manual verification: Cosign-compatible policy-bundle signature + T-PB-04 temporal binding.
 #
-# Issue #108 / PR #109 — external Rego/policy-bundle security review P0 (T-PB-02):
-# bearer auth alone is transport auth, NOT content integrity. Agent must verify
-# X-Neuromesh-Policy-Bundle-Signature over exact body bytes BEFORE
-# apply_deny_entries / apply_identity_validity.
+# Issue (T-PB-04 / Grok audit #3) — follow-on to Issue #108:
+# Signature proves integrity; temporal fields inside the signed body bound replay.
+# Agent verifies X-Neuromesh-Policy-Bundle-Signature, then not_before/not_after,
+# BEFORE apply_deny_entries / apply_identity_validity.
 #
 # PE production behavior (documented, intentional): zt-policy-engine refuses to
 # boot without NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH. This script uses a PE
@@ -20,11 +20,13 @@
 #   sudo -E bash scripts/manual_verify_policy_bundle_signature.sh
 #
 # Cases (all must PASS; paste full script output + agent_log paths back to PR):
-#   1) Valid signature   → agent sync applies (log: applied / TTL refreshed)
+#   1) Valid signature + fresh temporal → agent sync applies
 #   2) Corrupt signature → REJECTED, reason=signature_invalid; no apply
 #   3) Missing header    → REJECTED, reason=signature_missing; no apply
 #   4) Tampered body     → REJECTED, reason=signature_invalid; no apply
-#      (signature was computed over untampered bytes; body weakened with /evil/)
+#   5) Capture fresh body+sig → apply OK; wait past short window; stub mode
+#      `replay` serves EXACT captured bytes+sig → agent logs bundle_expired; no apply
+#   6) Skew: not_before slightly future within ±5s → still accepted
 #
 # Fail-closed contract: sync failure retains last-known-good deny (bootstrap or
 # prior good sync). Identity VALID must not be refreshed from a rejected body.
@@ -43,6 +45,8 @@ STUB_LOG="${TEST_ROOT}/stub.log"
 KEY_DIR="${TEST_ROOT}/keys"
 PRIV_KEY="${KEY_DIR}/bundle_signing.pem"
 PUB_KEY="${KEY_DIR}/bundle.pub"
+# Short window for live anti-replay (PE default is 300s).
+SHORT_VALIDITY_SECS="${NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS:-15}"
 
 PASS_COUNT=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -86,7 +90,7 @@ test -f "$PRIV_KEY" && test -f "$PUB_KEY" || fail "keypair missing"
 STUB_PY="${TEST_ROOT}/signed_bundle_stub.py"
 cat >"$STUB_PY" <<'PY'
 #!/usr/bin/env python3
-"""GET /v1/policy-bundle stub with Cosign-compatible Ed25519 detached signatures."""
+"""GET /v1/policy-bundle stub with Cosign-compatible Ed25519 + schema 3 temporal."""
 from __future__ import annotations
 import base64, hashlib, json, os, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -94,28 +98,43 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 TOKEN = os.environ["NEUROMESH_POLICY_BUNDLE_TOKEN"]
 PORT = int(os.environ.get("NEUROMESH_SIG_TEST_PE_PORT", "18081"))
-MODE = os.environ.get("NEUROMESH_SIG_STUB_MODE", "valid")  # valid|corrupt|missing|tamper
+# valid|corrupt|missing|tamper|replay|skew
+MODE = os.environ.get("NEUROMESH_SIG_STUB_MODE", "valid")
 PRIV_PATH = os.environ["NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH"]
+VALIDITY = int(os.environ.get("NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS", "15"))
+CAPTURE_BODY = os.environ.get("NEUROMESH_SIG_CAPTURE_BODY", "")
+CAPTURE_SIG = os.environ.get("NEUROMESH_SIG_CAPTURE_SIG", "")
+SKEW_FUTURE_SECS = int(os.environ.get("NEUROMESH_SIG_STUB_SKEW_FUTURE_SECS", "3"))
 
 with open(PRIV_PATH, "rb") as f:
     PRIV = load_pem_private_key(f.read(), password=None)
 
-def bundle_obj(tamper: bool = False):
+def rfc3339(ts: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+def bundle_obj(tamper: bool = False, skew_future: bool = False):
     now = int(time.time())
+    if skew_future:
+        # not_before slightly in the future but within agent ±5s skew.
+        nb = now + SKEW_FUTURE_SECS
+    else:
+        nb = now
     prefixes = ["/tmp/", "/dev/shm/", "/var/tmp/"]
     if tamper:
         prefixes = prefixes + ["/evil/"]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "version": "sha256:" + hashlib.sha256("|".join(prefixes).encode()).hexdigest(),
+        "not_before": rfc3339(nb),
+        "not_after": rfc3339(nb + VALIDITY),
         "deny_path_prefixes": prefixes,
         "identity_allow_exceptions": {
             "scope_path_prefix": "/tmp/",
             "spiffe_ids": [
                 "spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor",
             ],
-            "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-            "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 90)),
+            "issued_at": rfc3339(now),
+            "expires_at": rfc3339(now + 90),
         },
     }
 
@@ -134,7 +153,22 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"unauthorized")
             return
-        signed_obj = bundle_obj(tamper=False)
+
+        if MODE == "replay":
+            if not CAPTURE_BODY or not CAPTURE_SIG:
+                self.send_error(500, "replay capture missing")
+                return
+            body = open(CAPTURE_BODY, "rb").read()
+            sig = open(CAPTURE_SIG, "r", encoding="utf-8").read().strip()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("X-Neuromesh-Policy-Bundle-Signature", sig)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        signed_obj = bundle_obj(tamper=False, skew_future=(MODE == "skew"))
         signed_body = (json.dumps(signed_obj, separators=(",", ":")) + "\n").encode()
         sig = base64.b64encode(PRIV.sign(signed_body)).decode()
         if MODE == "tamper":
@@ -172,6 +206,7 @@ start_stub() {
   export NEUROMESH_SIG_TEST_PE_PORT="$PE_PORT"
   export NEUROMESH_SIG_STUB_MODE="$mode"
   export NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH="$PRIV_KEY"
+  export NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS="$SHORT_VALIDITY_SECS"
   : >"$STUB_LOG"
   python3 "$STUB_PY" >>"$STUB_LOG" 2>&1 &
   STUB_PID=$!
@@ -217,7 +252,7 @@ start_agent() {
 
 dump_diag() {
   echo "---- diag: agent log (full grep) ----" >&2
-  grep -Eni 'policy_sync|signature|policy-bundle|applied path-prefix|last-known-good|STALE|sync' \
+  grep -Eni 'policy_sync|signature|policy-bundle|bundle_expired|bundle_not_yet|temporal|applied path-prefix|last-known-good|STALE|sync' \
     "$AGENT_LOG" 2>/dev/null >&2 || echo "(no matching lines in $AGENT_LOG)" >&2
   echo "---- diag: agent log (tail 120) ----" >&2
   tail -n 120 "$AGENT_LOG" >&2 || true
@@ -245,7 +280,7 @@ wait_log() {
   return 1
 }
 
-echo "== scenario 1: valid signature -> sync applies =="
+echo "== scenario 1: valid signature + fresh temporal -> sync applies =="
 start_stub valid
 # Confirm stub listen + signed response BEFORE agent (port/wiring class).
 ss -ltn 2>/dev/null | grep -qE ":${PE_PORT}\\b" \
@@ -259,11 +294,14 @@ grep -qi 'X-Neuromesh-Policy-Bundle-Signature:' "${TEST_ROOT}/headers.valid" \
   || fail "stub missing signature header"
 # Prove stub signature verifies with the generated pubkey (harness crypto, not agent).
 export NEUROMESH_SIG_TEST_ROOT="$TEST_ROOT"
-python3 - <<'PY' || fail "stub signature does not verify with generated pubkey"
-import base64, os, pathlib
+python3 - <<'PY' || fail "stub signature does not verify / temporal fields missing"
+import base64, json, os, pathlib
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 test_root = pathlib.Path(os.environ["NEUROMESH_SIG_TEST_ROOT"])
 body = (test_root / "body.valid").read_bytes()
+doc = json.loads(body)
+assert doc.get("schema_version") == 3, doc
+assert doc.get("not_before") and doc.get("not_after"), doc
 pub = load_pem_public_key((test_root / "keys" / "bundle.pub").read_bytes())
 sig_b64 = None
 for line in (test_root / "headers.valid").read_text().splitlines():
@@ -272,12 +310,12 @@ for line in (test_root / "headers.valid").read_text().splitlines():
         break
 assert sig_b64, "signature header missing"
 pub.verify(base64.b64decode(sig_b64), body)
-print("stub Cosign-compatible Ed25519 signature OK over exact body bytes")
+print("stub Cosign-compatible Ed25519 signature OK over exact schema-3 body bytes")
 PY
 start_agent
 wait_log 'applied path-prefix deny list \+ identity validity|policy bundle unchanged \(identity TTL refreshed\)' \
   || fail "agent did not apply valid signed bundle"
-pass "scenario 1: valid signature applied"
+pass "scenario 1: valid signature + temporal applied"
 
 echo "== scenario 2: corrupt signature -> signature_invalid (no apply; LKG retained) =="
 start_stub corrupt
@@ -321,5 +359,61 @@ if grep -Eq 'applied path-prefix deny list \+ identity validity' "$AGENT_LOG"; t
 fi
 pass "scenario 4: tampered body rejected (signature_invalid)"
 
+echo "== scenario 5: capture fresh → apply OK; wait past window → replay exact bytes → bundle_expired =="
+start_stub valid
+# Capture EXACT body + signature while fresh (before agent so we own the bytes).
+curl -sf -H "Authorization: Bearer ${BUNDLE_TOKEN}" \
+  -D "${TEST_ROOT}/headers.capture" \
+  "http://127.0.0.1:${PE_PORT}/v1/policy-bundle" -o "${TEST_ROOT}/body.capture" \
+  || fail "capture GET failed"
+python3 - <<'PY' || fail "extract capture signature"
+import pathlib, os
+test_root = pathlib.Path(os.environ["NEUROMESH_SIG_TEST_ROOT"])
+sig = None
+for line in (test_root / "headers.capture").read_text().splitlines():
+    if line.lower().startswith("x-neuromesh-policy-bundle-signature:"):
+        sig = line.split(":", 1)[1].strip()
+        break
+assert sig, "missing signature on capture"
+(test_root / "sig.capture").write_text(sig + "\n")
+print("captured body+sig for replay")
+PY
+export NEUROMESH_SIG_CAPTURE_BODY="${TEST_ROOT}/body.capture"
+export NEUROMESH_SIG_CAPTURE_SIG="${TEST_ROOT}/sig.capture"
+kill -TERM "$AGENT_PID" 2>/dev/null || true
+wait "$AGENT_PID" 2>/dev/null || true
+AGENT_PID=""
+: >"$AGENT_LOG"
+start_agent
+wait_log 'applied path-prefix deny list \+ identity validity|policy bundle unchanged \(identity TTL refreshed\)' \
+  || fail "agent did not apply freshly captured signed bundle"
+pass "scenario 5a: fresh capture applied"
+
+echo "waiting $((SHORT_VALIDITY_SECS + 6))s past short validity window (${SHORT_VALIDITY_SECS}s + skew)..."
+sleep $((SHORT_VALIDITY_SECS + 6))
+# Replay exact captured bytes+sig (signature still valid; temporal must fail).
+start_stub replay
+: >"$AGENT_LOG"
+# Agent still running — wait for next sync tick (POLICY_SYNC_INTERVAL=30s).
+wait_log 'bundle_expired' || fail "expected bundle_expired on replay after window"
+if grep -Eq 'applied path-prefix deny list \+ identity validity' "$AGENT_LOG"; then
+  fail "must not apply on expired replayed bundle"
+fi
+grep -Eq 'retaining last-known-good|bundle_expired' "$AGENT_LOG" \
+  || fail "expected LKG framing with bundle_expired"
+pass "scenario 5b: replay past window rejected (bundle_expired, no apply)"
+
+echo "== scenario 6: skew — not_before slightly future within ±5s still accepted =="
+start_stub skew
+kill -TERM "$AGENT_PID" 2>/dev/null || true
+wait "$AGENT_PID" 2>/dev/null || true
+AGENT_PID=""
+: >"$AGENT_LOG"
+start_agent
+wait_log 'applied path-prefix deny list \+ identity validity|policy bundle unchanged \(identity TTL refreshed\)' \
+  || fail "agent should accept not_before within clock skew"
+pass "scenario 6: skew-tolerant not_before accepted"
+
 echo
 echo "ALL PASS ($PASS_COUNT). evidence: agent_log=$AGENT_LOG stub_log=$STUB_LOG keys=$KEY_DIR"
+echo "Paste this full script output + agent_log excerpts back to the PR before merge."

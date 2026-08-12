@@ -2,7 +2,8 @@
 //!
 //! This package is intentionally separate from `/v1/evaluate`: it does not run
 //! OPA or SPIFFE validation. It exports the Phase-1 deny prefixes and the
-//! Slice 2a identity-allow exception document (schema_version 2).
+//! Slice 2a identity-allow exception document (schema_version 3: identity
+//! section plus whole-bundle temporal binding — T-PB-04).
 //!
 //! GET /v1/policy-bundle requires a shared bearer token (Issue #55). See auth.go.
 package policybundle
@@ -12,18 +13,30 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // SchemaVersion is the JSON schema revision of the policy bundle document.
-// Slice 2a: identity_allow_exceptions requires schema_version 2.
-const SchemaVersion = 2
+// Schema 3: schema 2 identity_allow_exceptions plus top-level not_before /
+// not_after (RFC3339) for anti-replay temporal binding (T-PB-04).
+const SchemaVersion = 3
+
+// DefaultBundleValidityWindow is 10 × the agent POLICY_SYNC_INTERVAL (30s).
+// Aligns with POLICY_STALE_AFTER (5 min) as one coherent freshness horizon.
+const DefaultBundleValidityWindow = 300 * time.Second
+
+// EnvPolicyBundleValiditySecs overrides DefaultBundleValidityWindow (seconds).
+// Intended for live short-window anti-replay tests only.
+const EnvPolicyBundleValiditySecs = "NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS"
 
 // IdentityExceptionTTL is how long a freshly issued identity section remains
 // valid. Matches 3× the agent POLICY_SYNC_INTERVAL (30s). After expires_at,
 // the agent MUST set IDENTITY_EXCEPTIONS_VALID=0 — invalidating ALL exceptions
 // (including manually seeded cgroup IDs). No grace-period workaround.
+// Distinct from whole-bundle not_before/not_after (T-PB-04).
 const IdentityExceptionTTL = 90 * time.Second
 
 // IdentityExceptionScopePrefix is the only path prefix for which identity
@@ -63,16 +76,38 @@ type IdentityAllowExceptions struct {
 
 // Bundle is the versioned deny-list (+ identity exceptions) document returned
 // by GET /v1/policy-bundle.
+//
+// not_before / not_after sit INSIDE the Cosign-signed body (T-PB-04). Stripping
+// or altering them invalidates the signature. They are independent of
+// identity_allow_exceptions.expires_at (identity VALID TTL only).
 type Bundle struct {
-	SchemaVersion            int                       `json:"schema_version"`
-	Version                  string                    `json:"version"`
-	DenyPathPrefixes         []string                  `json:"deny_path_prefixes"`
-	IdentityAllowExceptions  *IdentityAllowExceptions  `json:"identity_allow_exceptions"`
+	SchemaVersion           int                      `json:"schema_version"`
+	Version                 string                   `json:"version"`
+	NotBefore               string                   `json:"not_before"`
+	NotAfter                string                   `json:"not_after"`
+	DenyPathPrefixes        []string                 `json:"deny_path_prefixes"`
+	IdentityAllowExceptions *IdentityAllowExceptions `json:"identity_allow_exceptions"`
 }
 
-// Current returns the active schema_version 2 bundle. issued_at/expires_at are
-// wall-clock; content version hashes deny prefixes + identity IDs + scope only
-// (timestamps intentionally excluded so TTL refresh does not churn version).
+// ValidityWindowFromEnv returns the whole-bundle validity window.
+// NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS overrides the 300s default when set to
+// a positive integer (live short-window tests). Invalid/empty → default.
+func ValidityWindowFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(EnvPolicyBundleValiditySecs))
+	if raw == "" {
+		return DefaultBundleValidityWindow
+	}
+	secs, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || secs <= 0 {
+		return DefaultBundleValidityWindow
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// Current returns the active schema_version 3 bundle. issued_at/expires_at and
+// not_before/not_after are wall-clock; content version hashes deny prefixes +
+// identity IDs + scope only (timestamps intentionally excluded so TTL /
+// temporal refresh does not churn version).
 func Current() Bundle {
 	return CurrentAt(time.Now().UTC())
 }
@@ -83,9 +118,12 @@ func CurrentAt(now time.Time) Bundle {
 	ids := append([]string(nil), BootstrapIdentityAllowSPIFFEIDS...)
 	issued := now.UTC()
 	expires := issued.Add(IdentityExceptionTTL)
+	window := ValidityWindowFromEnv()
 	return Bundle{
 		SchemaVersion:    SchemaVersion,
 		Version:          contentVersion(prefixes, ids, IdentityExceptionScopePrefix),
+		NotBefore:        issued.Format(time.RFC3339),
+		NotAfter:         issued.Add(window).Format(time.RFC3339),
 		DenyPathPrefixes: prefixes,
 		IdentityAllowExceptions: &IdentityAllowExceptions{
 			ScopePathPrefix: IdentityExceptionScopePrefix,

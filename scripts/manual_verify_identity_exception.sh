@@ -16,7 +16,7 @@
 #   into that cgroup's cgroup.procs before exec — same ID the LSM helper sees.
 #
 # Scenarios (all required):
-#   1) Bundle stub (schema_version 2) with short expires_at serves /v1/policy-bundle
+#   1) Bundle stub (schema_version 3) with short expires_at serves /v1/policy-bundle
 #   2) Agent syncs → ID_EXCEPT_VALID[0] == 1 (bpftool evidence)
 #   3) Manual seed env emits SECURITY WARNING; allow map contains seeded id
 #   4) Seeded cgroup + /tmp/ exec → ALLOW (exit 0)
@@ -196,7 +196,7 @@ write_payload() {
 }
 
 # --- scenario 1: authenticated schema_version:2 stub with short expires_at ---
-echo "== scenario 1: start policy-bundle stub (schema_version 2, TTL=${TEST_TTL_SECS}s) =="
+echo "== scenario 1: start policy-bundle stub (schema_version 3, TTL=${TEST_TTL_SECS}s) =="
 STUB_PY="${TEST_ROOT}/slice2a_bundle_stub.py"
 cat >"$STUB_PY" <<'PY'
 #!/usr/bin/env python3
@@ -228,8 +228,10 @@ def bundle():
     now = datetime.now(timezone.utc).replace(microsecond=0)
     exp = now + timedelta(seconds=TTL)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "version": content_version(),
+        "not_before": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "not_after": (now + timedelta(seconds=300)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "deny_path_prefixes": PREFIXES,
         "identity_allow_exceptions": {
             "scope_path_prefix": SCOPE,
@@ -284,13 +286,14 @@ STUB_BODY="$(curl -sf -H "Authorization: Bearer ${BUNDLE_TOKEN}" \
 echo "$STUB_BODY" | python3 -c '
 import json,sys
 b=json.load(sys.stdin)
-assert b["schema_version"]==2, b
+assert b["schema_version"]==3, b
+assert b.get("not_before") and b.get("not_after"), b
 assert b["identity_allow_exceptions"]["scope_path_prefix"]=="/tmp/", b
 assert b["identity_allow_exceptions"]["spiffe_ids"], b
 assert "expires_at" in b["identity_allow_exceptions"], b
 print("stub ok expires_at=", b["identity_allow_exceptions"]["expires_at"])
 '
-pass "scenario 1: schema_version 2 stub serving identity_allow_exceptions"
+pass "scenario 1: schema_version 3 stub serving identity_allow_exceptions"
 
 AGENT_PID=""
 cleanup() {
@@ -371,7 +374,7 @@ VALID_NOW="$(read_valid_flag)"
 grep -E "identity_fresh|applied path-prefix deny list \\+ identity validity|policy bundle unchanged \\(identity TTL refreshed\\)" \
   "$AGENT_LOG" >/dev/null \
   || fail "scenario 2: no identity sync log line in $AGENT_LOG"
-pass "scenario 2: ID_EXCEPT_VALID=1 after schema_version 2 sync (bpftool+log)"
+pass "scenario 2: ID_EXCEPT_VALID=1 after schema_version 3 sync (bpftool+log)"
 
 lookup_allow_cgroup "$ALLOW_CG_ID" >/dev/null \
   || fail "scenario 3: seeded cgroup_id $ALLOW_CG_ID missing from ID_ALLOW_CGROUP"
