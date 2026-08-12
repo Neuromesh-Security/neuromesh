@@ -1,24 +1,36 @@
 #!/usr/bin/env bash
 # Manual verification: Cosign-compatible policy-bundle signature (fail-closed).
 #
-# Addresses external Rego/policy-bundle security review P0: bearer auth alone is
-# not content integrity. Agent must verify X-Neuromesh-Policy-Bundle-Signature
-# over exact body bytes before apply_deny_entries / apply_identity_validity.
+# Issue #108 / PR #109 — external Rego/policy-bundle security review P0 (T-PB-02):
+# bearer auth alone is transport auth, NOT content integrity. Agent must verify
+# X-Neuromesh-Policy-Bundle-Signature over exact body bytes BEFORE
+# apply_deny_entries / apply_identity_validity.
+#
+# PE production behavior (documented, intentional): zt-policy-engine refuses to
+# boot without NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH. This script uses a PE
+# *stub* that signs with the same Cosign-compatible Ed25519 wire format so the
+# agent verify path can be exercised without a full SPIFFE stack.
 #
 # Paste-back sequence (Linux droplet / BPF-LSM host with Cosign attestation already
-# wired for agent startup - same preconditions as manual_verify_identity_exception.sh):
+# wired for agent startup — same preconditions as manual_verify_identity_exception.sh):
 #
 #   cd /path/to/neuromesh
+#   cargo build -p agent-ebpf-sensor --features orchestrator --release
 #   export AGENT_BIN=./target/release/agent-ebpf-sensor
 #   sudo -E bash scripts/manual_verify_policy_bundle_signature.sh
 #
-# Cases:
-#   1) Valid signature  -> agent sync applies
-#   2) Corrupt signature -> signature_invalid
-#   3) Missing header    -> signature_missing
-#   4) Tampered body     -> signature_invalid
+# Cases (all must PASS; paste full script output + agent_log paths back to PR):
+#   1) Valid signature   → agent sync applies (log: applied / TTL refreshed)
+#   2) Corrupt signature → REJECTED, reason=signature_invalid; no apply
+#   3) Missing header    → REJECTED, reason=signature_missing; no apply
+#   4) Tampered body     → REJECTED, reason=signature_invalid; no apply
+#      (signature was computed over untampered bytes; body weakened with /evil/)
 #
-# Requires: root, python3 (+ cryptography), curl, agent binary, Cosign attestation for agent start.
+# Fail-closed contract: sync failure retains last-known-good deny (bootstrap or
+# prior good sync). Identity VALID must not be refreshed from a rejected body.
+#
+# Requires: root, python3 (+ cryptography), curl, agent binary, Cosign attestation
+# for agent start. See apps/zt-policy-engine/README.md + SECURITY.md + docs/threat-model.md.
 set -euo pipefail
 
 PIN_ROOT="${NEUROMESH_BPF_PIN_ROOT:-/sys/fs/bpf/neuromesh}"
@@ -207,7 +219,7 @@ wait_log 'applied path-prefix deny list \+ identity validity|policy bundle uncha
   || fail "agent did not apply valid signed bundle"
 pass "scenario 1: valid signature applied"
 
-echo "== scenario 2: corrupt signature -> signature_invalid =="
+echo "== scenario 2: corrupt signature -> signature_invalid (no apply; LKG retained) =="
 start_stub corrupt
 kill -TERM "$AGENT_PID" 2>/dev/null || true
 wait "$AGENT_PID" 2>/dev/null || true
@@ -218,6 +230,9 @@ wait_log 'signature_invalid' || fail "expected signature_invalid in agent log"
 if grep -Eq 'applied path-prefix deny list \+ identity validity' "$AGENT_LOG"; then
   fail "must not apply on corrupt signature"
 fi
+# Rejected sync must retain last-known-good framing (same class as auth failure).
+grep -Eq 'retaining last-known-good|signature_invalid' "$AGENT_LOG" \
+  || fail "expected last-known-good / signature_invalid sync-failure framing"
 pass "scenario 2: corrupt signature rejected (signature_invalid)"
 
 echo "== scenario 3: missing signature header -> signature_missing =="
