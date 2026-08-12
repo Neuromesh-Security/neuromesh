@@ -183,13 +183,48 @@ start_agent() {
   if [[ -n "${AGENT_PID:-}" ]]; then kill -TERM "$AGENT_PID" 2>/dev/null || true; wait "$AGENT_PID" 2>/dev/null || true; AGENT_PID=""; fi
   export NEUROMESH_ZT_POLICY_ENGINE_URL="http://127.0.0.1:${PE_PORT}"
   export NEUROMESH_POLICY_BUNDLE_TOKEN="$BUNDLE_TOKEN"
+  # Verification-side pubkey (NOT the signing private key). Absolute path required.
   export NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH="$PUB_KEY"
   unset NEUROMESH_POLICY_BUNDLE_TOKEN_FILE || true
+  export NEUROMESH_BPF_PIN_ROOT="$PIN_ROOT"
+  # Integrity exit would abort mid-test if pins are manipulated elsewhere.
+  export NEUROMESH_INTEGRITY_EXIT_ON_FAILURE="${NEUROMESH_INTEGRITY_EXIT_ON_FAILURE:-false}"
+  # Sync success/failure lines are tracing::info!/warn! — EnvFilter::from_default_env()
+  # without RUST_LOG is ERROR-only (same harness bug class as identity_exception.sh).
+  export RUST_LOG="${RUST_LOG:-neuromesh=info,neuromesh::policy_sync=info,agent_ebpf_sensor=info}"
   : >"$AGENT_LOG"
+  echo "agent env: PE_URL=${NEUROMESH_ZT_POLICY_ENGINE_URL} PUBLIC_KEY=${NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH} RUST_LOG=${RUST_LOG}"
+  test -f "$NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH" \
+    || fail "agent pubkey missing at $NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH"
   "$AGENT_BIN" >>"$AGENT_LOG" 2>&1 &
   AGENT_PID=$!
-  sleep 2
+  # Attestation + BPF load often exceeds 2s — wait for process + pin, not a fixed sleep.
+  local i
+  for i in $(seq 1 60); do
+    if ! kill -0 "$AGENT_PID" 2>/dev/null; then
+      echo "---- agent log ----" >&2
+      cat "$AGENT_LOG" >&2 || true
+      fail "agent died during startup"
+    fi
+    if test -f "$PIN_ROOT/neuromesh_lsm_exec_guard_link" && test -f "$PIN_ROOT/PATH_DENY_LIST"; then
+      break
+    fi
+    sleep 1
+  done
   kill -0 "$AGENT_PID" || fail "agent failed to start; see $AGENT_LOG"
+  test -f "$PIN_ROOT/PATH_DENY_LIST" || fail "PATH_DENY_LIST pin missing; see $AGENT_LOG"
+}
+
+dump_diag() {
+  echo "---- diag: agent log (full grep) ----" >&2
+  grep -Eni 'policy_sync|signature|policy-bundle|applied path-prefix|last-known-good|STALE|sync' \
+    "$AGENT_LOG" 2>/dev/null >&2 || echo "(no matching lines in $AGENT_LOG)" >&2
+  echo "---- diag: agent log (tail 120) ----" >&2
+  tail -n 120 "$AGENT_LOG" >&2 || true
+  echo "---- diag: stub log ----" >&2
+  cat "$STUB_LOG" >&2 || true
+  echo "---- diag: listen check ----" >&2
+  ss -ltnp 2>/dev/null | grep -E ":${PE_PORT}\\b" >&2 || netstat -ltn 2>/dev/null | grep -E ":${PE_PORT}\\b" >&2 || true
 }
 
 wait_log() {
@@ -199,21 +234,46 @@ wait_log() {
     if grep -Eq "$pattern" "$AGENT_LOG" 2>/dev/null; then
       return 0
     fi
+    if ! kill -0 "$AGENT_PID" 2>/dev/null; then
+      echo "agent died while waiting for: $pattern" >&2
+      dump_diag
+      return 1
+    fi
     sleep 1
   done
-  echo "---- agent log (tail) ----" >&2
-  tail -n 80 "$AGENT_LOG" >&2 || true
+  dump_diag
   return 1
 }
 
 echo "== scenario 1: valid signature -> sync applies =="
 start_stub valid
+# Confirm stub listen + signed response BEFORE agent (port/wiring class).
+ss -ltn 2>/dev/null | grep -qE ":${PE_PORT}\\b" \
+  || netstat -ltn 2>/dev/null | grep -qE ":${PE_PORT}\\b" \
+  || fail "stub not listening on 127.0.0.1:${PE_PORT}"
 curl -sf -H "Authorization: Bearer ${BUNDLE_TOKEN}" \
   -D "${TEST_ROOT}/headers.valid" \
   "http://127.0.0.1:${PE_PORT}/v1/policy-bundle" -o "${TEST_ROOT}/body.valid" \
   || fail "stub GET failed"
 grep -qi 'X-Neuromesh-Policy-Bundle-Signature:' "${TEST_ROOT}/headers.valid" \
   || fail "stub missing signature header"
+# Prove stub signature verifies with the generated pubkey (harness crypto, not agent).
+export NEUROMESH_SIG_TEST_ROOT="$TEST_ROOT"
+python3 - <<'PY' || fail "stub signature does not verify with generated pubkey"
+import base64, os, pathlib
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+test_root = pathlib.Path(os.environ["NEUROMESH_SIG_TEST_ROOT"])
+body = (test_root / "body.valid").read_bytes()
+pub = load_pem_public_key((test_root / "keys" / "bundle.pub").read_bytes())
+sig_b64 = None
+for line in (test_root / "headers.valid").read_text().splitlines():
+    if line.lower().startswith("x-neuromesh-policy-bundle-signature:"):
+        sig_b64 = line.split(":", 1)[1].strip()
+        break
+assert sig_b64, "signature header missing"
+pub.verify(base64.b64decode(sig_b64), body)
+print("stub Cosign-compatible Ed25519 signature OK over exact body bytes")
+PY
 start_agent
 wait_log 'applied path-prefix deny list \+ identity validity|policy bundle unchanged \(identity TTL refreshed\)' \
   || fail "agent did not apply valid signed bundle"
