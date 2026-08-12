@@ -86,12 +86,16 @@ kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
   --from-file=cosign.pub=./cosign.pub
 ```
 
-### Image tags
+### Image tags (confirmed fresh for live verify)
 
-Manifests pin `:0.1.0` (same style as agent / admission). CI publishes
-`ghcr.io/neuromesh-security/neuromesh-zt-policy-engine:ci` and `:<sha>`.
-If `:0.1.0` is not on GHCR yet, retag a build that includes Issue **#108**
-signing + T-PB-04 temporal (`schema_version` **3**) before live verify.
+CI on `main` publishes **`:ci` / `:<fullsha>`** (and Cosign digests) — **not** `:0.1.0`.
+
+| Component | Confirmed-fresh reference (post-#109 signing + #111 temporal, SHA `62062bbd…`) |
+|-----------|--------------------------------------------------------------------------------|
+| PE | `ghcr.io/neuromesh-security/neuromesh-zt-policy-engine@sha256:eceb694cc12409a935ca3d83a9ac856b0f3e4461131c63b193142aa828572255` |
+| Agent | `ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:413424ce5ec990e97b58014daa05ae8addab27de5afcac74904eb28fdcd5de2d` |
+
+Manifests on this branch pin those digests. Do **not** live-test with a stale `:0.1.0` pin.
 
 ## Agent behavior (accurate)
 
@@ -103,89 +107,23 @@ signing + T-PB-04 temporal (`schema_version` **3**) before live verify.
 
 Therefore: prefer PE **Ready** before rolling the agent so the first sync succeeds. Applying the agent first is **safe for deny enforcement**, but identity exceptions stay **Invalid** until a successful PE sync.
 
-## Live k3s verification sequence (paste-back)
+## Live k3s verification (MANDATORY script)
 
-Run on the droplet (Linux / k3s). Live evidence is **not** produced from Windows.
+**Do not improvise.** The full Secrets → PE → curl → agent path is:
+
+[`scripts/manual_verify_k8s_policy_engine.sh`](../../scripts/manual_verify_k8s_policy_engine.sh)
 
 ```bash
-# --- 0) Preflight ---
-kubectl get ns neuromesh-system 2>/dev/null || kubectl create namespace neuromesh-system
 cd /path/to/neuromesh
-
-# --- 1) Keys + Secrets ---
-mkdir -p /tmp/neuromesh-k8s-keys
-openssl genpkey -algorithm Ed25519 \
-  -out /tmp/neuromesh-k8s-keys/policy-bundle-signing.pem
-openssl pkey -in /tmp/neuromesh-k8s-keys/policy-bundle-signing.pem \
-  -pubout -out /tmp/neuromesh-k8s-keys/policy-bundle.pub
-chmod 600 /tmp/neuromesh-k8s-keys/policy-bundle-signing.pem
-
-# SPIFFE: use a real trust-domain PEM for neuromesh.security (lab may use a
-# SPIRE-exported bundle). PE will not become Ready without this Secret.
-test -s /path/to/spiffe-trust-bundle.pem
-
-kubectl -n neuromesh-system create secret generic neuromesh-policy-bundle-token \
-  --from-literal=token="$(openssl rand -hex 32)" \
-  --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n neuromesh-system create secret generic neuromesh-policy-bundle-signing-key \
-  --from-file=signing.pem=/tmp/neuromesh-k8s-keys/policy-bundle-signing.pem \
-  --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n neuromesh-system create secret generic neuromesh-policy-bundle-pubkey \
-  --from-file=bundle.pub=/tmp/neuromesh-k8s-keys/policy-bundle.pub \
-  --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n neuromesh-system create secret generic neuromesh-spiffe-trust-bundle \
-  --from-file=bundle.pem=/path/to/spiffe-trust-bundle.pem \
-  --dry-run=client -o yaml | kubectl apply -f -
-# Cosign pubkey still required for agent bytecode attestation:
-kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
-  --from-file=cosign.pub=./cosign.pub \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-# --- 2) Apply PE + wait Ready ---
-kubectl apply -f deploy/kubernetes/neuromesh-zt-policy-engine-deployment.yaml
-kubectl apply -f deploy/kubernetes/neuromesh-zt-policy-engine-service.yaml
-kubectl -n neuromesh-system rollout status deploy/neuromesh-zt-policy-engine --timeout=120s
-
-# --- 3) healthz + signed bundle ---
-kubectl -n neuromesh-system port-forward svc/neuromesh-zt-policy-engine 18080:8080 &
-PF_PID=$!
-sleep 2
-curl -sfS http://127.0.0.1:18080/healthz
-TOKEN=$(kubectl -n neuromesh-system get secret neuromesh-policy-bundle-token \
-  -o jsonpath='{.data.token}' | base64 -d)
-curl -sS -D - -H "Authorization: Bearer ${TOKEN}" \
-  http://127.0.0.1:18080/v1/policy-bundle | tee /tmp/pe-bundle.out
-# Expect: HTTP 200, header X-Neuromesh-Policy-Bundle-Signature, JSON schema_version 3
-# with not_before / not_after
-kill $PF_PID 2>/dev/null || true
-
-# --- 4) Agent ---
-kubectl apply -f deploy/kubernetes/neuromesh-agent-correlator-rbac.yaml
-kubectl apply -f deploy/kubernetes/neuromesh-agent.yaml
-kubectl -n neuromesh-system rollout status ds/neuromesh-agent --timeout=180s
-
-# --- 5) Agent logs: applied path-prefix + schema 3 / temporal ---
-kubectl -n neuromesh-system logs -l app.kubernetes.io/name=neuromesh-agent --tail=200 \
-  | grep -E 'applied path-prefix|schema_version|policy-bundle|zt-policy-engine|bundle_'
+git checkout feat/k8s-zt-policy-engine-productize   # or pull PR #113
+export NEUROMESH_COSIGN_PUB_FILE=/absolute/path/to/cosign.pub
+# optional: export NEUROMESH_SPIFFE_BUNDLE_PEM=/path/to/real-spire-bundle.pem
+sudo -E bash scripts/manual_verify_k8s_policy_engine.sh
 ```
 
-### Host-agent alternative
-
-If the DaemonSet image lacks latest PE signing / temporal features, run the
-host binary with the same env and mount paths (simulate Secret mounts):
-
-```bash
-export NEUROMESH_ZT_POLICY_ENGINE_URL=http://neuromesh-zt-policy-engine.neuromesh-system.svc.cluster.local:8080
-# Or NodePort / port-forward to PE if host DNS cannot resolve ClusterIP.
-export NEUROMESH_POLICY_BUNDLE_TOKEN_FILE=/etc/neuromesh/policy-bundle/token
-export NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH=/etc/neuromesh/policy-bundle-pubkey/bundle.pub
-export NEUROMESH_COSIGN_PUBLIC_KEY_PATH=/etc/neuromesh/cosign/cosign.pub
-# Bind-mount or copy Secret files to those paths, then:
-sudo -E ./target/release/agent-ebpf-sensor
-```
-
-See also `scripts/manual_verify_k8s_policy_engine.sh` for a non-destructive
-checklist of the same sequence.
+Paste the **full** script output to PR #113. The script pins the confirmed-fresh
+PE/agent digests above, creates all Secrets, applies manifests, curls `/healthz`
+and signed `/v1/policy-bundle`, then checks agent env + sync logs.
 
 ## Slice 2b-i notes
 

@@ -15,9 +15,9 @@
 #      (also needs neuromesh-policy-bundle-pubkey + neuromesh-cosign-pubkey)
 #
 # NEVER set NEUROMESH_INSECURE_MOCK_IDENTITY on this production Deployment.
-# Image tag 0.1.0 matches agent/admission version style. CI also publishes
-# :ci / :<sha> to GHCR — if :0.1.0 is missing, retag a locally built image
-# that includes Issue #108 signing + T-PB-04 temporal (schema_version 3).
+# Image: pin digest from main CI after #109 (signing) + #111 (temporal).
+# CI publishes :ci / :<fullsha> — NOT :0.1.0. Live gate:
+#   scripts/manual_verify_k8s_policy_engine.sh
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -49,7 +49,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: zt-policy-engine
-          image: ghcr.io/neuromesh-security/neuromesh-zt-policy-engine:0.1.0
+          # main @ 62062bbd (post-#111) — Cosign-signed digest from CI run 31609003980
+          image: ghcr.io/neuromesh-security/neuromesh-zt-policy-engine@sha256:eceb694cc12409a935ca3d83a9ac856b0f3e4461131c63b193142aa828572255
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

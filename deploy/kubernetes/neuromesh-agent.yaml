@@ -48,7 +48,9 @@ spec:
         kubernetes.io/os: linux
       containers:
         - name: agent
-          image: ghcr.io/neuromesh-security/agent-ebpf-sensor:0.1.0
+          # CI publishes neuromesh-agent-ebpf-sensor (:ci / :<sha>), not agent-ebpf-sensor:0.1.0.
+          # Digest from main CI run 31609003980 (SHA 62062bbd — includes #109+#111 agent sync).
+          image: ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:413424ce5ec990e97b58014daa05ae8addab27de5afcac74904eb28fdcd5de2d
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/agent-ebpf-sensor"]
           env:
