@@ -459,8 +459,10 @@ def bundle():
         spiffe_ids = json.load(f)
     version = "sha256:corr-ovhd-" + str(abs(hash(json.dumps(spiffe_ids, sort_keys=True))) % (10**12))
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "version": version,
+        "not_before": now,
+        "not_after": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 300)),
         "deny_path_prefixes": ["/tmp/", "/dev/shm/", "/var/tmp/"],
         "identity_allow_exceptions": {
             "scope_path_prefix": "/tmp/",

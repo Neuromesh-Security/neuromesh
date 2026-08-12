@@ -1,18 +1,21 @@
 //! Periodic sync of the path-prefix deny list + identity exceptions from
-//! zt-policy-engine (Slice 2a schema_version 2).
+//! zt-policy-engine (schema_version 3: identity + whole-bundle temporal binding).
 //!
 //! Fail-closed contract:
 //! - Bootstrap (pre-attach) seeds the BPF maps with the historical hardcoded set.
 //! - Sync failure leaves last-known-good **deny** map contents untouched.
 //! - Identity exceptions: PE `expires_at` (90s TTL) — when exceeded, VALID=0 for
 //!   **ALL** exceptions (including manual seeds). No grace-period workaround.
+//! - Whole-bundle temporal (T-PB-04): `not_before` / `not_after` inside signed
+//!   body; reject `bundle_expired` / `bundle_not_yet_valid` /
+//!   `bundle_temporal_missing` before any `apply_*`.
 //! - Staleness (> [`path_deny::POLICY_STALE_AFTER`]) is logged/metric'd but never
 //!   disables path-deny enforcement.
 //! - Auth failure (Issue #55) is a sync failure: no unauthenticated retry.
 
 use crate::identity_allow::{
     self, apply_identity_validity, invalidate_if_expired, IdentityAllowMaps,
-    IdentitySectionValidity,
+    IdentitySectionValidity, ParsedPolicyBundle,
 };
 use crate::identity_correlator::{
     clear_side_table_hygiene, revoke_not_in_allowlist, IdentityPolicyHooks,
@@ -23,7 +26,7 @@ use crate::path_deny::{
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -48,6 +51,34 @@ pub const COSIGN_PUBLIC_KEY_PATH_ENV: &str = "NEUROMESH_COSIGN_PUBLIC_KEY_PATH";
 
 /// Default Cosign public key mount when neither policy-bundle nor Cosign env is set.
 pub const DEFAULT_COSIGN_PUBLIC_KEY_PATH: &str = "/etc/neuromesh/cosign/cosign.pub";
+
+/// Default whole-bundle validity window (10 × [`POLICY_SYNC_INTERVAL`]=30s).
+/// Aligns with [`POLICY_STALE_AFTER`] (5 min) as one coherent freshness horizon.
+pub const BUNDLE_VALIDITY_WINDOW: Duration = Duration::from_secs(300);
+
+/// Accepted clock skew around `not_before` / `not_after` (T-PB-04). Keep tight —
+/// not the 90s identity TTL.
+pub const BUNDLE_CLOCK_SKEW: Duration = Duration::from_secs(5);
+
+/// Optional override for [`BUNDLE_CLOCK_SKEW`] (seconds) — tests / live harness.
+pub const POLICY_BUNDLE_CLOCK_SKEW_SECS_ENV: &str = "NEUROMESH_POLICY_BUNDLE_CLOCK_SKEW_SECS";
+
+/// Load clock skew from env; invalid/empty → [`BUNDLE_CLOCK_SKEW`].
+pub fn clock_skew_from_env() -> Duration {
+    match std::env::var(POLICY_BUNDLE_CLOCK_SKEW_SECS_ENV) {
+        Ok(raw) => {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return BUNDLE_CLOCK_SKEW;
+            }
+            match raw.parse::<u64>() {
+                Ok(secs) => Duration::from_secs(secs),
+                Err(_) => BUNDLE_CLOCK_SKEW,
+            }
+        }
+        Err(_) => BUNDLE_CLOCK_SKEW,
+    }
+}
 
 /// Load the shared policy-bundle bearer token from file (preferred) or env.
 pub fn load_bundle_token() -> Result<String> {
@@ -155,6 +186,67 @@ pub fn verify_bundle_signature(
     })
 }
 
+/// Verify whole-bundle temporal binding (T-PB-04) before any `apply_*`.
+///
+/// Signed sync path requires schema_version 3 and non-empty `not_before` /
+/// `not_after`. Accept if `now >= not_before - skew` AND `now <= not_after + skew`.
+/// Same LKG contract as signature failures.
+pub fn verify_bundle_temporal(parsed: &ParsedPolicyBundle, now: SystemTime) -> Result<()> {
+    verify_bundle_temporal_with_skew(parsed, now, clock_skew_from_env())
+}
+
+/// Temporal check with injectable skew (unit tests).
+pub fn verify_bundle_temporal_with_skew(
+    parsed: &ParsedPolicyBundle,
+    now: SystemTime,
+    skew: Duration,
+) -> Result<()> {
+    if parsed.schema_version != 3 {
+        bail!(
+            "policy-bundle bundle_temporal_missing: signed sync requires schema_version 3 \
+             with not_before/not_after (got schema_version {}) — retaining last-known-good (no apply)",
+            parsed.schema_version
+        );
+    }
+    let (Some(not_before), Some(not_after)) = (parsed.not_before, parsed.not_after) else {
+        bail!(
+            "policy-bundle bundle_temporal_missing: schema_version 3 missing/empty \
+             not_before/not_after — retaining last-known-good (no apply)"
+        );
+    };
+
+    // now >= not_before - skew  ⇔  now + skew >= not_before
+    let earliest_ok = match now.checked_add(skew) {
+        Some(t) => t,
+        None => bail!(
+            "policy-bundle bundle_not_yet_valid: clock overflow computing skew window \
+             — retaining last-known-good (no apply)"
+        ),
+    };
+    if earliest_ok < not_before {
+        bail!(
+            "policy-bundle bundle_not_yet_valid: now before not_before (skew={skew:?}) \
+             — retaining last-known-good (no apply)"
+        );
+    }
+
+    // now <= not_after + skew
+    let latest_ok = match not_after.checked_add(skew) {
+        Some(t) => t,
+        None => bail!(
+            "policy-bundle bundle_expired: clock overflow computing skew window \
+             — retaining last-known-good (no apply)"
+        ),
+    };
+    if now > latest_ok {
+        bail!(
+            "policy-bundle bundle_expired: now past not_after (skew={skew:?}) \
+             — retaining last-known-good (no apply)"
+        );
+    }
+    Ok(())
+}
+
 /// Authenticated GET of the raw policy-bundle body.
 ///
 /// Always sends `Authorization: Bearer …`. Never falls back to an unauthenticated GET.
@@ -229,6 +321,8 @@ pub async fn sync_once(
         fetched.signature_b64.as_deref(),
     )?;
     let parsed = identity_allow::parse_policy_bundle_json(&fetched.body)?;
+    // T-PB-04: temporal binding AFTER signature+parse, BEFORE any apply_*.
+    verify_bundle_temporal(&parsed, SystemTime::now())?;
 
     // Always refresh identity validity from the live body (expires_at advances
     // even when content version is unchanged).
@@ -632,8 +726,151 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
-    fn sample_bundle_v2() -> &'static str {
-        r#"{"schema_version":2,"version":"sha256:abad1dea","deny_path_prefixes":["/tmp/","/dev/shm/","/var/tmp/"],"identity_allow_exceptions":{"scope_path_prefix":"/tmp/","spiffe_ids":["spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor"],"issued_at":"2099-01-01T00:00:00Z","expires_at":"2099-01-01T00:01:30Z"}}"#
+    fn sample_bundle_v3() -> &'static str {
+        r#"{"schema_version":3,"version":"sha256:abad1dea","not_before":"2099-01-01T00:00:00Z","not_after":"2099-01-01T00:05:00Z","deny_path_prefixes":["/tmp/","/dev/shm/","/var/tmp/"],"identity_allow_exceptions":{"scope_path_prefix":"/tmp/","spiffe_ids":["spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor"],"issued_at":"2099-01-01T00:00:00Z","expires_at":"2099-01-01T00:01:30Z"}}"#
+    }
+
+    fn parsed_temporal(
+        schema: u32,
+        not_before: Option<&str>,
+        not_after: Option<&str>,
+    ) -> ParsedPolicyBundle {
+        let nb = not_before.map(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+                .into()
+        });
+        let na = not_after.map(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+                .into()
+        });
+        ParsedPolicyBundle {
+            schema_version: schema,
+            version: "sha256:test".into(),
+            deny_path_prefixes: vec!["/tmp/".into()],
+            identity: IdentitySectionValidity::Invalid {
+                reason: "test".into(),
+            },
+            not_before: nb,
+            not_after: na,
+        }
+    }
+
+    fn t_rfc3339(s: &str) -> SystemTime {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            .into()
+    }
+
+    #[test]
+    fn verify_bundle_temporal_ok_inside_window() {
+        let parsed = parsed_temporal(
+            3,
+            Some("2026-08-12T12:00:00Z"),
+            Some("2026-08-12T12:05:00Z"),
+        );
+        verify_bundle_temporal_with_skew(
+            &parsed,
+            t_rfc3339("2026-08-12T12:02:00Z"),
+            BUNDLE_CLOCK_SKEW,
+        )
+        .expect("inside window");
+    }
+
+    #[test]
+    fn verify_bundle_temporal_expired() {
+        let parsed = parsed_temporal(
+            3,
+            Some("2026-08-12T12:00:00Z"),
+            Some("2026-08-12T12:05:00Z"),
+        );
+        let err = verify_bundle_temporal_with_skew(
+            &parsed,
+            t_rfc3339("2026-08-12T12:05:06Z"), // past not_after + 5s skew
+            BUNDLE_CLOCK_SKEW,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("bundle_expired"), "got {err}");
+    }
+
+    #[test]
+    fn verify_bundle_temporal_not_yet_valid() {
+        let parsed = parsed_temporal(
+            3,
+            Some("2026-08-12T12:00:00Z"),
+            Some("2026-08-12T12:05:00Z"),
+        );
+        let err = verify_bundle_temporal_with_skew(
+            &parsed,
+            t_rfc3339("2026-08-12T11:59:54Z"), // before not_before - 5s skew
+            BUNDLE_CLOCK_SKEW,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("bundle_not_yet_valid"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_bundle_temporal_skew_allows_boundary() {
+        let parsed = parsed_temporal(
+            3,
+            Some("2026-08-12T12:00:00Z"),
+            Some("2026-08-12T12:05:00Z"),
+        );
+        // Exactly at not_before - 5s → OK
+        verify_bundle_temporal_with_skew(
+            &parsed,
+            t_rfc3339("2026-08-12T11:59:55Z"),
+            BUNDLE_CLOCK_SKEW,
+        )
+        .expect("skew early boundary");
+        // Exactly at not_after + 5s → OK
+        verify_bundle_temporal_with_skew(
+            &parsed,
+            t_rfc3339("2026-08-12T12:05:05Z"),
+            BUNDLE_CLOCK_SKEW,
+        )
+        .expect("skew late boundary");
+    }
+
+    #[test]
+    fn verify_bundle_temporal_missing_fields() {
+        let parsed = parsed_temporal(3, None, None);
+        let err = verify_bundle_temporal_with_skew(
+            &parsed,
+            t_rfc3339("2026-08-12T12:00:00Z"),
+            BUNDLE_CLOCK_SKEW,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("bundle_temporal_missing"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn verify_bundle_temporal_schema2_rejected() {
+        let parsed = parsed_temporal(
+            2,
+            Some("2026-08-12T12:00:00Z"),
+            Some("2026-08-12T12:05:00Z"),
+        );
+        let err = verify_bundle_temporal_with_skew(
+            &parsed,
+            t_rfc3339("2026-08-12T12:02:00Z"),
+            BUNDLE_CLOCK_SKEW,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("bundle_temporal_missing"),
+            "got {err}"
+        );
     }
 
     #[test]
@@ -680,7 +917,7 @@ mod tests {
     #[test]
     fn verify_bundle_signature_round_trip() {
         let key = generate_test_key();
-        let body = sample_bundle_v2();
+        let body = sample_bundle_v3();
         let sig = sign_body(&key.signing, body);
         verify_bundle_signature(&key.pub_pem, body, Some(&sig)).expect("ok");
     }
@@ -688,14 +925,14 @@ mod tests {
     #[test]
     fn verify_bundle_signature_missing() {
         let key = generate_test_key();
-        let err = verify_bundle_signature(&key.pub_pem, sample_bundle_v2(), None).unwrap_err();
+        let err = verify_bundle_signature(&key.pub_pem, sample_bundle_v3(), None).unwrap_err();
         assert!(err.to_string().contains("signature_missing"), "got {err}");
     }
 
     #[test]
     fn verify_bundle_signature_invalid() {
         let key = generate_test_key();
-        let err = verify_bundle_signature(&key.pub_pem, sample_bundle_v2(), Some("YWJjZGVm"))
+        let err = verify_bundle_signature(&key.pub_pem, sample_bundle_v3(), Some("YWJjZGVm"))
             .unwrap_err();
         assert!(err.to_string().contains("signature_invalid"), "got {err}");
     }
@@ -703,7 +940,7 @@ mod tests {
     #[test]
     fn verify_bundle_signature_tampered_body() {
         let key = generate_test_key();
-        let body = sample_bundle_v2();
+        let body = sample_bundle_v3();
         let sig = sign_body(&key.signing, body);
         let tampered = body.replace("abad1dea", "deadbeef");
         let err = verify_bundle_signature(&key.pub_pem, &tampered, Some(&sig)).unwrap_err();
@@ -713,7 +950,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_valid_token_returns_body_and_signature() {
         let key = generate_test_key();
-        let body = sample_bundle_v2();
+        let body = sample_bundle_v3();
         let sig = sign_body(&key.signing, body);
         let (base, join) = spawn_stub(
             Some("good-token"),
@@ -814,7 +1051,7 @@ mod tests {
         let (base, join) = spawn_stub(
             Some("good-token"),
             "HTTP/1.1 200 OK",
-            sample_bundle_v2(),
+            sample_bundle_v3(),
             None,
         );
         let client = reqwest::Client::new();

@@ -34,11 +34,12 @@ func testEd25519Signer(t *testing.T) Signer {
 	return s
 }
 
-func TestCurrentReturnsSchemaVersion2WithIdentity(t *testing.T) {
+func TestCurrentReturnsSchemaVersion3WithIdentityAndTemporal(t *testing.T) {
+	t.Setenv(EnvPolicyBundleValiditySecs, "")
 	now := time.Date(2026, 7, 25, 19, 0, 0, 0, time.UTC)
 	b := CurrentAt(now)
-	if b.SchemaVersion != 2 {
-		t.Fatalf("schema_version: got %d want 2", b.SchemaVersion)
+	if b.SchemaVersion != 3 {
+		t.Fatalf("schema_version: got %d want 3", b.SchemaVersion)
 	}
 	want := []string{"/tmp/", "/dev/shm/", "/var/tmp/"}
 	if len(b.DenyPathPrefixes) != len(want) {
@@ -48,6 +49,12 @@ func TestCurrentReturnsSchemaVersion2WithIdentity(t *testing.T) {
 		if b.DenyPathPrefixes[i] != want[i] {
 			t.Fatalf("prefix[%d]: got %q want %q", i, b.DenyPathPrefixes[i], want[i])
 		}
+	}
+	if b.NotBefore != "2026-07-25T19:00:00Z" {
+		t.Fatalf("not_before: got %q", b.NotBefore)
+	}
+	if b.NotAfter != "2026-07-25T19:05:00Z" {
+		t.Fatalf("not_after: got %q want +300s (default window)", b.NotAfter)
 	}
 	if b.IdentityAllowExceptions == nil {
 		t.Fatal("identity_allow_exceptions must be present")
@@ -68,21 +75,37 @@ func TestCurrentReturnsSchemaVersion2WithIdentity(t *testing.T) {
 		t.Fatalf("issued_at: got %q", ie.IssuedAt)
 	}
 	if ie.ExpiresAt != "2026-07-25T19:01:30Z" {
-		t.Fatalf("expires_at: got %q want +90s", ie.ExpiresAt)
+		t.Fatalf("expires_at: got %q want +90s (identity TTL; not bundle window)", ie.ExpiresAt)
 	}
 	if b.Version == "" || b.Version[:7] != "sha256:" {
 		t.Fatalf("version must be sha256-prefixed, got %q", b.Version)
 	}
 }
 
+func TestValidityWindowFromEnvOverride(t *testing.T) {
+	t.Setenv(EnvPolicyBundleValiditySecs, "15")
+	now := time.Date(2026, 7, 25, 19, 0, 0, 0, time.UTC)
+	b := CurrentAt(now)
+	if b.NotAfter != "2026-07-25T19:00:15Z" {
+		t.Fatalf("not_after with 15s override: got %q", b.NotAfter)
+	}
+	if ValidityWindowFromEnv() != 15*time.Second {
+		t.Fatalf("ValidityWindowFromEnv: got %v want 15s", ValidityWindowFromEnv())
+	}
+}
+
 func TestVersionStableForIdenticalContentIgnoresClock(t *testing.T) {
+	t.Setenv(EnvPolicyBundleValiditySecs, "")
 	a := CurrentAt(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	b := CurrentAt(time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC))
 	if a.Version != b.Version {
-		t.Fatalf("version must ignore issued_at clock skew: %q vs %q", a.Version, b.Version)
+		t.Fatalf("version must ignore issued_at/not_before clock: %q vs %q", a.Version, b.Version)
 	}
 	if a.IdentityAllowExceptions.ExpiresAt == b.IdentityAllowExceptions.ExpiresAt {
 		t.Fatal("expires_at must advance with clock")
+	}
+	if a.NotBefore == b.NotBefore || a.NotAfter == b.NotAfter {
+		t.Fatal("not_before/not_after must advance with clock (excluded from content version)")
 	}
 }
 
@@ -117,8 +140,11 @@ func TestHandlerValidBearerReturnsBundle(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.SchemaVersion != 2 {
-		t.Fatalf("schema_version: got %d want 2", got.SchemaVersion)
+	if got.SchemaVersion != 3 {
+		t.Fatalf("schema_version: got %d want 3", got.SchemaVersion)
+	}
+	if got.NotBefore == "" || got.NotAfter == "" {
+		t.Fatal("expected not_before and not_after on signed schema 3 body")
 	}
 	if got.IdentityAllowExceptions == nil || len(got.IdentityAllowExceptions.SpiffeIDs) != 3 {
 		t.Fatal("expected identity_allow_exceptions with 3 spiffe_ids")

@@ -22,14 +22,18 @@ GET /v1/policy-bundle
     ├─► (1) Bearer token check — TRANSPORT AUTH (Issue #55)
     │         Authorization: Bearer <token>
     │
-    └─► (2) Cosign-compatible detached SIGN of exact response body
-              — CONTENT INTEGRITY (Issue #108 / external review P0)
-              Header: X-Neuromesh-Policy-Bundle-Signature
-              Agent verifies BEFORE apply_deny_entries /
-              apply_identity_validity (fail-closed; no unsigned apply)
+    ├─► (2) Cosign-compatible detached SIGN of exact response body
+    │         — CONTENT INTEGRITY (Issue #108 / external review P0)
+    │         Header: X-Neuromesh-Policy-Bundle-Signature
+    │
+    └─► (3) schema_version 3 body includes not_before / not_after (RFC3339)
+              — ANTI-REPLAY TEMPORAL BINDING (T-PB-04)
+              Inside signed bytes; agent verifies AFTER signature, BEFORE
+              apply_deny_entries / apply_identity_validity (fail-closed)
 
-    Two independent controls. Bearer alone is NOT content integrity.
-    PE refuses to boot without NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH.
+    Three independent controls. Bearer alone is NOT content integrity.
+    Signature alone is NOT freshness. PE refuses to boot without
+    NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH.
 ```
 
 ### Operator note — agent sync (Phase 1)
@@ -41,12 +45,22 @@ When `NEUROMESH_ZT_POLICY_ENGINE_URL` is set on the agent (e.g. `http://zt-polic
 2. **Content integrity** — Cosign `verify-blob` over exact body bytes using
    `NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH` (fallback:
    `NEUROMESH_COSIGN_PUBLIC_KEY_PATH`, default `/etc/neuromesh/cosign/cosign.pub`)
+3. **Temporal binding (T-PB-04)** — schema_version **3** `not_before` / `not_after`
+   (default window **300s** = 10 × sync interval; PE override
+   `NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS`; agent skew ±**5s** via
+   `NEUROMESH_POLICY_BUNDLE_CLOCK_SKEW_SECS`). Rejects `bundle_expired` /
+   `bundle_not_yet_valid` / `bundle_temporal_missing` before any map apply.
 
-Missing/invalid signature is a sync failure (`signature_missing` /
-`signature_invalid`): last-known-good deny maps are retained; enforcement is never
-disabled (STALE after 5 minutes). Auth rejection behaves the same. If the URL is
-unset, the agent uses bootstrap defaults only (`/tmp/`, `/dev/shm/`, `/var/tmp/`).
-Full threat-model write-up: `docs/threat-model.md` §4.5.
+Missing/invalid signature or temporal failure is a sync failure: last-known-good
+deny maps are retained; enforcement is never disabled (STALE after 5 minutes).
+Auth rejection behaves the same. If the URL is unset, the agent uses bootstrap
+defaults only (`/tmp/`, `/dev/shm/`, `/var/tmp/`). Full threat-model write-up:
+`docs/threat-model.md` §4.5.
+
+**Why 300s?** Each GET gets fresh PE timestamps (RTT+skew would suffice ideally),
+but agents can be delayed (CPU/BPF). Aligning with `POLICY_STALE_AFTER` (5 min)
+gives one coherent freshness horizon — short enough to bound replay of a
+captured signed body, long enough that normal 30s sync never spuriously fails.
 
 ```bash
 curl -s -D - -H "Authorization: Bearer $NEUROMESH_POLICY_BUNDLE_TOKEN" \
@@ -108,7 +122,7 @@ export NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH=/tmp/neuromesh-dev-keys/policy-bu
 # production should prefer a dedicated policy-bundle key for blast-radius isolation).
 ```
 
-Live fail-closed proof (valid / corrupt / missing / tampered):  
+Live fail-closed proof (valid / corrupt / missing / tampered / capture-replay):  
 [`scripts/manual_verify_policy_bundle_signature.sh`](../../scripts/manual_verify_policy_bundle_signature.sh).
 
 ### Evaluate an execution request
@@ -167,15 +181,17 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
 | `NEUROMESH_POLICY_BUNDLE_TOKEN` | _(required)_ | Shared Bearer token for `GET /v1/policy-bundle` transport auth (Issue #55). Missing → PE fatal at startup. |
 | `NEUROMESH_POLICY_BUNDLE_TOKEN_FILE` | — | Preferred: absolute path to token file (Kubernetes Secret mount) |
 | `NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH` | _(required)_ | **Fail-closed.** Absolute PKCS#8 PEM private key (ECDSA P-256 or Ed25519). Signs exact `GET /v1/policy-bundle` body; header `X-Neuromesh-Policy-Bundle-Signature`. Missing/unreadable/unsupported → PE **refuses to boot** (Issue #108). Never serves unsigned bundles. |
+| `NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS` | `300` | Whole-bundle `not_after - not_before` window (T-PB-04). Override for live short-window anti-replay tests only. |
 
 
 ## Current limitations (honest)
 
 - `/v1/evaluate` is a **control-plane advisory** endpoint only — **not** the
   enforcement source of truth for execve. The eBPF LSM never calls it; agent
-  sync uses authenticated `GET /v1/policy-bundle` (schema_version 2) for
+  sync uses authenticated `GET /v1/policy-bundle` (schema_version 3) for
   path-prefix deny maps **and** identity-allow exception metadata
-  (`identity_allow_exceptions`). Kernel exceptions apply to `/tmp/` only —
+  (`identity_allow_exceptions`) plus whole-bundle `not_before`/`not_after`
+  (T-PB-04). Kernel exceptions apply to `/tmp/` only —
   `/dev/shm/` and `/var/tmp/` stay hard-denied. SPIFFE IDs are path-form
   (`/ns/.../sa/...`). See also root `SECURITY.md` (“Control-plane advisory vs
   kernel enforcement”).
@@ -191,10 +207,11 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
 - `GET /v1/policy-bundle` requires **both** a shared Bearer token (Issue #55,
   transport auth) **and** a Cosign-compatible detached signature
   (`X-Neuromesh-Policy-Bundle-Signature` over exact body bytes — Issue #108,
-  content integrity). PE **refuses to boot** without
+  content integrity), plus schema_version **3** temporal fields
+  (`not_before`/`not_after` — T-PB-04). PE **refuses to boot** without
   `NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH`. SPIFFE mTLS was not chosen for
   Slice 0 because this repo does not yet deploy SPIRE on nodes. Live proof:
-  `scripts/manual_verify_policy_bundle_signature.sh`.
+  `scripts/manual_verify_policy_bundle_signature.sh` (includes capture→replay).
 - The insecure mock bypass still exists as an explicit env opt-in for local
   testing — it is fail-open for identity by design when enabled; treat enablement
   as a security incident outside developer laptops.

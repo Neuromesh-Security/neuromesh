@@ -108,10 +108,18 @@ dev PKCS#8 key (see `apps/zt-policy-engine/README.md` Quickstart) or use
 [`scripts/manual_verify_policy_bundle_signature.sh`](scripts/manual_verify_policy_bundle_signature.sh)
 for the signed-vs-tampered live proof.
 
+**Anti-replay (T-PB-04):** schema_version **3** includes top-level `not_before` /
+`not_after` (RFC3339) **inside** the signed body (default 300s window, ±5s agent
+skew). A captured, still-valid signature past `not_after` is rejected as
+`bundle_expired` and must not apply — same last-known-good contract as
+`signature_invalid`. Do not confuse this with `identity_allow_exceptions.expires_at`
+(90s identity VALID TTL only). Residual: clock compromise or replay within the
+short validity window.
+
 Same documentation loudness bar as lab-only manual identity seeding
 (`NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS`): mandatory controls are explicit, fail-closed,
 and called out here — not buried in an env table alone. Full threat reasoning:
-`docs/threat-model.md` §4.5 and the residual-risk table (T-PB-02-class row).
+`docs/threat-model.md` §4.5 and the residual-risk table (T-PB-02 / T-PB-04 rows).
 
 ## Security Contacts
 

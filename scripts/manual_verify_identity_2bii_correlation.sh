@@ -328,7 +328,7 @@ test -n "$BEARER_TOKEN" || fail "failed to mint neuromesh-agent SA token"
 echo "NEUROMESH_K8S_API_URL=$K8S_API_URL (token minted; CA=$K8S_CA_FILE)"
 
 # --- scenario 2: mutable PE stub with identity_allow_exceptions ---
-echo "== scenario 2: start PE stub (schema_version 2, SPIFFE=$EXPECTED_SPIFFE) =="
+echo "== scenario 2: start PE stub (schema_version 3, SPIFFE=$EXPECTED_SPIFFE) =="
 write_spiffe_allow "[\"${EXPECTED_SPIFFE}\"]"
 cat >"${TEST_ROOT}/stub_pe_2biic.py" <<'PY'
 import json, os, time
@@ -348,8 +348,10 @@ def bundle():
     # allowlist cache refresh also happens on unchanged-version TTL sync.
     version = "sha256:slice2biic-" + str(abs(hash(json.dumps(spiffe_ids, sort_keys=True))) % (10**12))
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "version": version,
+        "not_before": now,
+        "not_after": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 300)),
         "deny_path_prefixes": ["/tmp/", "/dev/shm/", "/var/tmp/"],
         "identity_allow_exceptions": {
             "scope_path_prefix": "/tmp/",
@@ -400,12 +402,13 @@ STUB_BODY="$(curl -sf -H "Authorization: Bearer ${BUNDLE_TOKEN}" \
 echo "$STUB_BODY" | python3 -c '
 import json,sys,os
 b=json.load(sys.stdin)
-assert b["schema_version"]==2, b
+assert b["schema_version"]==3, b
+assert b.get("not_before") and b.get("not_after"), b
 want=os.environ["EXPECTED_SPIFFE"]
 assert want in b["identity_allow_exceptions"]["spiffe_ids"], (want, b)
 print("stub ok spiffe=", want)
 '
-pass "scenario 2: schema_version 2 stub serves EXPECTED_SPIFFE"
+pass "scenario 2: schema_version 3 stub serves EXPECTED_SPIFFE"
 
 AGENT_PID=""
 POD_CREATED=0

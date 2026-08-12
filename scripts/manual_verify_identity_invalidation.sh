@@ -77,8 +77,10 @@ TOKEN=os.environ.get("NEUROMESH_POLICY_BUNDLE_TOKEN","slice2bi-manual-verify-tok
 now=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 exp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()+3600))
 BODY=json.dumps({
-  "schema_version": 2,
+  "schema_version": 3,
   "version": "sha256:slice2bi",
+  "not_before": now,
+  "not_after": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()+300)),
   "deny_path_prefixes": ["/tmp/", "/dev/shm/", "/var/tmp/"],
   "identity_allow_exceptions": {
     "scope_path_prefix": "/tmp/",

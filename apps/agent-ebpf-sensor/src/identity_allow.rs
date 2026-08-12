@@ -4,6 +4,10 @@
 //! A PE outage / sync failure past `expires_at` (90s TTL) sets
 //! `IDENTITY_EXCEPTIONS_VALID=0`, invalidating **all** exceptions including
 //! manually seeded cgroup IDs — intentional, no grace-period workaround.
+//!
+//! Schema 3 adds whole-bundle `not_before` / `not_after` (T-PB-04); those are
+//! enforced by [`crate::policy_sync::verify_bundle_temporal`], not here.
+//! `identity_allow_exceptions.expires_at` remains identity VALID TTL only.
 
 use anyhow::{bail, Context, Result};
 use aya::maps::{Array, HashMap, MapData};
@@ -33,7 +37,7 @@ pub struct IdentityAllowMaps {
     pub exceptions_valid: Array<MapData, u8>,
 }
 
-/// Parsed identity section from a schema_version 2 policy bundle.
+/// Parsed identity section from a schema_version 2|3 policy bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityAllowSection {
     pub scope_path_prefix: String,
@@ -51,13 +55,17 @@ pub enum IdentitySectionValidity {
     Invalid { reason: String },
 }
 
-/// Full parse of a policy-bundle body (deny + optional identity).
+/// Full parse of a policy-bundle body (deny + optional identity + temporal).
 #[derive(Debug, Clone)]
 pub struct ParsedPolicyBundle {
     pub schema_version: u32,
     pub version: String,
     pub deny_path_prefixes: Vec<String>,
     pub identity: IdentitySectionValidity,
+    /// Whole-bundle validity start (schema 3 / T-PB-04). Absent on schema 1|2.
+    pub not_before: Option<SystemTime>,
+    /// Whole-bundle validity end (schema 3 / T-PB-04). Absent on schema 1|2.
+    pub not_after: Option<SystemTime>,
 }
 
 /// Parse RFC3339 timestamps used by PE (`time.RFC3339`).
@@ -114,7 +122,9 @@ pub fn evaluate_identity_section(
     })
 }
 
-/// Parse policy-bundle JSON (schema 1 or 2). Schema 1 → identity Invalid.
+/// Parse policy-bundle JSON (schema 1, 2, or 3). Schema 1 → identity Invalid.
+/// Schema 2|3 share identity_allow_exceptions rules. Schema 3 may carry
+/// top-level `not_before` / `not_after` (verified on the signed sync path).
 pub fn parse_policy_bundle_json(body: &str) -> Result<ParsedPolicyBundle> {
     parse_policy_bundle_json_at(body, system_now())
 }
@@ -136,12 +146,16 @@ pub fn parse_policy_bundle_json_at(body: &str, now: SystemTime) -> Result<Parsed
         deny_path_prefixes: Vec<String>,
         #[serde(default)]
         identity_allow_exceptions: Option<IdentityDoc>,
+        #[serde(default)]
+        not_before: Option<String>,
+        #[serde(default)]
+        not_after: Option<String>,
     }
 
     let doc: BundleDoc = serde_json::from_str(body).context("malformed policy-bundle JSON")?;
-    if doc.schema_version != 1 && doc.schema_version != 2 {
+    if doc.schema_version != 1 && doc.schema_version != 2 && doc.schema_version != 3 {
         bail!(
-            "unsupported policy-bundle schema_version {} (expected 1 or 2)",
+            "unsupported policy-bundle schema_version {} (expected 1, 2, or 3)",
             doc.schema_version
         );
     }
@@ -152,14 +166,26 @@ pub fn parse_policy_bundle_json_at(body: &str, now: SystemTime) -> Result<Parsed
         bail!("policy-bundle deny_path_prefixes is empty (refusing fail-open)");
     }
 
+    let not_before = match doc.not_before.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => Some(parse_rfc3339(s)?),
+        None => None,
+    };
+    let not_after = match doc.not_after.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => Some(parse_rfc3339(s)?),
+        None => None,
+    };
+
     let identity = match (doc.schema_version, doc.identity_allow_exceptions) {
-        (2, Some(ie)) => {
+        (2 | 3, Some(ie)) => {
             let issued = parse_rfc3339(&ie.issued_at)?;
             let expires = parse_rfc3339(&ie.expires_at)?;
             evaluate_identity_section(&ie.scope_path_prefix, ie.spiffe_ids, issued, expires, now)
         }
-        (2, None) => IdentitySectionValidity::Invalid {
-            reason: "schema_version 2 missing identity_allow_exceptions".into(),
+        (2 | 3, None) => IdentitySectionValidity::Invalid {
+            reason: format!(
+                "schema_version {} missing identity_allow_exceptions",
+                doc.schema_version
+            ),
         },
         (1, _) => IdentitySectionValidity::Invalid {
             reason: "schema_version 1 has no identity section".into(),
@@ -174,6 +200,8 @@ pub fn parse_policy_bundle_json_at(body: &str, now: SystemTime) -> Result<Parsed
         version: doc.version,
         deny_path_prefixes: doc.deny_path_prefixes,
         identity,
+        not_before,
+        not_after,
     })
 }
 
@@ -454,6 +482,37 @@ mod tests {
         assert!(matches!(
             parsed.identity,
             IdentitySectionValidity::Invalid { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_v3_with_temporal_fields() {
+        let body = r#"{
+            "schema_version": 3,
+            "version": "sha256:abc",
+            "not_before": "2026-07-25T19:00:00Z",
+            "not_after": "2026-07-25T19:05:00Z",
+            "deny_path_prefixes": ["/tmp/", "/dev/shm/", "/var/tmp/"],
+            "identity_allow_exceptions": {
+                "scope_path_prefix": "/tmp/",
+                "spiffe_ids": [
+                    "spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor"
+                ],
+                "issued_at": "2026-07-25T19:00:00Z",
+                "expires_at": "2026-07-25T19:01:30Z"
+            }
+        }"#;
+        let now = DateTime::parse_from_rfc3339("2026-07-25T19:00:10Z")
+            .unwrap()
+            .with_timezone(&Utc)
+            .into();
+        let parsed = parse_policy_bundle_json_at(body, now).unwrap();
+        assert_eq!(parsed.schema_version, 3);
+        assert!(parsed.not_before.is_some());
+        assert!(parsed.not_after.is_some());
+        assert!(matches!(
+            parsed.identity,
+            IdentitySectionValidity::Fresh(_)
         ));
     }
 
