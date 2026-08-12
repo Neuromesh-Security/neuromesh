@@ -133,7 +133,11 @@ pub struct FetchedBundle {
 /// Verify Cosign sign-blob-compatible detached signature over exact body bytes.
 ///
 /// Fail-closed: missing header => `signature_missing`; invalid => `signature_invalid`.
-pub fn verify_bundle_signature(public_key_pem: &[u8], body: &str, signature_b64: Option<&str>) -> Result<()> {
+pub fn verify_bundle_signature(
+    public_key_pem: &[u8],
+    body: &str,
+    signature_b64: Option<&str>,
+) -> Result<()> {
     let Some(sig) = signature_b64.map(str::trim).filter(|s| !s.is_empty()) else {
         bail!(
             "policy-bundle signature_missing: required header {POLICY_BUNDLE_SIGNATURE_HEADER} absent or empty              — retaining last-known-good (no apply)"
@@ -685,10 +689,7 @@ mod tests {
     fn verify_bundle_signature_missing() {
         let key = generate_test_key();
         let err = verify_bundle_signature(&key.pub_pem, sample_bundle_v2(), None).unwrap_err();
-        assert!(
-            err.to_string().contains("signature_missing"),
-            "got {err}"
-        );
+        assert!(err.to_string().contains("signature_missing"), "got {err}");
     }
 
     #[test]
@@ -696,10 +697,7 @@ mod tests {
         let key = generate_test_key();
         let err = verify_bundle_signature(&key.pub_pem, sample_bundle_v2(), Some("YWJjZGVm"))
             .unwrap_err();
-        assert!(
-            err.to_string().contains("signature_invalid"),
-            "got {err}"
-        );
+        assert!(err.to_string().contains("signature_invalid"), "got {err}");
     }
 
     #[test]
@@ -709,10 +707,7 @@ mod tests {
         let sig = sign_body(&key.signing, body);
         let tampered = body.replace("abad1dea", "deadbeef");
         let err = verify_bundle_signature(&key.pub_pem, &tampered, Some(&sig)).unwrap_err();
-        assert!(
-            err.to_string().contains("signature_invalid"),
-            "got {err}"
-        );
+        assert!(err.to_string().contains("signature_invalid"), "got {err}");
     }
 
     #[tokio::test]
@@ -732,8 +727,7 @@ mod tests {
             .expect("fetch");
         assert!(fetched.body.contains("deny_path_prefixes"));
         assert_eq!(fetched.signature_b64.as_deref(), Some(sig.as_str()));
-        let (version, entries) =
-            crate::path_deny::entries_from_bundle_json(&fetched.body).unwrap();
+        let (version, entries) = crate::path_deny::entries_from_bundle_json(&fetched.body).unwrap();
         assert_eq!(version, "sha256:abad1dea");
         assert_eq!(entries.len(), 3);
         join.join().unwrap();
@@ -756,8 +750,12 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_invalid_token_rejected() {
-        let (base, join) =
-            spawn_stub(Some("wrong"), "HTTP/1.1 401 Unauthorized", "unauthorized", None);
+        let (base, join) = spawn_stub(
+            Some("wrong"),
+            "HTTP/1.1 401 Unauthorized",
+            "unauthorized",
+            None,
+        );
         let client = reqwest::Client::new();
         let err = fetch_policy_bundle(&client, &base, "wrong")
             .await
@@ -813,8 +811,12 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_without_signature_header_yields_none() {
-        let (base, join) =
-            spawn_stub(Some("good-token"), "HTTP/1.1 200 OK", sample_bundle_v2(), None);
+        let (base, join) = spawn_stub(
+            Some("good-token"),
+            "HTTP/1.1 200 OK",
+            sample_bundle_v2(),
+            None,
+        );
         let client = reqwest::Client::new();
         let fetched = fetch_policy_bundle(&client, &base, "good-token")
             .await
