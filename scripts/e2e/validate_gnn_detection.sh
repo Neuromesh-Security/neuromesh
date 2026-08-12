@@ -44,7 +44,8 @@ ensure_policy_bundle_signing_key() {
     log "ERROR: openssl genpkey failed (need Ed25519 / PKCS#8 support)"
     return 1
   fi
-  chmod 600 "${key_path}"
+    # Distroless nonroot (uid 65532) must read the bind-mounted key.
+  chmod 644 "${key_path}"
   export NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_HOST_PATH="${key_path}"
   log "Provisioned ephemeral policy-bundle signing key for E2E"
 }

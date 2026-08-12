@@ -63,11 +63,11 @@ services:
       NEUROMESH_POLICY_BUNDLE_TOKEN: "local-dev-policy-bundle-token"
       # Fail-closed Cosign-compatible detached signature (PKCS#8 PEM on host).
       # Set NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_HOST_PATH (E2E script provisions ephemeral key).
-      NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH: /etc/neuromesh/policy-bundle-signing.pem
+      NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH: /policy-bundle-signing.pem
     volumes:
       - type: bind
         source: ${NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_HOST_PATH:?set NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_HOST_PATH to a PKCS#8 PEM}
-        target: /etc/neuromesh/policy-bundle-signing.pem
+        target: /policy-bundle-signing.pem
         read_only: true
     healthcheck:
       disable: true
