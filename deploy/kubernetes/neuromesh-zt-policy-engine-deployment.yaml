@@ -1,0 +1,151 @@
+# Neuromesh zt-policy-engine — Kubernetes productization
+#
+# Namespace: use neuromesh-system (created by neuromesh-agent.yaml). Do not
+# duplicate Namespace here.
+#
+# ★★★ MANDATORY INSTALL ORDER ★★★
+#   1. Secrets BEFORE this Deployment (PE is fail-closed — will CrashLoop
+#      without signing key / policy-bundle token / SPIFFE trust bundle):
+#        - neuromesh-policy-bundle-token
+#        - neuromesh-policy-bundle-signing-key  (key: signing.pem)
+#        - neuromesh-spiffe-trust-bundle        (key: bundle.pem)
+#   2. This Deployment + neuromesh-zt-policy-engine-service.yaml
+#   3. Wait until Ready (kubectl rollout status)
+#   4. Agent correlator RBAC + neuromesh-agent DaemonSet
+#      (also needs neuromesh-policy-bundle-pubkey + neuromesh-cosign-pubkey)
+#
+# NEVER set NEUROMESH_INSECURE_MOCK_IDENTITY on this production Deployment.
+# Image tag 0.1.0 matches agent/admission version style. CI also publishes
+# :ci / :<sha> to GHCR — if :0.1.0 is missing, retag a locally built image
+# that includes Issue #108 signing + T-PB-04 temporal (schema_version 3).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neuromesh-zt-policy-engine
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-zt-policy-engine
+    app.kubernetes.io/component: zt-policy-engine
+    app.kubernetes.io/part-of: neuromesh
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: neuromesh-zt-policy-engine
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: neuromesh-zt-policy-engine
+        app.kubernetes.io/component: zt-policy-engine
+        app.kubernetes.io/part-of: neuromesh
+    spec:
+      serviceAccountName: neuromesh-zt-policy-engine
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: zt-policy-engine
+          image: ghcr.io/neuromesh-security/neuromesh-zt-policy-engine:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: ZT_POLICY_ENGINE_PORT
+              value: "8080"
+            - name: NEUROMESH_SPIFFE_TRUST_DOMAIN
+              value: neuromesh.security
+            - name: NEUROMESH_SPIFFE_TRUST_BUNDLE_MODE
+              value: static_file
+            - name: NEUROMESH_SPIFFE_BUNDLE_PATH
+              value: /etc/neuromesh/spiffe/bundle.pem
+            # Issue #55: same Secret class as agent DaemonSet.
+            - name: NEUROMESH_POLICY_BUNDLE_TOKEN_FILE
+              value: /etc/neuromesh/policy-bundle/token
+            # Issue #108: Cosign-compatible PKCS#8 private key — PE refuses to
+            # boot without a readable signing key (never serves unsigned).
+            - name: NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH
+              value: /etc/neuromesh/policy-bundle-signing/signing.pem
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: policy-bundle-token
+              mountPath: /etc/neuromesh/policy-bundle
+              readOnly: true
+            - name: policy-bundle-signing-key
+              mountPath: /etc/neuromesh/policy-bundle-signing
+              readOnly: true
+            - name: spiffe-trust-bundle
+              mountPath: /etc/neuromesh/spiffe
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        # Shared with agent:
+        #   kubectl -n neuromesh-system create secret generic neuromesh-policy-bundle-token \
+        #     --from-literal=token="$(openssl rand -hex 32)"
+        - name: policy-bundle-token
+          secret:
+            secretName: neuromesh-policy-bundle-token
+            items:
+              - key: token
+                path: token
+        # PKCS#8 PEM private key (Ed25519 or ECDSA P-256):
+        #   kubectl -n neuromesh-system create secret generic neuromesh-policy-bundle-signing-key \
+        #     --from-file=signing.pem=./policy-bundle-signing.pem
+        - name: policy-bundle-signing-key
+          secret:
+            secretName: neuromesh-policy-bundle-signing-key
+            items:
+              - key: signing.pem
+                path: signing.pem
+        # SPIFFE X.509 trust bundle PEM (required for static_file mode):
+        #   kubectl -n neuromesh-system create secret generic neuromesh-spiffe-trust-bundle \
+        #     --from-file=bundle.pem=./spiffe-trust-bundle.pem
+        - name: spiffe-trust-bundle
+          secret:
+            secretName: neuromesh-spiffe-trust-bundle
+            items:
+              - key: bundle.pem
+                path: bundle.pem
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: neuromesh-zt-policy-engine
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-zt-policy-engine
+    app.kubernetes.io/part-of: neuromesh
