@@ -166,11 +166,21 @@ pub fn parse_policy_bundle_json_at(body: &str, now: SystemTime) -> Result<Parsed
         bail!("policy-bundle deny_path_prefixes is empty (refusing fail-open)");
     }
 
-    let not_before = match doc.not_before.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let not_before = match doc
+        .not_before
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(s) => Some(parse_rfc3339(s)?),
         None => None,
     };
-    let not_after = match doc.not_after.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let not_after = match doc
+        .not_after
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(s) => Some(parse_rfc3339(s)?),
         None => None,
     };
@@ -510,10 +520,7 @@ mod tests {
         assert_eq!(parsed.schema_version, 3);
         assert!(parsed.not_before.is_some());
         assert!(parsed.not_after.is_some());
-        assert!(matches!(
-            parsed.identity,
-            IdentitySectionValidity::Fresh(_)
-        ));
+        assert!(matches!(parsed.identity, IdentitySectionValidity::Fresh(_)));
     }
 
     #[test]
