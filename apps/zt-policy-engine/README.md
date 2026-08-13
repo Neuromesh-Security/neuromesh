@@ -57,6 +57,14 @@ Auth rejection behaves the same. If the URL is unset, the agent uses bootstrap
 defaults only (`/tmp/`, `/dev/shm/`, `/var/tmp/`). Full threat-model write-up:
 `docs/threat-model.md` §4.5.
 
+### Kubernetes productization
+
+Cluster manifests (Deployment, Service, agent URL + dedicated verify pubkey
+mounts, Secret install order, live k3s paste-back) live under
+[`deploy/kubernetes/`](../../deploy/kubernetes/) — see that README; do not
+duplicate the full install here. Checklist script:
+`scripts/manual_verify_k8s_policy_engine.sh`.
+
 **Why 300s?** Each GET gets fresh PE timestamps (RTT+skew would suffice ideally),
 but agents can be delayed (CPU/BPF). Aligning with `POLICY_STALE_AFTER` (5 min)
 gives one coherent freshness horizon — short enough to bound replay of a

@@ -48,7 +48,9 @@ spec:
         kubernetes.io/os: linux
       containers:
         - name: agent
-          image: ghcr.io/neuromesh-security/agent-ebpf-sensor:0.1.0
+          # CI publishes neuromesh-agent-ebpf-sensor (:ci / :<sha>), not agent-ebpf-sensor:0.1.0.
+          # Digest from main CI run 31609003980 (SHA 62062bbd — includes #109+#111 agent sync).
+          image: ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:413424ce5ec990e97b58014daa05ae8addab27de5afcac74904eb28fdcd5de2d
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/agent-ebpf-sensor"]
           env:
@@ -74,6 +76,20 @@ spec:
             # Issue #55: shared bearer for GET /v1/policy-bundle (Secret mount).
             - name: NEUROMESH_POLICY_BUNDLE_TOKEN_FILE
               value: /etc/neuromesh/policy-bundle/token
+            # Phase 1 policy sync — ClusterIP DNS for zt-policy-engine.
+            # If unset: sync disabled; agent enforces bootstrap deny only.
+            # If set but PE not Ready: sync attempts fail; agent keeps
+            # bootstrap/LKG deny (fail-closed) and does NOT crash solely from
+            # PE outage. Prefer PE Ready before rolling the DaemonSet so the
+            # first sync succeeds (identity exceptions stay Invalid until then).
+            - name: NEUROMESH_ZT_POLICY_ENGINE_URL
+              value: http://neuromesh-zt-policy-engine.neuromesh-system.svc.cluster.local:8080
+            # Issue #108: DEDICATED policy-bundle VERIFY public key (NOT the
+            # image/bytecode Cosign key at NEUROMESH_COSIGN_PUBLIC_KEY_PATH).
+            # Same keypair as PE Secret neuromesh-policy-bundle-signing-key
+            # (public half). Do not rely on Cosign-path fallback.
+            - name: NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH
+              value: /etc/neuromesh/policy-bundle-pubkey/bundle.pub
             # Slice 2a: NEVER set NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS here.
             # That env is lab/test-only manual cgroup seeding (loud SECURITY WARNING).
             # Production auto-correlation is Slice 2b-ii — not this DaemonSet seed.
@@ -117,6 +133,9 @@ spec:
             - name: policy-bundle-token
               mountPath: /etc/neuromesh/policy-bundle
               readOnly: true
+            - name: policy-bundle-pubkey
+              mountPath: /etc/neuromesh/policy-bundle-pubkey
+              readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -148,10 +167,11 @@ spec:
             type: Directory
         - name: tmp
           emptyDir: {}
-        # Provision with the Cosign static public key (same keypair used for
-        # GHCR image signing and bytecode-manifest sign-blob in CI):
+        # CI Cosign static public key (secrets.COSIGN_PUBLIC_KEY) — same
+        # keypair as GHCR image sign + bytecode-manifest sign-blob.
+        # Use deploy/kubernetes/ci-cosign.pub, NOT the lab attest-lab key:
         #   kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
-        #     --from-file=cosign.pub=./cosign.pub
+        #     --from-file=cosign.pub=deploy/kubernetes/ci-cosign.pub
         - name: cosign-pubkey
           secret:
             secretName: neuromesh-cosign-pubkey
@@ -167,6 +187,15 @@ spec:
             items:
               - key: token
                 path: token
+        # Issue #108 dedicated verify pubkey (public half of PE signing key):
+        #   kubectl -n neuromesh-system create secret generic neuromesh-policy-bundle-pubkey \
+        #     --from-file=bundle.pub=./policy-bundle.pub
+        - name: policy-bundle-pubkey
+          secret:
+            secretName: neuromesh-policy-bundle-pubkey
+            items:
+              - key: bundle.pub
+                path: bundle.pub
 ---
 apiVersion: v1
 kind: ServiceAccount

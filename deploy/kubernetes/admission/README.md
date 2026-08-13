@@ -75,11 +75,12 @@ kubectl -n neuromesh-system create secret tls neuromesh-admission-webhook-tls \
 
 # Cosign static public key (same Secret class as the agent DaemonSet)
 kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
-  --from-file=cosign.pub=./cosign.pub
+  --from-file=cosign.pub=../ci-cosign.pub
 ```
 
-Use the **same** Cosign public key that verifies GHCR image signatures for
-`agent-ebpf-sensor` / webhook images (CI Cosign static key).
+Use **`deploy/kubernetes/ci-cosign.pub`** — the CI static key (`secrets.COSIGN_PUBLIC_KEY`)
+that verifies GHCR image signatures and baked `bytecode-manifest.sig`. Do **not** use
+`~/neuromesh-attest-lab/cosign/cosign.pub` (lab-only, locally-built binaries).
 
 ### Local/lab-only HTTP registry bypass (insecure)
 
