@@ -167,10 +167,11 @@ spec:
             type: Directory
         - name: tmp
           emptyDir: {}
-        # Provision with the Cosign static public key (same keypair used for
-        # GHCR image signing and bytecode-manifest sign-blob in CI):
+        # CI Cosign static public key (secrets.COSIGN_PUBLIC_KEY) — same
+        # keypair as GHCR image sign + bytecode-manifest sign-blob.
+        # Use deploy/kubernetes/ci-cosign.pub, NOT the lab attest-lab key:
         #   kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
-        #     --from-file=cosign.pub=./cosign.pub
+        #     --from-file=cosign.pub=deploy/kubernetes/ci-cosign.pub
         - name: cosign-pubkey
           secret:
             secretName: neuromesh-cosign-pubkey

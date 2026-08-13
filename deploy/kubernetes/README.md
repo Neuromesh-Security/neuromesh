@@ -79,11 +79,15 @@ kubectl -n neuromesh-system create secret generic neuromesh-spiffe-trust-bundle 
   --from-file=bundle.pem=/path/to/spiffe-trust-bundle.pem
 ```
 
-5. **Cosign pubkey** (existing — agent bytecode / image attestation only):
+5. **Cosign pubkey** (agent bytecode + GHCR image attestation):
+
+Use **`deploy/kubernetes/ci-cosign.pub`** — the CI static key (`secrets.COSIGN_PUBLIC_KEY`)
+that signed the GHCR agent bytecode manifest. **Not** `~/neuromesh-attest-lab/cosign/cosign.pub`
+(that key is for locally-built binaries only; the agent correctly fail-closes on a mismatch).
 
 ```bash
 kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
-  --from-file=cosign.pub=./cosign.pub
+  --from-file=cosign.pub=deploy/kubernetes/ci-cosign.pub
 ```
 
 ### Image tags (confirmed fresh for live verify)
@@ -116,7 +120,8 @@ Therefore: prefer PE **Ready** before rolling the agent so the first sync succee
 ```bash
 cd /path/to/neuromesh
 git checkout feat/k8s-zt-policy-engine-productize   # or pull PR #113
-export NEUROMESH_COSIGN_PUB_FILE=/absolute/path/to/cosign.pub
+# Cosign defaults to deploy/kubernetes/ci-cosign.pub (CI key for GHCR images).
+# Do NOT point NEUROMESH_COSIGN_PUB_FILE at the lab attest-lab key.
 # optional: export NEUROMESH_SPIFFE_BUNDLE_PEM=/path/to/real-spire-bundle.pem
 sudo -E bash scripts/manual_verify_k8s_policy_engine.sh
 ```

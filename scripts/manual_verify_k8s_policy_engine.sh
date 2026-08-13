@@ -10,9 +10,20 @@
 #   ghcr.io/neuromesh-security/neuromesh-zt-policy-engine@sha256:eceb694cc12409a935ca3d83a9ac856b0f3e4461131c63b193142aa828572255
 # Do NOT use :0.1.0 — CI never publishes that tag for PE.
 #
+# Cosign bytecode trust root (DO NOT confuse with lab keys):
+#   GHCR agent images (this script's default digest) are sign-blob'd in CI with
+#   GitHub Actions secret COSIGN_PRIVATE_KEY. The MATCHING public key is
+#   secrets.COSIGN_PUBLIC_KEY — NOT committed historically; extracted from the
+#   Cosign/Rekor .sig bundle on this pinned image and stored at
+#   deploy/kubernetes/ci-cosign.pub (ECDSA P-256).
+#   ~/neuromesh-attest-lab/cosign/cosign.pub is a DIFFERENT key used only for
+#   locally-built binaries. Feeding it to a GHCR image is CORRECT fail-closed
+#   ("ECDSA P-256 verification failed: signature error") — wrong trust root.
+#
 # Usage:
 #   cd /path/to/neuromesh   # checkout feat/k8s-zt-policy-engine-productize (or main with manifests)
-#   export NEUROMESH_COSIGN_PUB_FILE=/absolute/path/to/cosign.pub   # required for agent bytecode
+#   # Cosign pubkey defaults to deploy/kubernetes/ci-cosign.pub (CI key).
+#   # Do NOT export NEUROMESH_COSIGN_PUB_FILE to the lab attest key.
 #   # Optional: real SPIFFE trust PEM (else script generates a LAB-ONLY self-signed CA for PE boot)
 #   export NEUROMESH_SPIFFE_BUNDLE_PEM=/path/to/spiffe-trust-bundle.pem
 #   sudo -E bash scripts/manual_verify_k8s_policy_engine.sh
@@ -57,15 +68,18 @@ echo "ROOT=$ROOT"
 echo "PE_IMAGE=$PE_IMAGE"
 echo "AGENT_IMAGE=$AGENT_IMAGE"
 
-COSIGN_PUB="${NEUROMESH_COSIGN_PUB_FILE:-}"
-if [[ -z "$COSIGN_PUB" ]]; then
-  for cand in "$ROOT/cosign.pub" /etc/neuromesh/cosign/cosign.pub "$HOME/cosign.pub"; do
-    if [[ -s "$cand" ]]; then COSIGN_PUB="$cand"; break; fi
-  done
-fi
-[[ -n "$COSIGN_PUB" && -s "$COSIGN_PUB" ]] \
-  || fail "set NEUROMESH_COSIGN_PUB_FILE to an absolute path to cosign.pub (agent bytecode attestation)"
-echo "COSIGN_PUB=$COSIGN_PUB"
+# Default: CI static Cosign public key that verifies GHCR-published agent
+# bytecode-manifest.sig (same keypair as image `cosign sign` on main).
+CI_COSIGN_PUB="$ROOT/deploy/kubernetes/ci-cosign.pub"
+COSIGN_PUB="${NEUROMESH_COSIGN_PUB_FILE:-$CI_COSIGN_PUB}"
+case "$COSIGN_PUB" in
+  *neuromesh-attest-lab*|"$HOME/cosign.pub"|"$HOME/neuromesh-attest-lab/cosign/cosign.pub")
+    fail "refusing lab Cosign key at $COSIGN_PUB — GHCR images need deploy/kubernetes/ci-cosign.pub (CI COSIGN_PUBLIC_KEY), not the local attest-lab key"
+    ;;
+esac
+[[ -s "$COSIGN_PUB" ]] \
+  || fail "Cosign public key missing at $COSIGN_PUB (expected deploy/kubernetes/ci-cosign.pub for GHCR images)"
+echo "COSIGN_PUB=$COSIGN_PUB (CI GHCR bytecode/image trust root — not lab)"
 
 kubectl get ns "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS"
 pass "namespace $NS ready"
@@ -194,9 +208,12 @@ POD=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=neuromesh-agent \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 [[ -n "${POD:-}" ]] || fail "no Running neuromesh-agent pod — kubectl -n $NS get pods -o wide"
 
-ENV_DUMP=$(kubectl -n "$NS" exec "$POD" -- env 2>/dev/null || true)
+# Read env from the Pod spec (API), not `kubectl exec … env` — distroless-adjacent
+# images / missing `env` binary previously produced empty dumps and a false FAIL.
+ENV_DUMP=$(kubectl -n "$NS" get pod "$POD" \
+  -o jsonpath='{range .spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}')
 echo "$ENV_DUMP" | grep -q 'NEUROMESH_ZT_POLICY_ENGINE_URL=http://neuromesh-zt-policy-engine' \
-  || fail "agent missing/wrong NEUROMESH_ZT_POLICY_ENGINE_URL"
+  || fail "agent missing/wrong NEUROMESH_ZT_POLICY_ENGINE_URL (spec env dump: ${ENV_DUMP:-empty})"
 echo "$ENV_DUMP" | grep -q 'NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH=/etc/neuromesh/policy-bundle-pubkey/bundle.pub' \
   || fail "agent missing NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH"
 echo "$ENV_DUMP" | grep -q 'NEUROMESH_POLICY_BUNDLE_TOKEN_FILE=' \
