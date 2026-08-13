@@ -107,7 +107,12 @@ fi
 test -s "$SPIFFE_PEM" || fail "SPIFFE bundle PEM empty: $SPIFFE_PEM"
 pass "SPIFFE bundle PEM=$SPIFFE_PEM"
 
-info "3) create/apply Secrets (idempotent)"
+info "3) create/apply Secrets (fresh token + keys every run)"
+# openssl rand + new Ed25519 keypair every invocation. PE loads token and
+# signing key ONCE at process start (LoadTokenFromEnv / LoadSignerFromEnv in
+# cmd/server/main.go) — no file watch. Applying a new Secret without restarting
+# PE leaves the old token in memory → curl 401 (seen when step 3 said
+# "configured" and step 4 said Deployment unchanged).
 kubectl -n "$NS" create secret generic neuromesh-policy-bundle-token \
   --from-literal=token="$(openssl rand -hex 32)" \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -133,16 +138,18 @@ kubectl -n "$NS" create secret generic neuromesh-cosign-pubkey \
   --dry-run=client -o yaml | kubectl apply -f -
 pass "Secret neuromesh-cosign-pubkey"
 
-info "4) apply PE Deployment + Service, pin FRESH image digest"
+info "4) apply PE Deployment + Service, pin FRESH image digest, restart for new Secrets"
 kubectl apply -f "$ROOT/deploy/kubernetes/neuromesh-zt-policy-engine-deployment.yaml"
 kubectl apply -f "$ROOT/deploy/kubernetes/neuromesh-zt-policy-engine-service.yaml"
-# Manifests pin :0.1.0 (not published by CI) — force the confirmed-fresh digest.
 kubectl -n "$NS" set image deploy/neuromesh-zt-policy-engine \
   zt-policy-engine="$PE_IMAGE"
+# Spec may be unchanged from a prior run (`kubectl apply` / `set image` no-op).
+# Always recycle pods so they read the Secrets just written in step 3.
+kubectl -n "$NS" rollout restart deploy/neuromesh-zt-policy-engine
 kubectl -n "$NS" rollout status deploy/neuromesh-zt-policy-engine --timeout=180s
 READY=$(kubectl -n "$NS" get deploy neuromesh-zt-policy-engine -o jsonpath='{.status.readyReplicas}')
 [[ "${READY:-0}" -ge 1 ]] || fail "PE not Ready (readyReplicas=${READY:-0}) — check: kubectl -n $NS logs deploy/neuromesh-zt-policy-engine"
-pass "PE Ready with image $PE_IMAGE"
+pass "PE Ready with image $PE_IMAGE (restarted after Secrets)"
 
 info "5) curl /healthz + signed GET /v1/policy-bundle"
 kubectl -n "$NS" port-forward svc/neuromesh-zt-policy-engine "${PF_LOCAL_PORT}:8080" \
@@ -195,10 +202,11 @@ kill "$PF_PID" 2>/dev/null || true
 wait "$PF_PID" 2>/dev/null || true
 PF_PID=""
 
-info "6) apply agent RBAC + DaemonSet (pin agent image to same main SHA wave)"
+info "6) apply agent RBAC + DaemonSet (pin agent image; restart for new Secrets)"
 kubectl apply -f "$ROOT/deploy/kubernetes/neuromesh-agent-correlator-rbac.yaml"
 kubectl apply -f "$ROOT/deploy/kubernetes/neuromesh-agent.yaml"
 kubectl -n "$NS" set image ds/neuromesh-agent "agent=${AGENT_IMAGE}" || true
+kubectl -n "$NS" rollout restart ds/neuromesh-agent
 kubectl -n "$NS" rollout status ds/neuromesh-agent --timeout=240s || \
   echo "NOTE: DaemonSet rollout not fully Ready yet — continuing log check"
 
