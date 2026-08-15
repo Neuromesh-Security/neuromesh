@@ -295,6 +295,7 @@ pub async fn fetch_policy_bundle(
             http_status = %status,
             signature_header_key_present = signature_header_raw.is_some(),
             response_header_names = %response_header_names.join(", "),
+            response_headers_debug = ?response.headers(),
             "policy-bundle signature_missing diagnostic: ALL response header names \
              (key_present=true means get() found the header but to_str/trim yielded empty)"
         );
@@ -563,6 +564,9 @@ pub fn spawn_policy_sync(
         };
 
         let client = match reqwest::Client::builder()
+            // Loopback PE / stubs must never go through env proxies (curl often
+            // skips 127.0.0.1 by default; reqwest does not unless NO_PROXY is set).
+            .no_proxy()
             .timeout(std::time::Duration::from_secs(5))
             .build()
         {
