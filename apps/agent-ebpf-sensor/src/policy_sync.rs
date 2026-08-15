@@ -278,12 +278,27 @@ pub async fn fetch_policy_bundle(
         bail!("GET {url} returned HTTP {status}");
     }
 
-    let signature_b64 = response
-        .headers()
-        .get(POLICY_BUNDLE_SIGNATURE_HEADER)
+    // Diagnostic (Issue #100 / correlator overhead): when the Cosign signature
+    // header is absent or not visible-ASCII, dump EVERY response header name so
+    // live runs can see what the agent actually received (curl≠agent mismatch).
+    let response_header_names: Vec<&str> = response.headers().keys().map(|k| k.as_str()).collect();
+    let signature_header_raw = response.headers().get(POLICY_BUNDLE_SIGNATURE_HEADER);
+    let signature_b64 = signature_header_raw
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+
+    if signature_b64.is_none() {
+        tracing::error!(
+            target: "neuromesh::policy_sync",
+            %url,
+            http_status = %status,
+            signature_header_key_present = signature_header_raw.is_some(),
+            response_header_names = %response_header_names.join(", "),
+            "policy-bundle signature_missing diagnostic: ALL response header names \
+             (key_present=true means get() found the header but to_str/trim yielded empty)"
+        );
+    }
 
     let body = response
         .text()
@@ -1059,6 +1074,9 @@ mod tests {
             .await
             .expect("fetch");
         assert!(fetched.signature_b64.is_none());
+        // sync_once → verify_bundle_signature still surfaces signature_missing;
+        // fetch itself stays Ok so callers can dump response_header_names via the
+        // tracing::error! diagnostic on the None path.
         join.join().unwrap();
     }
 }

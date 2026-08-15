@@ -385,6 +385,8 @@ start_agent() {
   test "$synced" -eq 1 || {
     echo "---- agent log ----" >&2
     tail -n 160 "$AGENT_LOG" >&2 || true
+    echo "---- signature_missing diagnostic (header names) ----" >&2
+    grep -En 'signature_missing diagnostic|response_header_names' "$AGENT_LOG" >&2 || true
     fail "agent never synced policy bundle (mode=${mode})"
   }
 
@@ -632,6 +634,14 @@ start_agent off
 measure_window "baseline" "BASELINE"
 stop_agent
 pass "phase 1 complete (baseline)"
+
+# Diag mode: stop after phase 1 (capture signature_missing header dump without
+# running correlator idle/churn windows).
+if [[ "${NEUROMESH_CORR_OVHD_PHASE1_ONLY:-}" == "1" ]]; then
+  echo "NEUROMESH_CORR_OVHD_PHASE1_ONLY=1 — exiting after phase 1"
+  echo "== DONE: $PASS_COUNT checks passed (phase-1-only) =="
+  exit 0
+fi
 
 # --- Phase 2: correlator idle (watch + inotify poll, no pod churn) ---
 echo "== PHASE 2: correlator idle — correlator ON, k3s watch, NO churn ${WINDOW_SECS}s =="
