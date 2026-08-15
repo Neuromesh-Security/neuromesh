@@ -23,8 +23,10 @@
 #   Agent does NOT read KUBECONFIG. kubectl uses KUBECONFIG; agent uses
 #   NEUROMESH_K8S_API_URL + NEUROMESH_K8S_BEARER_TOKEN + NEUROMESH_K8S_CA_FILE.
 #
-# Requires: Linux root, cgroup v2, bpftool, python3, kubectl, k3s, pidstat
-#   (sysstat), agent binary with orchestrator + identity correlator.
+# Requires: Linux root, cgroup v2, bpftool, python3 (+ cryptography), curl, kubectl,
+#   k3s, pidstat (sysstat), agent binary with orchestrator + identity correlator.
+#   PE stub signs schema-3 bundles (Issue #108/#110) — same Cosign-compatible
+#   Ed25519 pattern as scripts/manual_verify_policy_bundle_signature.sh.
 #
 # Env (defaults match neuromesh-dev-lab):
 #   AGENT_BIN, NEUROMESH_BPF_PIN_ROOT, NEUROMESH_CGROUP_ROOT,
@@ -48,6 +50,15 @@ METRICS_PORT="${NEUROMESH_METRICS_PORT:-9090}"
 AGENT_LOG="${TEST_ROOT}/corr-ovhd-agent.log"
 STUB_LOG="${TEST_ROOT}/corr-ovhd-stub.log"
 SPIFFE_FILE="${TEST_ROOT}/spiffe_allow.json"
+KEY_DIR="${TEST_ROOT}/keys"
+PRIV_KEY="${KEY_DIR}/bundle_signing.pem"
+PUB_KEY="${KEY_DIR}/bundle.pub"
+# TEST-HARNESS-ONLY temporal window for this stub (via NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS).
+# Production PE default remains **300s** (Issue #110 / T-PB-04 locked design —
+# apps/zt-policy-engine DefaultBundleValidityWindow). This 600s override is NOT a
+# production default change; it only keeps mid-phase agent syncs from tripping
+# bundle_expired during long pidstat windows. Refreshed on every stub GET.
+BUNDLE_VALIDITY_SECS="${NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS:-600}"
 POD_NAME="${NEUROMESH_2BIIC_POD_NAME:-nm-2biic-ovhd}"
 POD_NS="${NEUROMESH_2BIIC_POD_NS:-default}"
 NODE_NAME="${NEUROMESH_NODE_NAME:-neuromesh-dev-lab}"
@@ -76,13 +87,16 @@ command -v python3 >/dev/null || fail "python3 required"
 command -v kubectl >/dev/null || fail "kubectl required"
 command -v pidstat >/dev/null || fail "pidstat required (apt install sysstat)"
 command -v ss >/dev/null || fail "ss required"
+command -v curl >/dev/null || fail "curl required"
+python3 -c "import cryptography" >/dev/null 2>&1 \
+  || fail "python3 cryptography package required (signed PE stub; same as manual_verify_policy_bundle_signature.sh)"
 test -f /sys/fs/cgroup/cgroup.controllers || fail "cgroup v2 required"
 test -f "$KUBECONFIG" || fail "KUBECONFIG missing: $KUBECONFIG"
 test -f "$K8S_CA_FILE" || fail "NEUROMESH_K8S_CA_FILE missing: $K8S_CA_FILE"
 if [[ -n "${NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS:-}" ]]; then
   fail "NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS is set — unset it (measurement must not use manual seed)"
 fi
-mkdir -p "$PIN_ROOT" "$TEST_ROOT"
+mkdir -p "$PIN_ROOT" "$TEST_ROOT" "$KEY_DIR"
 
 # --- port / leftover process hygiene ---
 port_in_use() {
@@ -314,6 +328,10 @@ start_agent() {
   unset NEUROMESH_POLICY_BUNDLE_TOKEN_FILE || true
   export NEUROMESH_ZT_POLICY_ENGINE_URL="http://127.0.0.1:${PE_PORT}"
   export NEUROMESH_POLICY_BUNDLE_TOKEN="$BUNDLE_TOKEN"
+  # Issue #108: agent verifies X-Neuromesh-Policy-Bundle-Signature fail-closed.
+  # Must be the *policy-bundle* Ed25519 pubkey — not the Cosign bytecode key.
+  test -f "$PUB_KEY" || fail "policy-bundle pubkey missing at $PUB_KEY"
+  export NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH="$PUB_KEY"
   export NEUROMESH_BPF_PIN_ROOT="$PIN_ROOT"
   export NEUROMESH_CGROUP_ROOT="${NEUROMESH_CGROUP_ROOT:-/sys/fs/cgroup}"
   export NEUROMESH_SPIFFE_TRUST_DOMAIN="$TRUST_DOMAIN"
@@ -440,35 +458,83 @@ BEARER_TOKEN="$(kubectl -n neuromesh-system create token neuromesh-agent --durat
 test -n "$BEARER_TOKEN" || fail "failed to mint neuromesh-agent SA token"
 pass "scenario 1: RBAC + SA token minted"
 
-# --- scenario 2: PE stub (schema_version 2, SPIFFE for default/sa) ---
-echo "== scenario 2: start PE stub =="
+# --- scenario 2: signed PE stub (schema 3 + temporal + #108 Cosign-compatible sig) ---
+# Predates Issue #108/#110 in comment only: body already had schema 3 + not_before/
+# not_after, but lacked X-Neuromesh-Policy-Bundle-Signature. Current agent
+# sync_once verifies signature fail-closed before temporal/apply — unsigned stub
+# would hang at "agent never synced". Pattern matches
+# scripts/manual_verify_policy_bundle_signature.sh (Ed25519 + exact body bytes).
+echo "== scenario 2: generate Ed25519 policy-bundle keypair + start signed PE stub =="
+export KEY_DIR
+python3 - <<'PY'
+import os, pathlib
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+key_dir = pathlib.Path(os.environ["KEY_DIR"])
+key_dir.mkdir(parents=True, exist_ok=True)
+priv = Ed25519PrivateKey.generate()
+(key_dir / "bundle_signing.pem").write_bytes(
+    priv.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+)
+(key_dir / "bundle.pub").write_bytes(
+    priv.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+)
+print("keys ready in", key_dir)
+PY
+test -f "$PRIV_KEY" && test -f "$PUB_KEY" || fail "policy-bundle keypair missing under $KEY_DIR"
+
 write_spiffe_allow "[\"${EXPECTED_SPIFFE}\"]"
 cat >"${TEST_ROOT}/stub_pe_ovhd.py" <<'PY'
-import json, os, time
+"""GET /v1/policy-bundle stub: schema 3 + temporal + Cosign-compatible Ed25519."""
+from __future__ import annotations
+
+import base64
+import json
+import os
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 TOKEN = os.environ.get("NEUROMESH_POLICY_BUNDLE_TOKEN", "slice2bii-corr-ovhd-token")
 SPIFFE_FILE = os.environ["SPIFFE_ALLOW_FILE"]
 PORT = int(os.environ["PE_PORT"])
+PRIV_PATH = os.environ["NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH"]
+VALIDITY = int(os.environ.get("NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS", "600"))
+
+with open(PRIV_PATH, "rb") as f:
+    PRIV = load_pem_private_key(f.read(), password=None)
 
 
-def bundle():
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    exp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600))
+def rfc3339(ts: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def bundle_obj():
+    now = time.time()
     with open(SPIFFE_FILE, "r", encoding="utf-8") as f:
         spiffe_ids = json.load(f)
-    version = "sha256:corr-ovhd-" + str(abs(hash(json.dumps(spiffe_ids, sort_keys=True))) % (10**12))
+    version = "sha256:corr-ovhd-" + str(
+        abs(hash(json.dumps(spiffe_ids, sort_keys=True))) % (10**12)
+    )
     return {
         "schema_version": 3,
         "version": version,
-        "not_before": now,
-        "not_after": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 300)),
+        "not_before": rfc3339(now),
+        "not_after": rfc3339(now + VALIDITY),
         "deny_path_prefixes": ["/tmp/", "/dev/shm/", "/var/tmp/"],
         "identity_allow_exceptions": {
             "scope_path_prefix": "/tmp/",
             "spiffe_ids": spiffe_ids,
-            "issued_at": now,
-            "expires_at": exp,
+            "issued_at": rfc3339(now),
+            "expires_at": rfc3339(now + 3600),
         },
     }
 
@@ -484,9 +550,12 @@ class H(BaseHTTPRequestHandler):
             self.send_response(401)
             self.end_headers()
             return
-        body = json.dumps(bundle()).encode()
+        # Exact body bytes must match what Cosign/agent verify (Issue #108).
+        body = (json.dumps(bundle_obj(), separators=(",", ":")) + "\n").encode()
+        sig = base64.b64encode(PRIV.sign(body)).decode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("X-Neuromesh-Policy-Bundle-Signature", sig)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -501,14 +570,42 @@ PY
 export PE_PORT BUNDLE_TOKEN
 NEUROMESH_POLICY_BUNDLE_TOKEN="$BUNDLE_TOKEN" PE_PORT="$PE_PORT" \
   SPIFFE_ALLOW_FILE="$SPIFFE_FILE" \
+  NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH="$PRIV_KEY" \
+  NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS="$BUNDLE_VALIDITY_SECS" \
   python3 "${TEST_ROOT}/stub_pe_ovhd.py" >"$STUB_LOG" 2>&1 &
 STUB_PID=$!
 sleep 0.5
 kill -0 "$STUB_PID" || fail "PE stub failed to start (see $STUB_LOG)"
-curl -sf -H "Authorization: Bearer ${BUNDLE_TOKEN}" \
-  "http://127.0.0.1:${PE_PORT}/v1/policy-bundle" >/dev/null \
-  || fail "stub GET /v1/policy-bundle failed"
-pass "scenario 2: PE stub up on :${PE_PORT}"
+HDRS="${TEST_ROOT}/stub_headers.txt"
+BODY="${TEST_ROOT}/stub_body.json"
+HTTP_CODE="$(curl -sS -D "$HDRS" -o "$BODY" -w '%{http_code}' \
+  -H "Authorization: Bearer ${BUNDLE_TOKEN}" \
+  "http://127.0.0.1:${PE_PORT}/v1/policy-bundle")"
+[[ "$HTTP_CODE" == "200" ]] || fail "stub GET /v1/policy-bundle HTTP $HTTP_CODE"
+grep -qi '^X-Neuromesh-Policy-Bundle-Signature:' "$HDRS" \
+  || fail "stub missing X-Neuromesh-Policy-Bundle-Signature (agent would signature_missing)"
+python3 - <<PY || fail "stub signature/schema check failed"
+import base64, json
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+from cryptography.exceptions import InvalidSignature
+body = open(r"$BODY", "rb").read()
+doc = json.loads(body)
+assert doc.get("schema_version") == 3, doc
+assert doc.get("not_before") and doc.get("not_after"), doc
+sig = None
+for line in open(r"$HDRS", "r", encoding="utf-8", errors="replace"):
+    if line.lower().startswith("x-neuromesh-policy-bundle-signature:"):
+        sig = line.split(":", 1)[1].strip()
+        break
+assert sig, "signature header missing"
+pub = load_pem_public_key(open(r"$PUB_KEY", "rb").read())
+try:
+    pub.verify(base64.b64decode(sig), body)
+except InvalidSignature as e:
+    raise SystemExit(f"signature does not verify: {e}") from e
+print("stub Cosign-compatible Ed25519 + schema 3 temporal OK")
+PY
+pass "scenario 2: signed schema-3 PE stub up on :${PE_PORT}"
 
 AGENT_LAUNCH_PID=""
 CHURN_PID=""
