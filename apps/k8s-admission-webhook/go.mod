@@ -1,6 +1,6 @@
 module neuromesh/k8s-admission-webhook
 
-go 1.25.12
+go 1.26.6
 
 require (
 	github.com/google/go-containerregistry v0.21.7
