@@ -353,14 +353,26 @@ start_agent() {
   export NEUROMESH_CGROUP_ROOT="${NEUROMESH_CGROUP_ROOT:-/sys/fs/cgroup}"
   export NEUROMESH_SPIFFE_TRUST_DOMAIN="$TRUST_DOMAIN"
   export NEUROMESH_INTEGRITY_EXIT_ON_FAILURE="${NEUROMESH_INTEGRITY_EXIT_ON_FAILURE:-false}"
-  export RUST_LOG="${RUST_LOG:-info,neuromesh::identity_correlator=info,neuromesh::policy_sync=info}"
+  # Force info for identity_correlator — a parent RUST_LOG=error hides
+  # "starting Slice 2b identity correlator" while still showing the degraded-mode
+  # ERROR (KUBERNETES_SERVICE_HOST unset), which looks like a missing start line.
+  export RUST_LOG="info,neuromesh::identity_correlator=info,neuromesh::policy_sync=info"
 
   if [[ "$mode" == "on" ]]; then
+    # Host-agent (not in-cluster): KUBERNETES_SERVICE_HOST is never set on the
+    # droplet. Same pattern as manual_verify_identity_2bii_correlation.sh —
+    # explicit API URL + SA bearer + k3s server CA. Issue #100 measures the
+    # FULL K8s-connected correlator (pod watch + inotify), not cgroup-teardown-only.
+    test -n "${BEARER_TOKEN:-}" \
+      || fail "BEARER_TOKEN empty — scenario 1 must mint neuromesh-agent token before correlator-on"
+    test -n "${K8S_API_URL:-}" || fail "K8S_API_URL empty"
+    test -f "$K8S_CA_FILE" || fail "K8S_CA_FILE missing: $K8S_CA_FILE"
     export NEUROMESH_IDENTITY_CORRELATOR=1
     export NEUROMESH_NODE_NAME="$NODE_NAME"
     export NEUROMESH_K8S_API_URL="$K8S_API_URL"
     export NEUROMESH_K8S_BEARER_TOKEN="$BEARER_TOKEN"
     export NEUROMESH_K8S_CA_FILE="$K8S_CA_FILE"
+    echo "correlator-on K8s env: API_URL=${NEUROMESH_K8S_API_URL} CA=${NEUROMESH_K8S_CA_FILE} token_len=${#BEARER_TOKEN} node=${NEUROMESH_NODE_NAME}"
   else
     unset NEUROMESH_IDENTITY_CORRELATOR || true
     export NEUROMESH_IDENTITY_CORRELATOR=0
@@ -371,10 +383,32 @@ start_agent() {
     unset NEUROMESH_NODE_NAME || true
   fi
 
-  if command -v stdbuf >/dev/null 2>&1; then
-    stdbuf -oL -eL "$AGENT_BIN" >"$AGENT_LOG" 2>&1 &
+  # Launch with explicit env for correlator-on so K8s vars cannot be dropped by
+  # a thin wrapper / unexpected environ scrub between export and exec.
+  if [[ "$mode" == "on" ]]; then
+    if command -v stdbuf >/dev/null 2>&1; then
+      env \
+        NEUROMESH_IDENTITY_CORRELATOR=1 \
+        NEUROMESH_NODE_NAME="$NODE_NAME" \
+        NEUROMESH_K8S_API_URL="$K8S_API_URL" \
+        NEUROMESH_K8S_BEARER_TOKEN="$BEARER_TOKEN" \
+        NEUROMESH_K8S_CA_FILE="$K8S_CA_FILE" \
+        stdbuf -oL -eL "$AGENT_BIN" >"$AGENT_LOG" 2>&1 &
+    else
+      env \
+        NEUROMESH_IDENTITY_CORRELATOR=1 \
+        NEUROMESH_NODE_NAME="$NODE_NAME" \
+        NEUROMESH_K8S_API_URL="$K8S_API_URL" \
+        NEUROMESH_K8S_BEARER_TOKEN="$BEARER_TOKEN" \
+        NEUROMESH_K8S_CA_FILE="$K8S_CA_FILE" \
+        "$AGENT_BIN" >"$AGENT_LOG" 2>&1 &
+    fi
   else
-    "$AGENT_BIN" >"$AGENT_LOG" 2>&1 &
+    if command -v stdbuf >/dev/null 2>&1; then
+      stdbuf -oL -eL "$AGENT_BIN" >"$AGENT_LOG" 2>&1 &
+    else
+      "$AGENT_BIN" >"$AGENT_LOG" 2>&1 &
+    fi
   fi
   AGENT_LAUNCH_PID=$!
   sleep 4
@@ -389,6 +423,19 @@ start_agent() {
   echo "AGENT_LAUNCH_PID=${AGENT_LAUNCH_PID} RESOLVED_AGENT_PID=${resolved} mode=${mode}"
   [[ "$resolved" == "$AGENT_LAUNCH_PID" ]] \
     || echo "WARN: launch PID != pgrep PID (will trust pgrep for pidstat)"
+
+  if [[ "$mode" == "on" ]]; then
+    # Prove the running process actually received host-agent K8s credentials
+    # (absence → connect() falls through to KUBERNETES_SERVICE_HOST → degraded).
+    local environ_dump
+    environ_dump="$(tr '\0' '\n' <"/proc/${resolved}/environ" 2>/dev/null || true)"
+    echo "$environ_dump" | grep -q '^NEUROMESH_K8S_API_URL=' \
+      || fail "agent pid ${resolved} missing NEUROMESH_K8S_API_URL in /proc/environ"
+    echo "$environ_dump" | grep -q '^NEUROMESH_K8S_BEARER_TOKEN=' \
+      || fail "agent pid ${resolved} missing NEUROMESH_K8S_BEARER_TOKEN in /proc/environ"
+    echo "$environ_dump" | grep -q '^NEUROMESH_K8S_CA_FILE=' \
+      || fail "agent pid ${resolved} missing NEUROMESH_K8S_CA_FILE in /proc/environ"
+  fi
 
   # Wait for PE sync (both modes need deny-list / identity VALID path warm).
   local synced=0
@@ -413,8 +460,48 @@ start_agent() {
     grep -q "NEUROMESH_IDENTITY_CORRELATOR disabled" "$AGENT_LOG" \
       || fail "expected correlator-disabled log line (mode=off)"
   else
-    grep -q "starting Slice 2b identity correlator" "$AGENT_LOG" \
-      || fail "expected correlator-start log line (mode=on)"
+    # spawn_identity_correlator logs this BEFORE connect(); degraded mode does
+    # not replace it — it adds a separate ERROR afterward.
+    local started=0
+    for _ in $(seq 1 60); do
+      if grep -q "starting Slice 2b identity correlator" "$AGENT_LOG"; then
+        started=1
+        break
+      fi
+      sleep 0.5
+    done
+    test "$started" -eq 1 || {
+      echo "---- agent log ----" >&2
+      tail -n 160 "$AGENT_LOG" >&2 || true
+      fail "phase correlator_idle: agent never reached 'starting Slice 2b identity correlator' within 30s"
+    }
+    # Reject cgroup-teardown-only — that is not the Issue #100 measurement target.
+    if grep -q "cgroup teardown invalidation ONLY" "$AGENT_LOG"; then
+      echo "---- agent log (K8s API degraded) ----" >&2
+      grep -nE 'Kubernetes API|KUBERNETES_SERVICE|teardown invalidation ONLY|NEUROMESH_K8S' \
+        "$AGENT_LOG" >&2 || true
+      fail "correlator entered cgroup-teardown-only degraded mode (K8s API unreachable). \
+Host-agent requires NEUROMESH_K8S_API_URL + NEUROMESH_K8S_BEARER_TOKEN + NEUROMESH_K8S_CA_FILE \
+(same as manual_verify_identity_2bii_correlation.sh); KUBERNETES_SERVICE_HOST is unset on the droplet."
+    fi
+    # Positive proof: startup forced_resync only runs when K8sClient::connect succeeded.
+    local k8s_ok=0
+    for _ in $(seq 1 40); do
+      if grep -q "cgroup teardown invalidation ONLY" "$AGENT_LOG"; then
+        break
+      fi
+      if grep -q "forced identity correlator resync" "$AGENT_LOG"; then
+        k8s_ok=1
+        break
+      fi
+      sleep 0.5
+    done
+    test "$k8s_ok" -eq 1 || {
+      echo "---- agent log ----" >&2
+      tail -n 160 "$AGENT_LOG" >&2 || true
+      fail "correlator did not complete K8s-connected startup resync (full API mode required for #100)"
+    }
+    pass "correlator-on: full K8s-connected mode (start line + startup resync; not degraded)"
   fi
 
   echo "settle ${SETTLE_SECS}s before measurement window..."
@@ -477,6 +564,9 @@ test -f "$RBAC_YAML" || fail "missing $RBAC_YAML"
 kubectl apply -f "$RBAC_YAML"
 BEARER_TOKEN="$(kubectl -n neuromesh-system create token neuromesh-agent --duration=2h)"
 test -n "$BEARER_TOKEN" || fail "failed to mint neuromesh-agent SA token"
+export BEARER_TOKEN
+# Host-agent credentials (agent does NOT read KUBECONFIG) — same as 2b-ii-C.
+echo "NEUROMESH_K8S_API_URL=$K8S_API_URL (token minted len=${#BEARER_TOKEN}; CA=$K8S_CA_FILE)"
 pass "scenario 1: RBAC + SA token minted"
 
 # --- scenario 2: signed PE stub (schema 3 + temporal + #108 Cosign-compatible sig) ---
