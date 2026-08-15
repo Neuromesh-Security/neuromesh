@@ -76,9 +76,17 @@ PASS_COUNT=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; PASS_COUNT=$((PASS_COUNT + 1)); }
 
+# Loud ERR trap — set -e silent exits otherwise leave no FAIL: line (see stop_agent).
+trap 'ec=$?; echo "ERR: script abort line=$LINENO exit=$ec cmd=${BASH_COMMAND:-?}" >&2' ERR
+
 echo "== Slice 2b-ii correlator overhead measurement preflight (Issue #100) =="
 echo "METHODOLOGY: baseline (corr=0 idle) → correlator idle (watch+inotify, no churn) → correlator churn"
 echo "AGENT_COMM_FOR_pgrep_x=${AGENT_COMM}  (15-char truncated comm; NOT full binary name)"
+echo "NEUROMESH_CORR_OVHD_PHASE1_ONLY=${NEUROMESH_CORR_OVHD_PHASE1_ONLY:-<unset>}  (must be unset for full 3-phase run)"
+# Outer `script | tee` without pipefail in the *parent* shell reports tee's
+# status (usually 0) even when this script exits non-zero — prefer:
+#   set -o pipefail; ./scripts/manual_measure_correlator_overhead.sh 2>&1 | tee /tmp/corr-ovhd.log
+#   echo EXIT:$?
 test "$(id -u)" -eq 0 || fail "must run as root"
 test -x "$AGENT_BIN" || fail "AGENT_BIN not executable: $AGENT_BIN"
 test -f /sys/kernel/btf/vmlinux || fail "BTF missing"
@@ -108,8 +116,9 @@ if pgrep -x "$AGENT_COMM" >/dev/null 2>&1; then
   echo "preflight: killing leftover ${AGENT_COMM} process(es)"
   pkill -x "$AGENT_COMM" || true
   sleep 2
-  pgrep -x "$AGENT_COMM" >/dev/null 2>&1 \
-    && fail "could not clear leftover agent (pgrep -x ${AGENT_COMM} still matches)"
+  if pgrep -x "$AGENT_COMM" >/dev/null 2>&1; then
+    fail "could not clear leftover agent (pgrep -x ${AGENT_COMM} still matches)"
+  fi
 fi
 if port_in_use "$PE_PORT"; then
   fail "PE_PORT ${PE_PORT} already listening — free it or set NEUROMESH_IDENTITY_TEST_PE_PORT"
@@ -309,15 +318,23 @@ stop_agent() {
     sleep 1
   fi
   AGENT_LAUNCH_PID=""
-  pgrep -x "$AGENT_COMM" >/dev/null 2>&1 \
-    && fail "agent still running after stop (pgrep -x ${AGENT_COMM})"
+  # Use if/then — NOT `pgrep && fail` / `port_in_use && fail` as the function's
+  # last statement. Under `set -e`, a function whose last command is
+  # `false && anything` returns status 1; the caller then aborts the whole
+  # script with no FAIL: line (classic bash footgun). That was killing the
+  # harness silently right after PHASE 1 measure_window, before PHASE 2.
+  if pgrep -x "$AGENT_COMM" >/dev/null 2>&1; then
+    fail "agent still running after stop (pgrep -x ${AGENT_COMM})"
+  fi
   # Metrics port must free before next launch.
   for _ in $(seq 1 20); do
     port_in_use "$METRICS_PORT" || break
     sleep 0.25
   done
-  port_in_use "$METRICS_PORT" \
-    && fail "METRICS_PORT ${METRICS_PORT} still listening after agent stop"
+  if port_in_use "$METRICS_PORT"; then
+    fail "METRICS_PORT ${METRICS_PORT} still listening after agent stop"
+  fi
+  return 0
 }
 
 start_agent() {
@@ -716,17 +733,20 @@ trap cleanup EXIT
 echo "== PHASE 1: baseline — correlator OFF, idle ${WINDOW_SECS}s =="
 start_agent off
 measure_window "baseline" "BASELINE"
+echo "phase1: calling stop_agent after baseline measure..."
 stop_agent
+echo "phase1: stop_agent returned OK"
 pass "phase 1 complete (baseline)"
 
 # Diag mode: stop after phase 1 (capture signature_missing header dump without
-# running correlator idle/churn windows).
+# running correlator idle/churn windows). Unset for a full Issue #100 run.
 if [[ "${NEUROMESH_CORR_OVHD_PHASE1_ONLY:-}" == "1" ]]; then
   echo "NEUROMESH_CORR_OVHD_PHASE1_ONLY=1 — exiting after phase 1"
   echo "== DONE: $PASS_COUNT checks passed (phase-1-only) =="
   exit 0
 fi
 
+echo "phase1→2 transition: starting correlator-on idle phase (PHASE1_ONLY unset)"
 # --- Phase 2: correlator idle (watch + inotify poll, no pod churn) ---
 echo "== PHASE 2: correlator idle — correlator ON, k3s watch, NO churn ${WINDOW_SECS}s =="
 start_agent on
