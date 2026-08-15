@@ -18,7 +18,7 @@ For the narrative summary of the same live checks, see [Security Verification](.
 
 ---
 
-**Status:** Security correctness verified live (see section above) · §2.3 measured (generator-bound ~880–962 EPS, zero drops, 3 independent runs) · §2.4 measured (two-phase CPU documented; full drain-to-idle not captured) · Extreme tier / kernel rate-limiter saturation untested pending stronger hardware  
+**Status:** Security correctness verified live (see section above) · §2.3 measured (generator-bound ~880–962 EPS, zero drops, 3 independent runs) · §2.4 measured (two-phase CPU documented; full drain-to-idle not captured) · §2.5 measured (Slice 2b-ii correlator overhead, single droplet run, Issue #100) · Extreme tier / kernel rate-limiter saturation untested pending stronger hardware  
 **Release:** `v0.1.0-core`  
 **Date:** 2026-08-03  
 **Component:** `apps/agent-ebpf-sensor`  
@@ -228,7 +228,7 @@ EXECVE_STRESS_TIER=standard \
 | During 30s burst | **~38–41%** total (`%usr` ~38%, `%wait` ~7–9%) | Agent is **not** CPU-bound during ingest; generator spawn rate remains the limiter | Measured |
 | Immediately after burst (remainder of 60s window) | **~92–99.8%** total (`%wait` ~0%) | Near-saturated — consistent with draining a kernel-event backlog emitted during the burst, not idle | Measured |
 | Average across all 12 samples | **67.97%** `%usr` · **69.31%** total CPU | Window mixes burst + post-burst drain; do not treat as steady-state load | Measured |
-| Idle (no workload) | _TBD_ | Not sampled in these runs | Untested |
+| Idle (no workload) | **0.400%** | Correlator-off baseline from Issue #100 (see §2.5); confirms RingBuf idle-spin fix (#103) remains stable vs pre-fix ~93–97% | Measured (single run) |
 | Extreme burst (500k EPS target) | _TBD_ | Untested — hardware cannot generate load | Untested |
 | Full drain-to-idle after burst | _TBD_ | **Unknown beyond the 60s window** — sampling ended while agent was still near-saturated; full drain duration not captured | Follow-up |
 
@@ -237,6 +237,26 @@ EXECVE_STRESS_TIER=standard \
 DaemonSet resource defaults (`deploy/kubernetes/neuromesh-agent.yaml`): request **100m** CPU, limit **500m** CPU, limit **512Mi** memory.
 
 > **Graph placeholder:** `docs/assets/perf-cpu-utilization.svg` — agent CPU % vs generator EPS during standard/extreme tiers. Two-phase shape (moderate during burst → near-saturation during backlog drain) is the measured pattern at ~900 EPS.
+
+### 2.5 Slice 2b-ii Correlator Overhead
+
+Isolates the Slice 2b-ii identity correlator tax (K8s pod watch + inotify + BPF map churn) from base agent overhead. Measured on the neuromesh-dev-lab droplet with [`scripts/manual_measure_correlator_overhead.sh`](../scripts/manual_measure_correlator_overhead.sh) ([Issue #100](https://github.com/Neuromesh-Security/neuromesh/issues/100)): three sequential `pidstat` windows on the same host, correlator off → correlator on idle (full K8s-connected watch, no pod churn) → correlator on under multi-container pod create/delete churn. Harness exit **EXIT=0**.
+
+| Phase | `MEASURED_*_CPU_PCT` | `MEASURED_*_RSS_KB` |
+|-------|----------------------|---------------------|
+| Baseline (correlator off, idle) | **0.400** | **82069** |
+| Correlator idle (watch armed, no churn) | **0.617** | **91344** |
+| Correlator churn (3-container pod create/delete loop) | **3.850** | **98212** |
+
+**Reading the deltas (same run):**
+
+| Derived signal | Value | Meaning |
+|----------------|-------|---------|
+| Baseline idle CPU | **0.400%** | Confirms the RingBuf/AsyncFd idle-spin fix ([Issue #103](https://github.com/Neuromesh-Security/neuromesh/issues/103)) remains stable (pre-fix idle was ~**93–97%** of one core) |
+| Correlator-idle tax | **~0.22** percentage points (`0.617 − 0.400`) | Cost of K8s API connection + node-local watch + inotify poll with **no** pod churn |
+| Correlator churn vs idle | **~6×** idle CPU (`3.850 / 0.617`) | Real event-processing cost under multi-container pod create/delete |
+
+**Honesty caveat (same as every other single-run figure in this document):** these six numbers are from **one** successful droplet run (`EXIT=0`, all three phases). They are reproducible methodology and a credible order-of-magnitude baseline for procurement discussion — not a multi-run statistical distribution. Re-run the harness after material correlator or watch-path changes before treating the deltas as frozen SLOs.
 
 ---
 
@@ -382,9 +402,9 @@ Stress and live kernel benchmarks are **`#[ignore]`** — not executed in GitHub
 | How much user-space tax per exec event? | **~1 µs** (benign LSM path) |
 | Can RuleEngine keep up with production? | **>8M evaluations/sec** per core (benign) |
 | What happens above 500k execve/sec? | Kernel token bucket drops; counted in Prometheus |
-| What is unmeasured today? | Syscall latency delta; idle CPU baseline; full post-burst drain-to-idle; high-EPS / kernel rate-limiter drops (extreme). Measured: zero drops @ ~880–962 EPS (3 runs, §2.3); two-phase burst/drain CPU (§2.4) |
+| What is unmeasured today? | Syscall latency delta; full post-burst drain-to-idle; high-EPS / kernel rate-limiter drops (extreme). Measured: zero drops @ ~880–962 EPS (3 runs, §2.3); two-phase burst/drain CPU (§2.4); idle baseline **0.400%** + correlator idle/churn (§2.5, Issue #100, single run) |
 | Where are graphs? | Placeholders in Section 2; populate post-CI into `docs/assets/` |
 
 ---
 
-*User-space figures measured 2026-07-12 via Criterion. Live standard-tier load + pidstat measured 2026-08 (three independent droplet runs, ~880–962 EPS, zero drops, two-phase CPU). High-throughput kernel end-to-end figures still pending stronger hardware — re-run this document after each material change to BPF programs or monitor pipeline.*
+*User-space figures measured 2026-07-12 via Criterion. Live standard-tier load + pidstat measured 2026-08 (three independent droplet runs, ~880–962 EPS, zero drops, two-phase CPU). Slice 2b-ii correlator overhead measured 2026-08 (Issue #100, single EXIT=0 droplet run: baseline 0.400% / idle 0.617% / churn 3.850% CPU). High-throughput kernel end-to-end figures still pending stronger hardware — re-run this document after each material change to BPF programs or monitor pipeline.*
