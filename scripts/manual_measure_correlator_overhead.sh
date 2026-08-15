@@ -385,6 +385,10 @@ start_agent() {
   test "$synced" -eq 1 || {
     echo "---- agent log ----" >&2
     tail -n 160 "$AGENT_LOG" >&2 || true
+    echo "---- signature_missing diagnostic (header names) ----" >&2
+    grep -En 'signature_missing diagnostic|response_header_names|response_headers_debug' "$AGENT_LOG" >&2 || true
+    echo "---- stub log (request/response wire) ----" >&2
+    tail -n 80 "$STUB_LOG" >&2 || true
     fail "agent never synced policy bundle (mode=${mode})"
   }
 
@@ -492,14 +496,25 @@ test -f "$PRIV_KEY" && test -f "$PUB_KEY" || fail "policy-bundle keypair missing
 
 write_spiffe_allow "[\"${EXPECTED_SPIFFE}\"]"
 cat >"${TEST_ROOT}/stub_pe_ovhd.py" <<'PY'
-"""GET /v1/policy-bundle stub: schema 3 + temporal + Cosign-compatible Ed25519."""
+"""GET /v1/policy-bundle stub: schema 3 + temporal + Cosign-compatible Ed25519.
+
+IMPORTANT (Issue #100 live diag): emit the ENTIRE status+header block as one
+atomic write. Do NOT use BaseHTTPRequestHandler.send_response/send_header for the
+200 path — a live agent saw ONLY content-type (no server/date/content-length/
+signature) while curl against the same process saw the signature. There is no
+User-Agent/Accept conditional in this handler; the 200 path always includes the
+signature. Atomic wire bytes + ThreadingHTTPServer + Connection:close remove
+http.server buffering/keep-alive ambiguity. Every request logs path, selected
+request headers, and the exact response header block to stderr (STUB_LOG).
+"""
 from __future__ import annotations
 
 import base64
 import json
 import os
+import sys
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
@@ -539,32 +554,80 @@ def bundle_obj():
     }
 
 
+def atomic_response(handler: BaseHTTPRequestHandler, code: int, body: bytes, extra_headers: list[tuple[str, str]]):
+    """Write status + ALL headers + body in one flush; force Connection: close."""
+    reason = {200: "OK", 401: "Unauthorized", 404: "Not Found"}.get(code, "Error")
+    lines = [f"HTTP/1.1 {code} {reason}"]
+    for k, v in extra_headers:
+        # Reject CR/LF in values so we can never emit a folded/forged header line.
+        if "\r" in v or "\n" in v or "\r" in k or "\n" in k:
+            raise ValueError(f"illegal CR/LF in header {k!r}")
+        lines.append(f"{k}: {v}")
+    lines.append("Connection: close")
+    lines.append(f"Content-Length: {len(body)}")
+    lines.append("")
+    head = ("\r\n".join(lines) + "\r\n").encode("ascii")
+    sys.stderr.write(
+        f"[stub] RESPONSE code={code} header_block={head!r} body_len={len(body)}\n"
+    )
+    sys.stderr.flush()
+    handler.wfile.write(head + body)
+    handler.wfile.flush()
+    handler.close_connection = True
+
+
 class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("[stub-access] " + (fmt % args) + "\n")
+        sys.stderr.flush()
+
     def do_GET(self):
-        if self.path != "/v1/policy-bundle":
-            self.send_response(404)
-            self.end_headers()
-            return
+        path = self.path.split("?", 1)[0]
+        ua = self.headers.get("User-Agent", "")
+        accept = self.headers.get("Accept", "")
+        conn = self.headers.get("Connection", "")
         auth = self.headers.get("Authorization", "")
-        if auth != f"Bearer {TOKEN}":
-            self.send_response(401)
-            self.end_headers()
+        # Log EVERY request — proves whether agent hit this process and with what headers.
+        sys.stderr.write(
+            f"[stub] REQUEST path={self.path!r} normalized={path!r} "
+            f"User-Agent={ua!r} Accept={accept!r} Connection={conn!r} "
+            f"Authorization_present={bool(auth)} "
+            f"ALL_REQ_HEADERS={list(self.headers.items())!r}\n"
+        )
+        sys.stderr.flush()
+
+        if path != "/v1/policy-bundle":
+            atomic_response(self, 404, b"not found\n", [("Content-Type", "text/plain")])
             return
-        # Exact body bytes must match what Cosign/agent verify (Issue #108).
+        if auth != f"Bearer {TOKEN}":
+            atomic_response(
+                self,
+                401,
+                b"unauthorized\n",
+                [
+                    ("Content-Type", "text/plain"),
+                    ("WWW-Authenticate", 'Bearer realm="neuromesh-policy-bundle"'),
+                ],
+            )
+            return
+
+        # Unconditional signed 200 — no User-Agent / Accept / Connection branches.
         body = (json.dumps(bundle_obj(), separators=(",", ":")) + "\n").encode()
-        sig = base64.b64encode(PRIV.sign(body)).decode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("X-Neuromesh-Policy-Bundle-Signature", sig)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        sig = base64.b64encode(PRIV.sign(body)).decode("ascii")
+        atomic_response(
+            self,
+            200,
+            body,
+            [
+                ("X-Neuromesh-Policy-Bundle-Signature", sig),
+                ("Content-Type", "application/json"),
+            ],
+        )
 
-    def log_message(self, *a):
-        pass
 
-
-HTTPServer(("127.0.0.1", PORT), H).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
 PY
 
 export PE_PORT BUNDLE_TOKEN
@@ -605,6 +668,29 @@ except InvalidSignature as e:
     raise SystemExit(f"signature does not verify: {e}") from e
 print("stub Cosign-compatible Ed25519 + schema 3 temporal OK")
 PY
+# reqwest-like client preflight (Accept + User-Agent) — must see signature too.
+python3 - <<PY || fail "reqwest-like urllib preflight missing signature header"
+import urllib.request
+url = "http://127.0.0.1:${PE_PORT}/v1/policy-bundle"
+req = urllib.request.Request(
+    url,
+    headers={
+        "Authorization": "Bearer ${BUNDLE_TOKEN}",
+        "Accept": "*/*",
+        "User-Agent": "reqwest/0.12.0",
+        "Connection": "keep-alive",
+    },
+    method="GET",
+)
+with urllib.request.urlopen(req, timeout=5) as resp:
+    names = [k.lower() for k in resp.headers.keys()]
+    print("urllib_reqwest_like_header_names=", names)
+    if "x-neuromesh-policy-bundle-signature" not in names:
+        raise SystemExit(f"signature absent for reqwest-like client; got {names}")
+    body = resp.read()
+    assert body, "empty body"
+print("reqwest-like urllib preflight OK")
+PY
 pass "scenario 2: signed schema-3 PE stub up on :${PE_PORT}"
 
 AGENT_LAUNCH_PID=""
@@ -632,6 +718,14 @@ start_agent off
 measure_window "baseline" "BASELINE"
 stop_agent
 pass "phase 1 complete (baseline)"
+
+# Diag mode: stop after phase 1 (capture signature_missing header dump without
+# running correlator idle/churn windows).
+if [[ "${NEUROMESH_CORR_OVHD_PHASE1_ONLY:-}" == "1" ]]; then
+  echo "NEUROMESH_CORR_OVHD_PHASE1_ONLY=1 — exiting after phase 1"
+  echo "== DONE: $PASS_COUNT checks passed (phase-1-only) =="
+  exit 0
+fi
 
 # --- Phase 2: correlator idle (watch + inotify poll, no pod churn) ---
 echo "== PHASE 2: correlator idle — correlator ON, k3s watch, NO churn ${WINDOW_SECS}s =="
