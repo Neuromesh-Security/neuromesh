@@ -18,3 +18,19 @@ out/
 dist/
 *.tsbuildinfo
 .env*.local
+
+# Local CI/debug scratch. Ten of these accumulated in the repo root during CI
+# investigations (`gh run view --log` dumps, `gh pr checks` captures, `gh api`
+# snapshots, and one-off reproduction scripts) because there was no ignored
+# place to put them. Prefer .scratch/ for anything new.
+.scratch/
+*.log
+/fix-*.sh
+/*-log*.txt
+/*-out.txt
+/lint-work-*.txt
+/pr-checks-*.txt
+/branch-protection.json
+
+# Cargo registry/package cache written by the Docker-based build helpers.
+.cargo-docker/
