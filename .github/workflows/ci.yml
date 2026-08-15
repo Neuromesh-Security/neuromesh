@@ -137,7 +137,8 @@ jobs:
         run: bash scripts/lint_bpf_obj_names.sh
 
       - name: Install clang (C BPF visibility object)
-        run: sudo apt-get update && sudo apt-get install -y clang llvm cmake g++ gcc build-essential pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
+        timeout-minutes: 10
+        run: bash scripts/ci_apt_install.sh clang llvm cmake g++ gcc build-essential pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
 
       - name: Clippy (strict)
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -170,7 +171,8 @@ jobs:
         run: cargo install cargo-llvm-cov
 
       - name: Install native build deps (orchestrator + C BPF)
-        run: sudo apt-get update && sudo apt-get install -y clang llvm cmake g++ gcc build-essential pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
+        timeout-minutes: 10
+        run: bash scripts/ci_apt_install.sh clang llvm cmake g++ gcc build-essential pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
 
       - name: cargo check — workspace libraries
         run: |
@@ -332,7 +334,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install clang (C BPF visibility object)
-        run: sudo apt-get update && sudo apt-get install -y clang llvm cmake g++ gcc build-essential pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
+        timeout-minutes: 10
+        run: bash scripts/ci_apt_install.sh clang llvm cmake g++ gcc build-essential pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -462,7 +465,8 @@ jobs:
 
       - name: Install native build deps (rdkafka)
         if: matrix.needs_ebpf == true
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config libssl-dev build-essential gcc g++ libcurl4-openssl-dev libsasl2-dev zlib1g-dev clang llvm
+        timeout-minutes: 10
+        run: bash scripts/ci_apt_install.sh cmake pkg-config libssl-dev build-essential gcc g++ libcurl4-openssl-dev libsasl2-dev zlib1g-dev clang llvm
 
       - name: Build user-space orchestrator
         if: matrix.needs_ebpf == true
