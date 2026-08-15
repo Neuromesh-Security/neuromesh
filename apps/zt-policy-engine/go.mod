@@ -1,6 +1,6 @@
 module neuromesh/zt-policy-engine
 
-go 1.25.12
+go 1.26.6
 
 require (
 	github.com/open-policy-agent/opa v1.4.0
