@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
-// Neuromesh process visibility — tracepoint syscalls/sys_enter_execve.
+// Neuromesh process visibility — tracepoints syscalls/sys_enter_execve and
+// syscalls/sys_enter_execveat.
 //
 // Enterprise ExecEvent v1 capture with CO-RE lineage, bounded argv probing,
 // per-CPU token-bucket rate limiting (~500k events/sec), and fail-closed
 // filename capture (discard + CAPTURE_FAILS on probe fault).
+//
+// Both tracepoints share emit_exec_event() so capture semantics cannot drift,
+// and they share RLIMIT_BUCKET, so the aggregate admitted rate stays at the
+// single ~500k/sec ceiling the PROCESS_EVENTS RingBuf was sized against
+// (Issue #126). This file is telemetry only — enforcement lives exclusively in
+// the Rust LSM program on bprm_check_security and is not touched here.
 
 #include "vmlinux.h"
 #include <bpf/bpf_core_read.h>
@@ -384,13 +391,18 @@ static __always_inline void capture_argv(struct exec_event_t *event,
 	}
 }
 
-SEC("tracepoint/syscalls/sys_enter_execve")
-int nm_proc_events(void *ctx)
+/*
+ * Shared emit path for every traced exec syscall variant.
+ *
+ * `syscall_flags` carries EXEC_FLAG_* for the calling tracepoint so the two
+ * attaches cannot drift in capture behaviour: only the tracepoint argument
+ * offsets differ between execve and execveat, never the captured fields.
+ */
+static __always_inline int emit_exec_event(const char __user *filename_ptr,
+					   const char __user *const __user *argv_ptr,
+					   __u8 syscall_flags)
 {
-	struct trace_event_raw_sys_enter *trace = ctx;
 	struct exec_event_t *event;
-	const char __user *filename_ptr;
-	const char __user *const __user *argv_ptr;
 
 	if (!rate_limit_allow())
 		return 0;
@@ -400,6 +412,7 @@ int nm_proc_events(void *ctx)
 		return 0;
 
 	init_exec_event(event);
+	event->flags = syscall_flags;
 	capture_pid_tgid(event);
 	capture_credentials(event);
 	capture_comm(event);
@@ -411,13 +424,22 @@ int nm_proc_events(void *ctx)
 	if (!event->timestamp_ns)
 		event->capture_status |= CAPTURE_TIMESTAMP;
 
-	filename_ptr = (const char __user *)trace->args[0];
-	argv_ptr = (const char __user *const __user *)trace->args[1];
-
 	if (capture_filename(event, filename_ptr) < 0) {
 		record_capture_failure();
 		bpf_ringbuf_discard(event, 0);
 		return 0;
+	}
+
+	/*
+	 * AT_EMPTY_PATH (the fexecve(3) shape) passes an empty path string: the
+	 * copy succeeds and yields "". Emit the UNKNOWN sentinel rather than a
+	 * blank path so downstream rules never match on "". Scoped to execveat
+	 * so the execve path stays byte-for-byte identical to before Issue #126.
+	 */
+	if ((syscall_flags & EXEC_FLAG_SYSCALL_EXECVEAT) && !event->filename[0]) {
+		exec_mark_unknown(event->filename, sizeof(event->filename),
+				  &event->capture_status, CAPTURE_FILENAME);
+		event->flags |= EXEC_FLAG_PATH_FROM_FD;
 	}
 
 	capture_argv(event, argv_ptr);
@@ -426,4 +448,33 @@ int nm_proc_events(void *ctx)
 	event->schema_version = EXEC_EVENT_SCHEMA_VERSION;
 	bpf_ringbuf_submit(event, 0);
 	return 0;
+}
+
+/* execve(const char *pathname, char *const argv[], char *const envp[]) */
+SEC("tracepoint/syscalls/sys_enter_execve")
+int nm_proc_events(void *ctx)
+{
+	struct trace_event_raw_sys_enter *trace = ctx;
+
+	return emit_exec_event((const char __user *)trace->args[0],
+			       (const char __user *const __user *)trace->args[1], 0);
+}
+
+/*
+ * execveat(int dfd, const char *pathname, char *const argv[],
+ *          char *const envp[], int flags)
+ *
+ * Note the argument shift versus execve: dfd occupies args[0], so pathname is
+ * args[1] and argv is args[2]. Also covers fexecve(3), which glibc implements
+ * as execveat(fd, "", argv, envp, AT_EMPTY_PATH) — there is no separate
+ * fexecve syscall to attach.
+ */
+SEC("tracepoint/syscalls/sys_enter_execveat")
+int nm_execveat(void *ctx)
+{
+	struct trace_event_raw_sys_enter *trace = ctx;
+
+	return emit_exec_event((const char __user *)trace->args[1],
+			       (const char __user *const __user *)trace->args[2],
+			       EXEC_FLAG_SYSCALL_EXECVEAT);
 }

@@ -16,7 +16,9 @@ use agent_ebpf_sensor::btf_offsets::{self, ResolvedOffsets};
 use anyhow::{Context, Result};
 use aya::programs::{KProbe, Lsm, TracePoint};
 use aya::{Btf, Ebpf, EbpfLoader};
-use neuromesh_common::{LSM_EXEC_GUARD_PROG, PROCESS_EVENTS_PROG, TCP_CONNECT_PROG};
+use neuromesh_common::{
+    LSM_EXEC_GUARD_PROG, PROCESS_EVENTS_AT_PROG, PROCESS_EVENTS_PROG, TCP_CONNECT_PROG,
+};
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -63,6 +65,14 @@ fn main() -> Result<()> {
         let program: &mut TracePoint = program.try_into()?;
         program.load().with_context(|| {
             format!("kernel verifier rejected tracepoint program {PROCESS_EVENTS_PROG}")
+        })?;
+        verified += 1;
+    }
+
+    if let Some(program) = ebpf.program_mut(PROCESS_EVENTS_AT_PROG) {
+        let program: &mut TracePoint = program.try_into()?;
+        program.load().with_context(|| {
+            format!("kernel verifier rejected tracepoint program {PROCESS_EVENTS_AT_PROG}")
         })?;
         verified += 1;
     }

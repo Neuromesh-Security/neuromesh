@@ -9,6 +9,25 @@
 #define EXEC_EVENT_TYPE_EXECVE    1U
 #define EXEC_EVENT_STRUCT_SIZE    668U
 
+/*
+ * Header `flags` bits — syscall-variant discriminator (Issue #126).
+ *
+ * `event_type` stays EXEC_EVENT_TYPE_EXECVE for every exec record: userspace
+ * validation (`neuromesh_common::ExecEvent::is_valid`) hard-requires that value,
+ * so introducing a second event_type would make execveat records fail decode and
+ * be dropped silently. The variant is therefore a flag, which also keeps
+ * struct_size at 668 and leaves every field offset untouched.
+ */
+#define EXEC_FLAG_SYSCALL_EXECVEAT (1U << 0)
+/*
+ * fexecve(3) is not a syscall: glibc implements it as
+ * execveat(fd, "", argv, envp, AT_EMPTY_PATH). The syscall carries no path
+ * string, so the filename copy succeeds but yields "". This bit marks that the
+ * target was named by a file descriptor and the path is genuinely unresolvable
+ * here, distinguishing it from a probe fault.
+ */
+#define EXEC_FLAG_PATH_FROM_FD     (1U << 1)
+
 #define EXEC_COMM_LEN         16
 #define EXEC_FILENAME_LEN     256
 #define EXEC_CONTAINER_ID_LEN 64

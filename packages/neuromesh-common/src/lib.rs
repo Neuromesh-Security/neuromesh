@@ -22,7 +22,26 @@ pub const MAX_ARGV_LEN: usize = MAX_ARGS_CAPTURE * MAX_ARG_STR_LEN;
 pub const EXEC_EVENT_SCHEMA_VERSION: u16 = 2;
 
 /// Event type discriminator — `execve` syscall visibility.
+///
+/// Every exec record carries this value regardless of which syscall produced it;
+/// the variant is reported through [`ExecEvent::flags`] instead. See
+/// [`EXEC_FLAG_SYSCALL_EXECVEAT`].
 pub const EXEC_EVENT_TYPE_EXECVE: u8 = 1;
+
+/// [`ExecEvent::flags`]: record came from `sys_enter_execveat`, not
+/// `sys_enter_execve` (Issue #126).
+///
+/// Covers both `execveat(2)` and `fexecve(3)` — glibc implements the latter as
+/// `execveat(fd, "", argv, envp, AT_EMPTY_PATH)`, so there is no distinct
+/// `fexecve` syscall to trace.
+pub const EXEC_FLAG_SYSCALL_EXECVEAT: u8 = 1 << 0;
+
+/// [`ExecEvent::flags`]: the exec target was named by a file descriptor
+/// (`AT_EMPTY_PATH`), so no path string was available at the tracepoint.
+///
+/// `filename` holds [`UNKNOWN_SENTINEL`] and [`CAPTURE_FILENAME`] is raised.
+/// Distinguishes an fd-named exec from a probe fault.
+pub const EXEC_FLAG_PATH_FROM_FD: u8 = 1 << 1;
 
 /// Serialized size of `ExecEvent` v2 (fixed for verifier + userspace bounds checks).
 pub const EXEC_EVENT_STRUCT_SIZE: u16 = 668;
@@ -116,6 +135,20 @@ impl ExecEvent {
     #[inline]
     pub const fn field_unknown(&self, field: u16) -> bool {
         self.capture_status & field != 0
+    }
+
+    /// True when this record came from `execveat(2)` or `fexecve(3)` rather than
+    /// `execve(2)` (Issue #126).
+    #[inline]
+    pub const fn is_execveat(&self) -> bool {
+        self.flags & EXEC_FLAG_SYSCALL_EXECVEAT != 0
+    }
+
+    /// True when the exec target was named by a file descriptor (`AT_EMPTY_PATH`),
+    /// so `filename` carries [`UNKNOWN_SENTINEL`] rather than a real path.
+    #[inline]
+    pub const fn path_from_fd(&self) -> bool {
+        self.flags & EXEC_FLAG_PATH_FROM_FD != 0
     }
 }
 
@@ -239,6 +272,10 @@ pub const LSM_EXEC_GUARD_PROG: &str = bpf_obj_name("nm_lsm_bprm");
 /// Process visibility program (C). Was `neuromesh_process_events` (24).
 pub const PROCESS_EVENTS_PROG: &str = bpf_obj_name("nm_proc_events");
 
+/// `execveat`/`fexecve` visibility program (C), Issue #126. Shares
+/// `PROCESS_EVENTS` and `RLIMIT_BUCKET` with [`PROCESS_EVENTS_PROG`].
+pub const PROCESS_EVENTS_AT_PROG: &str = bpf_obj_name("nm_execveat");
+
 /// TCP connect visibility program (C). Was `neuromesh_tcp_connect` (20).
 pub const TCP_CONNECT_PROG: &str = bpf_obj_name("nm_tcp_connect");
 
@@ -258,6 +295,7 @@ pub const ALL_BPF_OBJECT_NAMES: &[&str] = &[
     TELEMETRY_STATS_MAP,
     LSM_EXEC_GUARD_PROG,
     PROCESS_EVENTS_PROG,
+    PROCESS_EVENTS_AT_PROG,
     TCP_CONNECT_PROG,
 ];
 

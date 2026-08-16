@@ -26,15 +26,18 @@ Neuromesh is transitioning from the marketing-oriented `v0.1.0-alpha` to **`v0.1
 
 ## eBPF Sensor Core
 
-The **eBPF Sensor Core** (`apps/agent-ebpf-sensor`) is Neuromesh's Ring 0 runtime agent. It loads **three kernel programs** across **two bytecode artifacts** (C visibility + Rust enforcement) and runs **three parallel user-space consumption pipelines**.
+The **eBPF Sensor Core** (`apps/agent-ebpf-sensor`) is Neuromesh's Ring 0 runtime agent. It loads **four kernel programs** across **two bytecode artifacts** (C visibility + Rust enforcement) and runs **three parallel user-space consumption pipelines**.
 
 ### Kernel hooks (runtime-attached)
 
 | Program | Hook type | Attach target | Bytecode | RingBuf map |
 |---------|-----------|---------------|----------|-------------|
-| `neuromesh_process_events` | Tracepoint | `syscalls/sys_enter_execve` | C (`sys_exec.bpf.c`) | `PROCESS_EVENTS` |
-| `neuromesh_tcp_connect` | Kprobe | `tcp_connect` | C (`network_filter.bpf.c`) | `NETWORK_EVENTS` |
-| `neuromesh_lsm_exec_guard` | LSM | `bprm_check_security` | Rust (`ebpf/`) | `TELEMETRY_RINGBUF` |
+| `nm_proc_events` | Tracepoint | `syscalls/sys_enter_execve` | C (`sys_exec.bpf.c`) | `PROCESS_EVENTS` |
+| `nm_execveat` | Tracepoint | `syscalls/sys_enter_execveat` | C (`sys_exec.bpf.c`) | `PROCESS_EVENTS` |
+| `nm_tcp_connect` | Kprobe | `tcp_connect` | C (`network_filter.bpf.c`) | `NETWORK_EVENTS` |
+| `nm_lsm_bprm` | LSM | `bprm_check_security` | Rust (`ebpf/`) | `TELEMETRY_RINGBUF` |
+
+**Exec visibility covers both syscall entry points.** `nm_execveat` closes the observability gap previously tracked in the threat model: `execveat(2)` — and therefore `fexecve(3)`, which glibc implements as `execveat(fd, "", argv, envp, AT_EMPTY_PATH)` — now reaches `PROCESS_EVENTS` alongside `execve(2)`. Records are distinguished by the `EXEC_FLAG_SYSCALL_EXECVEAT` bit in `ExecEvent::flags`. **Enforcement was never affected:** `nm_lsm_bprm` already covered both syscalls because they share the `bprm_check_security` hook.
 
 **Not attached at runtime:** `neuromesh_exec_hook` (Rust tracepoint) — compiled and verifier-tested, reserved for enriched passive exec telemetry in a future release. Production visibility volume flows through the C tracepoint; enforcement and rich lineage flow through LSM.
 
@@ -43,14 +46,17 @@ The **eBPF Sensor Core** (`apps/agent-ebpf-sensor`) is Neuromesh's Ring 0 runtim
 ```mermaid
 flowchart TB
     subgraph kernel["Ring 0 — Kernel"]
-        TP["tracepoint<br/>sys_enter_execve<br/><i>neuromesh_process_events</i>"]
-        KP["kprobe<br/>tcp_connect<br/><i>neuromesh_tcp_connect</i>"]
-        LSM["LSM<br/>bprm_check_security<br/><i>neuromesh_lsm_exec_guard</i>"]
-        RB1[("PROCESS_EVENTS<br/>256 KiB RingBuf")]
+        TP["tracepoint<br/>sys_enter_execve<br/><i>nm_proc_events</i>"]
+        TPAT["tracepoint<br/>sys_enter_execveat<br/><i>nm_execveat</i>"]
+        KP["kprobe<br/>tcp_connect<br/><i>nm_tcp_connect</i>"]
+        LSM["LSM<br/>bprm_check_security<br/><i>nm_lsm_bprm</i>"]
+        RB1[("PROCESS_EVENTS<br/>1 MiB RingBuf")]
         RB2[("NETWORK_EVENTS<br/>256 KiB RingBuf")]
-        RB3[("TELEMETRY_RINGBUF<br/>256 KiB RingBuf")]
-        RL["RATE_LIMIT_BUCKET<br/>~500k evt/s per CPU"]
-        TP --> RL --> RB1
+        RB3[("TELEMETRY_RINGBUF<br/>1 MiB RingBuf")]
+        RL["RLIMIT_BUCKET<br/>~500k evt/s per CPU<br/>shared by both tracepoints"]
+        TP --> RL
+        TPAT --> RL
+        RL --> RB1
         KP --> RB2
         LSM --> RB3
     end

@@ -99,6 +99,7 @@ required=(
   TELEMETRY_STATS
   nm_lsm_bprm
   nm_proc_events
+  nm_execveat
   nm_tcp_connect
 )
 for want in "${required[@]}"; do

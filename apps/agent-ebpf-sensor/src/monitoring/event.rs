@@ -54,6 +54,13 @@ impl ProcessEventHandler {
         let args_count = event.args_count;
         let enforcement = event.enforcement_action;
         let capture_status = event.capture_status;
+        // Issue #126: which syscall produced this record. `&'static str`, so the
+        // hot path stays allocation-free.
+        let syscall = if event.is_execveat() {
+            "execveat"
+        } else {
+            "execve"
+        };
         tracing::debug!(
             target: "neuromesh::process_monitor",
             pid,
@@ -63,7 +70,8 @@ impl ProcessEventHandler {
             args_count,
             enforcement,
             capture_status,
-            "execve event"
+            syscall,
+            "exec event"
         );
 
         self.seen = self.seen.wrapping_add(1);

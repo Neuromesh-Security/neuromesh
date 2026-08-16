@@ -88,6 +88,21 @@ pub fn exec_event_otel_attributes(event: &ExecEvent) -> OtelExecAttributes {
     let mut attributes = BTreeMap::new();
 
     attributes.insert("neuromesh.event.type".into(), "execve".into());
+    // Which syscall produced this record (Issue #126). `event.type` stays "execve"
+    // for schema compatibility; this is the analyst-facing discriminator.
+    attributes.insert(
+        "neuromesh.exec.syscall".into(),
+        if event.is_execveat() {
+            "execveat".into()
+        } else {
+            "execve".into()
+        },
+    );
+    if event.path_from_fd() {
+        // AT_EMPTY_PATH / fexecve: the target was named by a file descriptor, so
+        // `filename` is the UNKNOWN sentinel rather than a resolvable path.
+        attributes.insert("neuromesh.exec.path_from_fd".into(), "true".into());
+    }
     let schema_version = event.schema_version;
     let pid = event.pid;
     let tgid = event.tgid;
@@ -298,8 +313,18 @@ mod tests {
     use core::mem::{offset_of, size_of};
     use neuromesh_common::{
         ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
-        MAX_ARGV_LEN, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
+        EXEC_FLAG_PATH_FROM_FD, EXEC_FLAG_SYSCALL_EXECVEAT, MAX_ARGV_LEN, MAX_COMM_LEN,
+        MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
     };
+
+    fn as_bytes(event: &ExecEvent) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(
+                event as *const ExecEvent as *const u8,
+                size_of::<ExecEvent>(),
+            )
+        }
+    }
 
     fn bytes_with_prefix<const N: usize>(prefix: &[u8]) -> [u8; N] {
         let mut buf = [0u8; N];
@@ -342,11 +367,116 @@ mod tests {
     #[test]
     fn exec_event_layout_matches_bpf_header() {
         assert_eq!(size_of::<ExecEvent>(), EXEC_EVENT_STRUCT_SIZE as usize);
+        // `flags` carries the syscall-variant discriminator (Issue #126); the C
+        // header writes it at this offset.
+        assert_eq!(offset_of!(ExecEvent, flags), 3);
         assert_eq!(offset_of!(ExecEvent, pid), 16);
         assert_eq!(offset_of!(ExecEvent, comm), 40);
         assert_eq!(offset_of!(ExecEvent, filename), 56);
         assert_eq!(offset_of!(ExecEvent, argv), 320);
         assert_eq!(offset_of!(ExecEvent, namespace_id), 644);
+    }
+
+    /// Issue #126: `execveat` telemetry is only actually visible if the decoder
+    /// accepts it. The variant lives in `flags` precisely because `is_valid()`
+    /// hard-requires `event_type == EXEC_EVENT_TYPE_EXECVE`; encoding it as a new
+    /// event_type would make these records fail decode and vanish silently.
+    #[test]
+    fn execveat_records_are_accepted_by_the_decoder() {
+        let mut event = valid_event();
+        event.flags = EXEC_FLAG_SYSCALL_EXECVEAT;
+
+        assert!(
+            event.is_valid(),
+            "execveat flag must not invalidate the header"
+        );
+
+        let decoded =
+            decode_exec_event(as_bytes(&event)).expect("execveat record must survive decode");
+        assert!(decoded.is_execveat());
+        assert!(!decoded.path_from_fd());
+        assert_eq!(decoded.event_type, EXEC_EVENT_TYPE_EXECVE);
+        assert_eq!(decoded.struct_size, EXEC_EVENT_STRUCT_SIZE);
+
+        // The variant must be visible to analysts, not just present in the struct.
+        let otel = exec_event_otel_attributes(&decoded);
+        assert_eq!(
+            otel.attributes
+                .get("neuromesh.exec.syscall")
+                .map(String::as_str),
+            Some("execveat")
+        );
+        assert!(!otel.attributes.contains_key("neuromesh.exec.path_from_fd"));
+    }
+
+    #[test]
+    fn execve_records_are_not_flagged_as_execveat() {
+        let event = valid_event();
+        assert_eq!(event.flags, 0);
+        let decoded = decode_exec_event(as_bytes(&event)).expect("valid execve record");
+        assert!(!decoded.is_execveat());
+        assert!(!decoded.path_from_fd());
+
+        let otel = exec_event_otel_attributes(&decoded);
+        assert_eq!(
+            otel.attributes
+                .get("neuromesh.exec.syscall")
+                .map(String::as_str),
+            Some("execve")
+        );
+    }
+
+    /// `fexecve(3)` reaches the kernel as `execveat(fd, "", …, AT_EMPTY_PATH)`, so
+    /// no path string exists. The event must still be visible, with the missing
+    /// path reported explicitly rather than as an empty string.
+    #[test]
+    fn fexecve_shape_is_visible_and_marks_the_path_as_fd_named() {
+        let mut event = valid_event();
+        event.flags = EXEC_FLAG_SYSCALL_EXECVEAT | EXEC_FLAG_PATH_FROM_FD;
+        event.filename = bytes_with_prefix::<MAX_FILENAME_LEN>(b"UNKNOWN");
+        event.capture_status = CAPTURE_FILENAME;
+
+        let decoded = decode_exec_event(as_bytes(&event)).expect("fexecve record must be visible");
+        assert!(decoded.is_execveat());
+        assert!(decoded.path_from_fd());
+        assert!(decoded.field_unknown(CAPTURE_FILENAME));
+
+        let otel = exec_event_otel_attributes(&decoded);
+        assert_eq!(
+            otel.attributes
+                .get("neuromesh.filename")
+                .map(String::as_str),
+            Some("UNKNOWN:filename_capture_fault")
+        );
+        assert_eq!(
+            otel.attributes
+                .get("neuromesh.exec.syscall")
+                .map(String::as_str),
+            Some("execveat")
+        );
+        assert_eq!(
+            otel.attributes
+                .get("neuromesh.exec.path_from_fd")
+                .map(String::as_str),
+            Some("true"),
+            "an fd-named exec must be distinguishable from a probe fault"
+        );
+    }
+
+    /// The correlation/detection path consumes execveat records identically to
+    /// execve records — the flag is metadata, not a separate pipeline.
+    #[test]
+    fn execveat_records_map_to_security_telemetry_like_execve() {
+        let mut execveat = valid_event();
+        execveat.flags = EXEC_FLAG_SYSCALL_EXECVEAT;
+
+        let from_execve = exec_event_to_security_telemetry(&valid_event());
+        let from_execveat = exec_event_to_security_telemetry(&execveat);
+
+        assert_eq!(from_execve.pid, from_execveat.pid);
+        assert_eq!(from_execve.ppid, from_execveat.ppid);
+        assert_eq!(from_execve.filename, from_execveat.filename);
+        assert_eq!(from_execve.comm, from_execveat.comm);
     }
 
     #[test]
