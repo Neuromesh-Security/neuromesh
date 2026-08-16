@@ -16,7 +16,10 @@ import (
 )
 
 const (
-	saTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	// Standard in-cluster ServiceAccount mount paths (Kubernetes well-known
+	// filesystem locations). The string contains "token" but is a path, not a
+	// credential value — same as agent pod_watch.rs SA_TOKEN_PATH.
+	saTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token" // #nosec G101
 	saCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	saNSPath    = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
@@ -85,7 +88,9 @@ func k8sHTTPClient() (baseURL, token string, client *http.Client, err error) {
 		}
 		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 		if caPath := strings.TrimSpace(os.Getenv("NEUROMESH_K8S_CA_FILE")); caPath != "" {
-			pem, rerr := os.ReadFile(caPath)
+			// Operator/lab deployment env only (same NEUROMESH_K8S_* class as
+			// agent pod_watch.rs) — never derived from request or watch payload.
+			pem, rerr := os.ReadFile(caPath) // #nosec G304
 			if rerr != nil {
 				return "", "", nil, fmt.Errorf("read NEUROMESH_K8S_CA_FILE: %w", rerr)
 			}
