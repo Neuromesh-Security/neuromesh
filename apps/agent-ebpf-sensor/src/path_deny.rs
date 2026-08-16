@@ -207,7 +207,7 @@ mod tests {
             "",
             "/",
             "/tm",
-            "/var/tmp/aaaaaaaa", // longer than 16-byte window when truncated
+            "/var/tmp/aaaaaaaa", // longer than the historical 16-byte window when truncated
         ];
 
         for case in cases {
@@ -231,14 +231,57 @@ mod tests {
     }
 
     #[test]
-    fn empty_path_and_boundary_length_window() {
+    fn empty_path_and_bootstrap_prefix_still_match_in_window() {
         let entries = bootstrap_entries().unwrap();
         assert!(!map_backed_is_blacklisted(&window(""), &entries));
-        // 16-byte window exactly filled with a denied prefix + tail
-        let path = window("/var/tmp/1234567"); // 16 chars
-        assert_eq!(path.len(), 16);
+        // Capture window is PATH_DENY_KEY_BYTES wide; bootstrap `/var/tmp/` (9)
+        // still matches when the remainder is filler.
+        let path = window("/var/tmp/1234567");
+        assert_eq!(path.len(), PATH_DENY_KEY_BYTES);
         assert!(legacy_hardcoded_is_blacklisted(&path));
         assert!(map_backed_is_blacklisted(&path, &entries));
+    }
+
+    /// Boundary contract for [`PATH_DENY_KEY_BYTES`] (16→32 headroom).
+    ///
+    /// Fail-closed: prefixes longer than the key are rejected at
+    /// [`PathDenyEntry::from_prefix`] / bundle parse — never silently truncated
+    /// into a shorter deny key.
+    #[test]
+    fn path_deny_key_bytes_boundaries_accept_16_and_32_reject_over() {
+        // Exactly the historical limit (16).
+        let p16 = b"/var/lib/dockerX"; // 16 bytes
+        assert_eq!(p16.len(), 16);
+        let e16 = PathDenyEntry::from_prefix(p16).expect("16-byte prefix must be accepted");
+        assert_eq!(e16.len, 16);
+        assert!(e16.matches(b"/var/lib/dockerX/payload"));
+        assert!(!e16.matches(b"/var/lib/dockerY/payload"));
+
+        // Exactly the new limit (32).
+        let p32 = b"/opt/neuromesh/staging/binXXXXXX"; // 32 bytes
+        assert_eq!(p32.len(), 32);
+        let e32 = PathDenyEntry::from_prefix(p32).expect("32-byte prefix must be accepted");
+        assert_eq!(e32.len, 32);
+        assert!(e32.matches(b"/opt/neuromesh/staging/binXXXXXX/run"));
+        assert!(!e32.matches(b"/opt/neuromesh/staging/binXXXXXY/run"));
+
+        // One past the new limit — fail-closed reject (no truncate).
+        let p33 = b"/opt/neuromesh/staging/binXXXXXXX"; // 33 bytes
+        assert_eq!(p33.len(), 33);
+        assert!(
+            PathDenyEntry::from_prefix(p33).is_none(),
+            "prefix longer than PATH_DENY_KEY_BYTES must be rejected"
+        );
+
+        let err = entries_from_bundle_json(&format!(
+            r#"{{"schema_version":1,"version":"sha256:over","deny_path_prefixes":["{}"]}}"#,
+            std::str::from_utf8(p33).unwrap()
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("longer than"),
+            "bundle parse must fail-closed on over-length prefix: {err}"
+        );
     }
 
     #[test]

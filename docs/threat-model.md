@@ -167,6 +167,13 @@ userspace populates from zt-policy-engine. This matches the dual-hook split in
 decides synchronously in-kernel**; the control plane only governs *what* prefix set
 is enforced, out-of-band.
 
+**Prefix key width:** `PATH_DENY_KEY_BYTES` is **32** (Issue [#134](https://github.com/Neuromesh-Security/neuromesh/issues/134)) —
+proactive headroom above the historical 16-byte window. Bootstrap prefixes remain
+`/tmp/` (5), `/dev/shm/` (9), `/var/tmp/` (9). Over-length prefixes are
+**fail-closed rejected** at `PathDenyEntry::from_prefix` / bundle parse (never
+silently truncated). Map value ABI changes with this constant — upgrade requires
+reloading the enforcement object (unpin + reattach), not hot-patching an old map.
+
 #### Three planes (what is connected vs not)
 
 | Plane | Role in Phase 1 | Hot-path network? |
