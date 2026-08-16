@@ -45,10 +45,18 @@ func ApplyConfigMapJSON(raw []byte) error {
 
 	old := Active()
 	oldVersion := ""
+	var oldPrefixes []string
 	if old != nil {
 		oldVersion = old.ContentVersion
+		oldPrefixes = old.DenyPathPrefixes
 	}
 	ApplyValidated(snap)
 	AuditAccepted(rv, oldVersion, snap.ContentVersion, old, &snap)
+	// Loud signal only when the override flag was exercised to drop a floor.
+	if snap.AllowFloorPrefixRemoval {
+		if floors := FloorPrefixesRemovedInDiff(oldPrefixes, snap.DenyPathPrefixes); len(floors) > 0 {
+			AuditSafetyRailOverride(rv, oldVersion, snap.ContentVersion, floors)
+		}
+	}
 	return nil
 }

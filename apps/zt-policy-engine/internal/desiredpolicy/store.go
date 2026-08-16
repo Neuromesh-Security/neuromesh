@@ -19,6 +19,7 @@ func Active() *Snapshot {
 	cp := *p
 	cp.DenyPathPrefixes = append([]string(nil), p.DenyPathPrefixes...)
 	cp.SpiffeIDs = append([]string(nil), p.SpiffeIDs...)
+	cp.FloorPrefixesAbsent = append([]string(nil), p.FloorPrefixesAbsent...)
 	return &cp
 }
 
@@ -28,6 +29,7 @@ func ApplyValidated(snap Snapshot) {
 	cp := snap
 	cp.DenyPathPrefixes = append([]string(nil), snap.DenyPathPrefixes...)
 	cp.SpiffeIDs = append([]string(nil), snap.SpiffeIDs...)
+	cp.FloorPrefixesAbsent = append([]string(nil), snap.FloorPrefixesAbsent...)
 	global.Store(&cp)
 	policybundle.SetDesiredOverride(&policybundle.DesiredOverride{
 		DenyPathPrefixes: cp.DenyPathPrefixes,

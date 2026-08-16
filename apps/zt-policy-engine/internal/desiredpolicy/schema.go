@@ -52,6 +52,11 @@ type Snapshot struct {
 	ScopePathPrefix  string
 	ContentVersion   string // sha256:… matching policybundle contentVersion formula
 	ResourceVersion  string // ConfigMap metadata.resourceVersion (audit)
+	// AllowFloorPrefixRemoval echoes the operator flag that permitted missing floors.
+	AllowFloorPrefixRemoval bool
+	// FloorPrefixesAbsent lists floor prefixes missing from DenyPathPrefixes
+	// (non-empty only when AllowFloorPrefixRemoval was true at validate time).
+	FloorPrefixesAbsent []string
 }
 
 // ParseDocument unmarshals policy.json bytes (unknown fields rejected).

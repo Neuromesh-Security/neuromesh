@@ -36,15 +36,17 @@ func Validate(doc Document) (Snapshot, error) {
 		prefixes = append(prefixes, p)
 	}
 
-	if !doc.AllowFloorPrefixRemoval {
-		for _, floor := range FloorDenyPathPrefixes {
-			if _, ok := seenPrefix[floor]; !ok {
-				return Snapshot{}, fmt.Errorf(
-					"floor deny prefix %q missing (set allow_floor_prefix_removal=true to override)",
-					floor,
-				)
-			}
+	var floorsAbsent []string
+	for _, floor := range FloorDenyPathPrefixes {
+		if _, ok := seenPrefix[floor]; !ok {
+			floorsAbsent = append(floorsAbsent, floor)
 		}
+	}
+	if len(floorsAbsent) > 0 && !doc.AllowFloorPrefixRemoval {
+		return Snapshot{}, fmt.Errorf(
+			"floor deny prefix %q missing (set allow_floor_prefix_removal=true to override)",
+			floorsAbsent[0],
+		)
 	}
 
 	if doc.IdentityAllowExceptions == nil {
@@ -89,10 +91,12 @@ func Validate(doc Document) (Snapshot, error) {
 	}
 
 	return Snapshot{
-		DenyPathPrefixes: prefixes,
-		SpiffeIDs:        ids,
-		ScopePathPrefix:  scope,
-		ContentVersion:   contentVersion(prefixes, ids, scope),
+		DenyPathPrefixes:        prefixes,
+		SpiffeIDs:               ids,
+		ScopePathPrefix:         scope,
+		ContentVersion:          contentVersion(prefixes, ids, scope),
+		AllowFloorPrefixRemoval: doc.AllowFloorPrefixRemoval,
+		FloorPrefixesAbsent:     floorsAbsent,
 	}, nil
 }
 

@@ -55,6 +55,12 @@ func TestValidateAllowsFloorRemovalWithOverride(t *testing.T) {
 	if len(snap.DenyPathPrefixes) != 2 {
 		t.Fatalf("prefixes: %v", snap.DenyPathPrefixes)
 	}
+	if !snap.AllowFloorPrefixRemoval {
+		t.Fatal("AllowFloorPrefixRemoval must be recorded on snapshot")
+	}
+	if len(snap.FloorPrefixesAbsent) != 1 || snap.FloorPrefixesAbsent[0] != "/var/tmp/" {
+		t.Fatalf("FloorPrefixesAbsent: %v", snap.FloorPrefixesAbsent)
+	}
 }
 
 func TestValidateRejectsWrongScope(t *testing.T) {
@@ -247,6 +253,125 @@ func TestParseRejectsUnknownFields(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unknown field rejection")
 	}
+}
+
+func TestFloorRemovalSafetyRailOverrideLogging(t *testing.T) {
+	t.Cleanup(ClearForTest)
+
+	idBlock := `"identity_allow_exceptions":{"scope_path_prefix":"/tmp/","spiffe_ids":["spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor"]}`
+
+	t.Run("a_rejected_without_override", func(t *testing.T) {
+		t.Cleanup(ClearForTest)
+		var buf bytes.Buffer
+		prev := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(prev) })
+
+		raw := mustCMJSON(t, "10", `{
+  "deny_path_prefixes": ["/tmp/", "/dev/shm/"],
+  `+idBlock+`
+}`)
+		if err := ApplyConfigMapJSON(raw); err == nil {
+			t.Fatal("expected rejection without allow_floor_prefix_removal")
+		}
+		out := buf.String()
+		if !strings.Contains(out, "desired_policy_rejected") {
+			t.Fatalf("expected rejected audit, got:\n%s", out)
+		}
+		if strings.Contains(out, "desired_policy_SAFETY_RAIL_OVERRIDE") {
+			t.Fatalf("rejected apply must not emit SAFETY_RAIL_OVERRIDE:\n%s", out)
+		}
+		if strings.Contains(out, "desired_policy_accepted") {
+			t.Fatalf("rejected apply must not emit accepted:\n%s", out)
+		}
+	})
+
+	t.Run("b_override_emits_accepted_and_safety_rail", func(t *testing.T) {
+		t.Cleanup(ClearForTest)
+		// Establish LKG with all three floors first.
+		if err := ApplyConfigMapJSON(mustCMJSON(t, "20", `{
+  "deny_path_prefixes": ["/tmp/", "/dev/shm/", "/var/tmp/"],
+  `+idBlock+`
+}`)); err != nil {
+			t.Fatalf("seed LKG: %v", err)
+		}
+
+		var buf bytes.Buffer
+		prev := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(prev) })
+
+		raw := mustCMJSON(t, "21", `{
+  "deny_path_prefixes": ["/tmp/", "/dev/shm/"],
+  "allow_floor_prefix_removal": true,
+  `+idBlock+`
+}`)
+		if err := ApplyConfigMapJSON(raw); err != nil {
+			t.Fatalf("ApplyConfigMapJSON: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "desired_policy_accepted") {
+			t.Fatalf("expected accepted log:\n%s", out)
+		}
+		if !strings.Contains(out, "desired_policy_SAFETY_RAIL_OVERRIDE") {
+			t.Fatalf("expected SAFETY_RAIL_OVERRIDE log:\n%s", out)
+		}
+		if !strings.Contains(out, `severity=WARNING`) {
+			t.Fatalf("expected WARNING severity on override line:\n%s", out)
+		}
+		if !strings.Contains(out, `floor_prefixes_removed="/var/tmp/"`) &&
+			!strings.Contains(out, `floor_prefixes_removed="/var/tmp/`) {
+			t.Fatalf("expected /var/tmp/ in floor_prefixes_removed:\n%s", out)
+		}
+		if !strings.Contains(out, `resource_version="21"`) {
+			t.Fatalf("override line must carry resource_version:\n%s", out)
+		}
+		// Accepted must appear before (or at least separately from) override tag.
+		accIdx := strings.Index(out, "desired_policy_accepted")
+		ovrIdx := strings.Index(out, "desired_policy_SAFETY_RAIL_OVERRIDE")
+		if accIdx < 0 || ovrIdx < 0 || ovrIdx < accIdx {
+			t.Fatalf("SAFETY_RAIL_OVERRIDE must be a separate line after accepted:\n%s", out)
+		}
+	})
+
+	t.Run("c_normal_change_no_false_positive", func(t *testing.T) {
+		t.Cleanup(ClearForTest)
+		if err := ApplyConfigMapJSON(mustCMJSON(t, "30", `{
+  "deny_path_prefixes": ["/tmp/", "/dev/shm/", "/var/tmp/"],
+  `+idBlock+`
+}`)); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+
+		var buf bytes.Buffer
+		prev := log.Writer()
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(prev) })
+
+		// Widen SPIFFE allowlist; floors untouched. Even with override flag true,
+		// no floor is removed → no SAFETY_RAIL_OVERRIDE.
+		raw := mustCMJSON(t, "31", `{
+  "deny_path_prefixes": ["/tmp/", "/dev/shm/", "/var/tmp/"],
+  "allow_floor_prefix_removal": true,
+  "identity_allow_exceptions": {
+    "scope_path_prefix": "/tmp/",
+    "spiffe_ids": [
+      "spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor",
+      "spiffe://neuromesh.security/ns/default/sa/extra-workload"
+    ]
+  }
+}`)
+		if err := ApplyConfigMapJSON(raw); err != nil {
+			t.Fatalf("ApplyConfigMapJSON: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "desired_policy_accepted") {
+			t.Fatalf("expected accepted:\n%s", out)
+		}
+		if strings.Contains(out, "desired_policy_SAFETY_RAIL_OVERRIDE") {
+			t.Fatalf("false positive SAFETY_RAIL_OVERRIDE:\n%s", out)
+		}
+	})
 }
 
 func mustValidate(t *testing.T, doc Document) Snapshot {
