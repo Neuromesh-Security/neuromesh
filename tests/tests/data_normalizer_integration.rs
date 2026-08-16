@@ -32,12 +32,13 @@ fn rapid_spawn_burst_triggers_behavior_alert() {
 }
 
 #[test]
-fn zero_ppid_events_are_ignored_for_burst_detection() {
+fn genuine_zero_ppid_events_are_ignored_for_burst_detection() {
     let mut normalizer = DataNormalizer::with_config(Duration::from_secs(2), 3, 16);
     let events = malicious_spawn_burst_events()
         .into_iter()
         .map(|mut event| {
             event.ppid = 0;
+            event.ppid_unresolved = false;
             event
         })
         .collect::<Vec<_>>();
@@ -45,4 +46,22 @@ fn zero_ppid_events_are_ignored_for_burst_detection() {
     for event in events {
         assert!(normalizer.ingest(&event).is_none());
     }
+}
+
+#[test]
+fn ppid_unresolved_spawn_burst_still_triggers_behavior_alert() {
+    let mut normalizer = DataNormalizer::with_config(Duration::from_secs(2), 8, 64);
+    let mut alert = None;
+    for mut event in malicious_spawn_burst_events() {
+        event.ppid = 0;
+        event.ppid_unresolved = true;
+        alert = normalizer.ingest(&event);
+    }
+    let alert = alert.expect("CAPTURE_PPID-style bursts must still alert via comm fallback");
+    assert_eq!(alert.severity, SEVERITY_BEHAVIOR_ALERT);
+    assert_eq!(alert.rule_id, "NEUROMESH-EXEC-SPAWN-BURST");
+    assert!(alert.ppid_unresolved);
+    assert_eq!(alert.ppid, 0);
+    assert!(alert.spawn_count >= 8);
+    assert_eq!(alert.last_comm, "bash");
 }

@@ -141,7 +141,8 @@ False positives erode SOC trust. Neuromesh applies layered suppression:
 |-----------|---------|------------------------|--------|
 | Window | 2 seconds | Build systems spawning many short-lived children | Increase window or threshold |
 | Burst threshold | 8 spawns per `ppid` | Parallel test runners | Raise threshold via `with_config()` |
-| `ppid == 0` | Ignored | Kernel lineage read failure (probe miss or unresolved BTF on an unsupported kernel — agent should have refused to load if BTF resolution failed at startup) | Do not alert on orphan events; expand real-kernel BTF validation (see §7) |
+| `ppid == 0` (no capture fault) | Ignored | Orphan / init-edge lineage; correlating all such events into a shared `0` bucket would FP | Do not alert on genuine orphan events |
+| `ppid` capture fault (`CAPTURE_PPID` → `ppid_unresolved`) | Counted under **comm** fallback | Per-event probe miss after successful BTF load (rare on supported kernels; structural BTF failure is fail-closed at startup — see §4.2/§4.3) | Alert tagged `ppid_unresolved=true`; `ppid` remains `0` and must not be treated as parent 0 |
 
 **Operational guidance:**
 

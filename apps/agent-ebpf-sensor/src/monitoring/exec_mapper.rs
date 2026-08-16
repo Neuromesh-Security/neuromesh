@@ -70,6 +70,7 @@ pub fn exec_event_to_security_telemetry(event: &ExecEvent) -> SecurityTelemetryE
     SecurityTelemetryEvent {
         pid: scalar_or_zero(event.pid, event.field_unknown(CAPTURE_TGID)),
         ppid: scalar_or_zero(event.ppid, event.field_unknown(CAPTURE_PPID)),
+        ppid_unresolved: event.field_unknown(CAPTURE_PPID),
         uid: scalar_or_zero(event.uid, event.field_unknown(CAPTURE_UID)),
         euid: scalar_or_zero(event.euid, event.field_unknown(CAPTURE_EUID)),
         comm: string_field(&event.comm, CAPTURE_COMM, event.capture_status),
@@ -116,6 +117,11 @@ pub fn exec_event_otel_attributes(event: &ExecEvent) -> OtelExecAttributes {
         "neuromesh.ppid".into(),
         display_scalar(event.ppid, CAPTURE_PPID, event.capture_status),
     );
+    if event.field_unknown(CAPTURE_PPID) {
+        // Explicit flag so SIEM/OTel consumers do not treat neuromesh.ppid=UNKNOWN
+        // as parent 0, and so burst fallback (`ppid_unresolved`) is queryable.
+        attributes.insert("neuromesh.ppid_unresolved".into(), "true".into());
+    }
     attributes.insert(
         "neuromesh.uid".into(),
         display_scalar(event.uid, CAPTURE_UID, event.capture_status),
@@ -503,11 +509,21 @@ mod tests {
         let mapped = exec_event_to_security_telemetry(&event);
         assert_eq!(mapped.pid, 100);
         assert_eq!(mapped.ppid, 0);
+        assert!(
+            mapped.ppid_unresolved,
+            "CAPTURE_PPID must surface as ppid_unresolved for burst fallback"
+        );
 
         let otel = exec_event_otel_attributes(&event);
         assert_eq!(
             otel.attributes.get("neuromesh.ppid").map(String::as_str),
             Some("UNKNOWN:ppid_probe_fault")
+        );
+        assert_eq!(
+            otel.attributes
+                .get("neuromesh.ppid_unresolved")
+                .map(String::as_str),
+            Some("true")
         );
     }
 

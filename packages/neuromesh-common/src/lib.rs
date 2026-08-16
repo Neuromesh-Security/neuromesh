@@ -161,6 +161,10 @@ impl ExecEvent {
 pub struct SecurityTelemetryEvent {
     pub pid: u32,
     pub ppid: u32,
+    /// True when kernel lineage capture failed (`CAPTURE_PPID`): `ppid` is then
+    /// `0` as a sentinel and must not be treated as a real parent id. Burst
+    /// detection keys these events by `comm` instead (Issue #132).
+    pub ppid_unresolved: bool,
     pub uid: u32,
     pub euid: u32,
     pub comm: [u8; MAX_COMM_LEN],

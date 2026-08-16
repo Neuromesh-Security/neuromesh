@@ -84,6 +84,7 @@ mod tests {
             WasmPolicyEngine::new().evaluate(&SecurityTelemetryEvent {
                 pid: 0,
                 ppid: 0,
+                ppid_unresolved: false,
                 uid: 0,
                 euid: 0,
                 comm: [0; 16],
