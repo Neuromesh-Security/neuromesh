@@ -184,8 +184,10 @@ jobs:
       - name: Integration tests (kernel-independent)
         run: cargo test -p neuromesh-integration-tests
 
-      - name: Unit tests — sensor library
-        run: cargo test -p agent-ebpf-sensor --lib
+      # Deliberate unit-test step for neuromesh-common (Issue #128 Gap B). Previously
+      # this crate's only test ran solely as a side effect of the llvm-cov gate.
+      - name: Unit tests — neuromesh-common
+        run: cargo test -p neuromesh-common --lib
 
       # Guards the C tracepoint wiring that no offline Rust test can reach:
       # the execveat argument shift, the shared rate limiter/ringbuf, and the
@@ -205,6 +207,14 @@ jobs:
           ls -la "$(dirname "$BPF")"
           test -f "$BPF"
           echo "NEUROMESH_EBPF_ENFORCEMENT_BYTECODE=${BPF}" >> "${GITHUB_ENV}"
+
+      # Must run AFTER the bytecode download/export above: `--features orchestrator`
+      # makes build.rs require the enforcement object on disk (same placement class
+      # as chaos_engineering_test). Gap A from Issue #128 — without the feature the
+      # default (empty) feature set silently skips
+      # integrity::tests::handle_failures_increments_metric_and_respects_alert_only.
+      - name: Unit tests — sensor library
+        run: cargo test -p agent-ebpf-sensor --lib --features orchestrator
 
       - name: Enterprise sensor tests (fuzz + chaos harness)
         run: |
