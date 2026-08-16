@@ -195,7 +195,15 @@ pub const PATH_DENY_MAX_ENTRIES: u32 = 64;
 
 /// Byte length of each deny-list prefix key — matches the LSM's
 /// `PATH_PREFIX_LEN` window used for blacklist matching.
-pub const PATH_DENY_KEY_BYTES: usize = 16;
+///
+/// **32 (not 16):** proactive headroom from the Aug 2026 audit / sprint review
+/// (Issue #134). Bootstrap prefixes (`/tmp/`=5, `/dev/shm/`=9, `/var/tmp/`=9)
+/// sit far below the historical 16-byte cap — this is **not** an active
+/// vulnerability fix. Doubling the key gives room for longer operator-governed
+/// prefixes (e.g. `/var/lib/…` staging trees) without another hot-path ABI
+/// change, while remaining a trivial stack delta on the 512-byte BPF limit
+/// (`[u8; 32]` vs `[u8; 16]` in `read_bprm_path_prefix`).
+pub const PATH_DENY_KEY_BYTES: usize = 32;
 
 /// Kernel `BPF_OBJ_NAME_LEN` is 16 (including NUL) → max usable object name length.
 ///
@@ -396,5 +404,39 @@ mod bpf_obj_name_tests {
             }
             seen[i] = Some(trunc);
         }
+    }
+}
+
+#[cfg(test)]
+mod path_deny_key_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_prefixes_well_under_historical_16_and_new_32() {
+        for prefix in BOOTSTRAP_PATH_DENY_PREFIXES {
+            assert!(
+                prefix.len() < 16,
+                "{prefix:?} len {} — sprint item assumed all bootstrap keys << 16",
+                prefix.len()
+            );
+            assert!(prefix.len() <= PATH_DENY_KEY_BYTES);
+            assert!(PathDenyEntry::from_prefix(prefix).is_some());
+        }
+    }
+
+    #[test]
+    fn from_prefix_accepts_exact_16_and_32_rejects_33() {
+        let p16 = b"/var/lib/dockerX";
+        assert_eq!(p16.len(), 16);
+        assert!(PathDenyEntry::from_prefix(p16).is_some());
+
+        let p32 = b"/opt/neuromesh/staging/binXXXXXX";
+        assert_eq!(p32.len(), 32);
+        assert_eq!(PATH_DENY_KEY_BYTES, 32);
+        assert!(PathDenyEntry::from_prefix(p32).is_some());
+
+        let p33 = b"/opt/neuromesh/staging/binXXXXXXX";
+        assert_eq!(p33.len(), 33);
+        assert!(PathDenyEntry::from_prefix(p33).is_none());
     }
 }

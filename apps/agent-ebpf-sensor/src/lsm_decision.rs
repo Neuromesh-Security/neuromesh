@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn path_bytes_probe_failure_is_deny_not_zero_prefix_allow() {
         let entries = bootstrap();
-        // The old bug returned Ok([0;16]), which does not match any deny prefix
+        // The old bug returned Ok([0; N]), which does not match any deny prefix
         // and would ALLOW. Fail-closed must DENY instead.
         assert_eq!(
             decision_from_path_capture(PathCapture::PathBytesUnreadable, &entries),

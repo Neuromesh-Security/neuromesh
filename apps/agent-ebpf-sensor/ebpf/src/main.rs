@@ -27,7 +27,8 @@ use neuromesh_common::{
 const LSM_DENY: i32 = -1;
 
 /// Prefix window used for deny-list matching without exhausting the 512-byte BPF stack.
-/// Must equal `neuromesh_common::PATH_DENY_KEY_BYTES`.
+/// Must equal `neuromesh_common::PATH_DENY_KEY_BYTES` (32 — proactive headroom;
+/// bootstrap prefixes remain ≤9 bytes; see common crate docs).
 const PATH_PREFIX_LEN: usize = PATH_DENY_KEY_BYTES;
 
 /// `linux_binprm->filename`, `task_struct->real_parent`, and `task_struct->tgid`
@@ -327,7 +328,7 @@ fn path_starts_with(path: &[u8], prefix: &[u8], len: usize) -> bool {
     if path.len() < len || len == 0 || len > PATH_DENY_KEY_BYTES {
         return false;
     }
-    // Bound the compare loop by PATH_DENY_KEY_BYTES (16) for the verifier.
+    // Bound the compare loop by PATH_DENY_KEY_BYTES (32) for the verifier.
     let mut j = 0usize;
     while j < PATH_DENY_KEY_BYTES {
         if j >= len {
