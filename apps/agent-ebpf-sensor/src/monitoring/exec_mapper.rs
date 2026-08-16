@@ -396,7 +396,10 @@ mod tests {
         assert!(decoded.is_execveat());
         assert!(!decoded.path_from_fd());
         assert_eq!(decoded.event_type, EXEC_EVENT_TYPE_EXECVE);
-        assert_eq!(decoded.struct_size, EXEC_EVENT_STRUCT_SIZE);
+        // Copied out first: `ExecEvent` is packed, so a multi-byte field cannot be
+        // borrowed by `assert_eq!`.
+        let struct_size = decoded.struct_size;
+        assert_eq!(struct_size, EXEC_EVENT_STRUCT_SIZE);
 
         // The variant must be visible to analysts, not just present in the struct.
         let otel = exec_event_otel_attributes(&decoded);
