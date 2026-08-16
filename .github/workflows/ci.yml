@@ -136,6 +136,12 @@ jobs:
       - name: Lint BPF object name lengths (BPF_OBJ_NAME_LEN)
         run: bash scripts/lint_bpf_obj_names.sh
 
+      # Issue #128 Gap D: fail if a new apps/agent-ebpf-sensor/tests/*.rs target
+      # is not hand-enumerated in the Test job (feature-flag matrix prevents
+      # safe auto-discovery). Self-test: bash scripts/lint_ci_sensor_test_targets.sh --self-test
+      - name: Lint — sensor integration tests enumerated in CI
+        run: bash scripts/lint_ci_sensor_test_targets.sh
+
       - name: Install clang (C BPF visibility object)
         timeout-minutes: 10
         run: bash scripts/ci_apt_install.sh clang llvm cmake g++ gcc build-essential pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
