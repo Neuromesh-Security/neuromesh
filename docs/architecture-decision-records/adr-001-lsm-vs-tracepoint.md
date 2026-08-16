@@ -67,6 +67,27 @@ behavioral frequency analysis, and (future) Wasm policies.
 - **ppid best-effort:** Parent PID is read via `task_struct` offsets without
   full CO-RE; behavior normalizer treats `ppid == 0` as non-actionable.
 
+## Amendments
+
+### 2026-08-16 — exec tracepoint coverage extended to `execveat` ([#126](https://github.com/Neuromesh-Security/neuromesh/issues/126))
+
+This ADR's "Universal visibility: every `execve` is observed" claim held only for
+`execve(2)`. `execveat(2)` — and therefore `fexecve(3)`, which glibc implements as
+`execveat(fd, "", argv, envp, AT_EMPTY_PATH)` — entered the kernel through a
+syscall the agent did not trace, so those executions were absent from the passive
+stream even though the LSM hook still enforced against them.
+
+The telemetry side now attaches `syscalls/sys_enter_execveat` (`nm_execveat`)
+alongside `sys_enter_execve`, feeding the same `PROCESS_EVENTS` RingBuf through
+the same rate limiter. This **does not change the dual-hook decision above** and
+did not alter the enforcement plane: the asymmetry was always a visibility gap,
+never a deny bypass, because both syscalls converge on `do_execveat_common()` →
+`security_bprm_check()` → `bprm_check_security`.
+
+Tracepoints were chosen over a kprobe on the shared `do_execveat_common()` entry
+because that symbol is internal and commonly inlined, making the attach
+unreliable across kernels, whereas syscall tracepoints are a stable ABI.
+
 ## Related work
 
 - Context-aware telemetry enrichment (`SecurityTelemetryEvent` lineage fields)

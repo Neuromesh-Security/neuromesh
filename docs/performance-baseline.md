@@ -112,11 +112,14 @@ Kernel eBPF capture latency is measured separately (Section 2).
 
 | Hook | Program | RingBuf | Backpressure mechanism |
 |------|---------|---------|------------------------|
-| `sys_enter_execve` | `neuromesh_process_events` | `PROCESS_EVENTS` (**1 MiB** in `sys_exec.bpf.c`) | Per-CPU token bucket (~500k/sec) → `RATE_LIMIT_DROPS` |
-| `tcp_connect` | `neuromesh_tcp_connect` | `NETWORK_EVENTS` (256 KiB) | RingBuf reserve failure → `DROPPED_EVENTS` |
-| `bprm_check_security` | `neuromesh_lsm_exec_guard` | `TELEMETRY_RINGBUF` (256 KiB) | Reserve failure → `TELEMETRY_STATS.lost_events_count` |
+| `sys_enter_execve` | `nm_proc_events` | `PROCESS_EVENTS` (**1 MiB** in `sys_exec.bpf.c`) | Per-CPU token bucket (~500k/sec) → `RATE_LIMIT_DROPS` |
+| `sys_enter_execveat` | `nm_execveat` | `PROCESS_EVENTS` (same 1 MiB buffer) | **Same** per-CPU token bucket → `RATE_LIMIT_DROPS` |
+| `tcp_connect` | `nm_tcp_connect` | `NETWORK_EVENTS` (256 KiB) | RingBuf reserve failure → `DROPPED_EVENTS` |
+| `bprm_check_security` | `nm_lsm_bprm` | `TELEMETRY_RINGBUF` (256 KiB) | Reserve failure → `TELEMETRY_STATS.lost_events_count` |
 
-User-space execve consumer: `process_monitor.rs` — AsyncFd poller → bounded MPSC (default **8192**) → correlation worker.
+User-space exec consumer: `process_monitor.rs` — AsyncFd poller → bounded MPSC (default **8192**) → correlation worker.
+
+**Capacity note for the `execveat` attach (Issue #126):** the second tracepoint did **not** require a RingBuf resize. Both exec programs call the same `rate_limit_allow()` against the same `RLIMIT_BUCKET` per-CPU token bucket, so the *aggregate* admitted rate is still one ~500k EPS ceiling rather than one per hook — the figures below remain the governing numbers. At 668 B per record a 1 MiB buffer holds ~1,569 in-flight records, unchanged. `execveat`/`fexecve` are also a small fraction of real exec traffic, and any additional pressure surfaces in the existing `RATE_LIMIT_DROPS` and MPSC backpressure counters rather than silently.
 
 ### 2.2 Latency overhead (execve syscall path)
 

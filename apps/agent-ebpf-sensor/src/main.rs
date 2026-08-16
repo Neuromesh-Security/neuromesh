@@ -385,7 +385,10 @@ async fn main() -> Result<(), anyhow::Error> {
     let telemetry_stream = telemetry_stream::spawn_from_env().await;
     let _wasm_policy = WasmPolicyEngine::new();
 
-    info!("👁️ Process visibility armed via sys_enter_execve tracepoint.");
+    info!(
+        "👁️ Process visibility armed via sys_enter_execve + sys_enter_execveat tracepoints \
+         (execveat attach also covers fexecve)."
+    );
     info!("🌐 Network visibility armed via tcp_connect kprobe.");
     info!("🔗 Lock-free correlation engine armed (DashMap PID → process name).");
     info!("📨 Correlation Kafka ingestion armed (bounded MPSC → idempotent rdkafka).");

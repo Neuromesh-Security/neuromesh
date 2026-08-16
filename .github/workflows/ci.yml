@@ -187,6 +187,12 @@ jobs:
       - name: Unit tests — sensor library
         run: cargo test -p agent-ebpf-sensor --lib
 
+      # Guards the C tracepoint wiring that no offline Rust test can reach:
+      # the execveat argument shift, the shared rate limiter/ringbuf, and the
+      # flags-vs-event_type schema decision (Issue #126). Needs no eBPF artifact.
+      - name: BPF attach contract (tracepoint wiring guards)
+        run: cargo test -p agent-ebpf-sensor --test bpf_attach_contract_test
+
       - name: Download eBPF bytecode (orchestrator compile gate)
         uses: actions/download-artifact@v4
         with:

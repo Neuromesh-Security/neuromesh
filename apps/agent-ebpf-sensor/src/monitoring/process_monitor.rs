@@ -1,7 +1,12 @@
-//! Async RingBuf consumer for C `sys_enter_execve` ExecEvent v1 records.
+//! Async RingBuf consumer for C `sys_enter_execve` / `sys_enter_execveat`
+//! ExecEvent v1 records.
 //!
 //! Hot path: AsyncFd poll → zero-copy `ExecEvent` decode → bounded MPSC try_send.
 //! Worker task: correlation registration, OTel attribute export, detection pipeline fan-out.
+//!
+//! Both tracepoints feed the same `PROCESS_EVENTS` RingBuf and share one
+//! token bucket, so the consumer side is unchanged by the execveat attach
+//! (Issue #126); records are distinguished via `ExecEvent::is_execveat()`.
 
 use crate::monitoring::correlation::CorrelationEngine;
 use crate::monitoring::event::ProcessEventHandler;
@@ -23,6 +28,7 @@ use tracing::{info, warn};
 
 pub const PROCESS_EVENTS_MAP: &str = neuromesh_common::PROCESS_EVENTS_MAP;
 pub const SYS_EXEC_PROGRAM: &str = neuromesh_common::PROCESS_EVENTS_PROG;
+pub const SYS_EXECVEAT_PROGRAM: &str = neuromesh_common::PROCESS_EVENTS_AT_PROG;
 
 /// Bounded queue between kernel RingBuf drain and user-space processing.
 pub const DEFAULT_PROCESS_CHANNEL_CAPACITY: usize = 8192;
@@ -48,6 +54,24 @@ pub async fn start_process_monitor(
     program
         .attach("syscalls", "sys_enter_execve")
         .context("failed to attach sys_enter_execve tracepoint")?;
+
+    // Second attach for execveat(2)/fexecve(3) parity with LSM enforcement
+    // coverage (Issue #126). Fail-closed like the execve attach above: the
+    // threat model documents this visibility as present, so a silent partial
+    // attach would make that claim false. `sys_enter_execveat` has existed
+    // since the syscall was introduced in Linux 3.19, well below the supported
+    // floor, so a failure here is a real fault rather than an old kernel.
+    let execveat_program: &mut TracePoint = bpf
+        .program_mut(SYS_EXECVEAT_PROGRAM)
+        .with_context(|| format!("eBPF program `{SYS_EXECVEAT_PROGRAM}` missing from object file"))?
+        .try_into()
+        .context("failed to cast execveat eBPF program to TracePoint")?;
+    execveat_program
+        .load()
+        .context("kernel verifier rejected nm_execveat tracepoint")?;
+    execveat_program
+        .attach("syscalls", "sys_enter_execveat")
+        .context("failed to attach sys_enter_execveat tracepoint")?;
 
     let ring_buf =
         RingBuf::try_from(bpf.take_map(PROCESS_EVENTS_MAP).with_context(|| {
@@ -170,7 +194,7 @@ pub async fn start_process_monitor(
         channel_capacity,
         pressure_threshold_pct = PROCESS_PRESSURE_DROP_THRESHOLD_PCT,
         detection_fanout,
-        "Process monitor armed on sys_enter_execve → PROCESS_EVENTS RingBuf (ExecEvent v1)"
+        "Process monitor armed on sys_enter_execve + sys_enter_execveat → PROCESS_EVENTS RingBuf (ExecEvent v1)"
     );
 
     Ok(correlation)
