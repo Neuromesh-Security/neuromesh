@@ -1,0 +1,54 @@
+package desiredpolicy
+
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// configMapObject is the subset of a core/v1 ConfigMap we need.
+type configMapObject struct {
+	Metadata struct {
+		Name            string `json:"name"`
+		Namespace       string `json:"namespace"`
+		ResourceVersion string `json:"resourceVersion"`
+	} `json:"metadata"`
+	Data map[string]string `json:"data"`
+}
+
+// ApplyConfigMapJSON parses a ConfigMap object JSON, validates policy.json, and
+// on success updates LKG + policybundle override. On failure retains LKG and
+// returns an error (already audit-logged as rejected).
+func ApplyConfigMapJSON(raw []byte) error {
+	var cm configMapObject
+	if err := json.Unmarshal(raw, &cm); err != nil {
+		AuditRejected("", fmt.Sprintf("configmap decode: %v", err))
+		return fmt.Errorf("configmap decode: %w", err)
+	}
+	rv := cm.Metadata.ResourceVersion
+	body, ok := cm.Data[ConfigMapDataKey]
+	if !ok || body == "" {
+		reason := fmt.Sprintf("missing data[%q]", ConfigMapDataKey)
+		AuditRejected(rv, reason)
+		return fmt.Errorf("%s", reason)
+	}
+	doc, err := ParseDocument([]byte(body))
+	if err != nil {
+		AuditRejected(rv, err.Error())
+		return err
+	}
+	snap, err := Validate(doc)
+	if err != nil {
+		AuditRejected(rv, err.Error())
+		return err
+	}
+	snap.ResourceVersion = rv
+
+	old := Active()
+	oldVersion := ""
+	if old != nil {
+		oldVersion = old.ContentVersion
+	}
+	ApplyValidated(snap)
+	AuditAccepted(rv, oldVersion, snap.ContentVersion, old, &snap)
+	return nil
+}

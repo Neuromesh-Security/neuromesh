@@ -8,6 +8,7 @@
 | `neuromesh-agent-correlator-rbac.yaml` | Slice **2b-i** ClusterRole/Binding: pods `get/list/watch` only |
 | `neuromesh-zt-policy-engine-deployment.yaml` | zt-policy-engine Deployment + ServiceAccount (port 8080) |
 | `neuromesh-zt-policy-engine-service.yaml` | ClusterIP Service → agent sync DNS |
+| `neuromesh-desired-policy.yaml` | Issue **#137 PR-1**: example DesiredPolicy ConfigMap + PE **get/watch-only** Role (OFF until Rego PR-2) |
 | `admission/` | Optional Cosign admission webhook (see `admission/README.md`) |
 
 Agent sync DNS:

@@ -34,6 +34,16 @@ GET /v1/policy-bundle
     Three independent controls. Bearer alone is NOT content integrity.
     Signature alone is NOT freshness. PE refuses to boot without
     NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH.
+
+DesiredPolicy ConfigMap (Issue #137 PR-1 — bundle plane only)
+    │
+    └─► OFF by default. Requires BOTH:
+          NEUROMESH_DESIRED_POLICY_ENABLE=true
+          NEUROMESH_DESIRED_POLICY_CONFIGMAP=<name>
+        When enabled, PE get/watches ConfigMap data.policy.json → validates →
+        feeds policybundle.CurrentAt (sign+timestamp cycle unchanged).
+        Rego (/v1/evaluate) is NOT updated (PR-2). Do NOT enable in production
+        until PR-2 — ship rule against dynamic bundle + static Rego.
 ```
 
 ### Operator note — agent sync (Phase 1)
@@ -190,10 +200,16 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
 | `NEUROMESH_POLICY_BUNDLE_TOKEN_FILE` | — | Preferred: absolute path to token file (Kubernetes Secret mount) |
 | `NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH` | _(required)_ | **Fail-closed.** Absolute PKCS#8 PEM private key (ECDSA P-256 or Ed25519). Signs exact `GET /v1/policy-bundle` body; header `X-Neuromesh-Policy-Bundle-Signature`. Missing/unreadable/unsupported → PE **refuses to boot** (Issue #108). Never serves unsigned bundles. |
 | `NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS` | `300` | Whole-bundle `not_after - not_before` window (T-PB-04). Override for live short-window anti-replay tests only. |
+| `NEUROMESH_DESIRED_POLICY_ENABLE` | unset / false | Issue **#137 PR-1**. Dual gate with ConfigMap name. **Keep unset in production until Rego PR-2.** |
+| `NEUROMESH_DESIRED_POLICY_CONFIGMAP` | — | ConfigMap name to get/watch (`data.policy.json`). Required when enable=true. |
+| `NEUROMESH_DESIRED_POLICY_NAMESPACE` | SA namespace | Optional override; default in-cluster ServiceAccount namespace. |
 
 
 ## Current limitations (honest)
 
+- DesiredPolicy ConfigMap watch (Issue #137 PR-1) is **built but default-off**.
+  Enabling it without Rego PR-2 creates dynamic-bundle + static-Rego drift —
+  forbidden. See `deploy/kubernetes/neuromesh-desired-policy.yaml`.
 - `/v1/evaluate` is a **control-plane advisory** endpoint only — **not** the
   enforcement source of truth for execve. The eBPF LSM never calls it; agent
   sync uses authenticated `GET /v1/policy-bundle` (schema_version 3) for

@@ -113,20 +113,34 @@ func Current() Bundle {
 }
 
 // CurrentAt is Current with an injectable clock (tests).
+//
+// Content source: DesiredOverride when set (Issue #137 PR-1, feature-gated);
+// otherwise compile-time Bootstrap* constants. Timestamps
+// (not_before/not_after + identity issued_at/expires_at) are always minted
+// here — a DesiredPolicy change does not alter the sign+timestamp cycle;
+// Handler still Marshals Current() and signs the exact body bytes.
 func CurrentAt(now time.Time) Bundle {
 	prefixes := append([]string(nil), BootstrapDenyPathPrefixes...)
 	ids := append([]string(nil), BootstrapIdentityAllowSPIFFEIDS...)
+	scope := IdentityExceptionScopePrefix
+	if o := loadDesiredOverride(); o != nil {
+		prefixes = append([]string(nil), o.DenyPathPrefixes...)
+		ids = append([]string(nil), o.SpiffeIDs...)
+		if o.ScopePathPrefix != "" {
+			scope = o.ScopePathPrefix
+		}
+	}
 	issued := now.UTC()
 	expires := issued.Add(IdentityExceptionTTL)
 	window := ValidityWindowFromEnv()
 	return Bundle{
 		SchemaVersion:    SchemaVersion,
-		Version:          contentVersion(prefixes, ids, IdentityExceptionScopePrefix),
+		Version:          contentVersion(prefixes, ids, scope),
 		NotBefore:        issued.Format(time.RFC3339),
 		NotAfter:         issued.Add(window).Format(time.RFC3339),
 		DenyPathPrefixes: prefixes,
 		IdentityAllowExceptions: &IdentityAllowExceptions{
-			ScopePathPrefix: IdentityExceptionScopePrefix,
+			ScopePathPrefix: scope,
 			SpiffeIDs:       ids,
 			IssuedAt:        issued.Format(time.RFC3339),
 			ExpiresAt:       expires.Format(time.RFC3339),

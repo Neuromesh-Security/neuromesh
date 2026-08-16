@@ -72,6 +72,14 @@ spec:
             # boot without a readable signing key (never serves unsigned).
             - name: NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH
               value: /etc/neuromesh/policy-bundle-signing/signing.pem
+            # Issue #137 PR-1 DesiredPolicy watch — KEEP UNSET until Rego PR-2.
+            # Setting NEUROMESH_DESIRED_POLICY_ENABLE=true without PR-2 creates
+            # dynamic-bundle + static-Rego drift (forbidden ship rule).
+            # Optional manifests: neuromesh-desired-policy.yaml (RBAC + example CM).
+            # - name: NEUROMESH_DESIRED_POLICY_ENABLE
+            #   value: "true"
+            # - name: NEUROMESH_DESIRED_POLICY_CONFIGMAP
+            #   value: neuromesh-desired-policy
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
