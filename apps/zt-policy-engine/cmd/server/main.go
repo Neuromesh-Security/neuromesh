@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"neuromesh/zt-policy-engine/internal/desiredpolicy"
 	"neuromesh/zt-policy-engine/internal/evaluator"
 	"neuromesh/zt-policy-engine/internal/identity"
 	"neuromesh/zt-policy-engine/internal/middleware"
@@ -80,6 +81,15 @@ func main() {
 	}
 	mux.HandleFunc("GET /v1/policy-bundle", policybundle.Handler(bundleToken, bundleSigner))
 	query.RegisterRoutes(mux)
+
+	// Issue #137 PR-1: DesiredPolicy ConfigMap watch is dual-gated and OFF by
+	// default. Production must NOT set NEUROMESH_DESIRED_POLICY_ENABLE until
+	// Rego PR-2 lands (ship rule: no dynamic bundle + static Rego).
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	defer cancelWatch()
+	if err := desiredpolicy.StartWatchFromEnv(watchCtx); err != nil {
+		log.Fatalf("desired-policy watch misconfigured: %v", err)
+	}
 
 	port, err := parseListenPort(os.Getenv("ZT_POLICY_ENGINE_PORT"))
 	if err != nil {
