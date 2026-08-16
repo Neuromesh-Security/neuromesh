@@ -116,7 +116,7 @@ The following limitations are **known and documented** — not bugs filed under 
 
 ### LSM enforcement scope
 
-Blocking applies to path prefixes `/tmp/`, `/dev/shm/`, `/var/tmp/` only. Root attackers with `CAP_BPF` can detach agent programs — no open-source tamper-evident watchdog in this release.
+Blocking applies to path prefixes `/tmp/`, `/dev/shm/`, `/var/tmp/` only. Root/`CAP_BPF` attackers can still detach or replace agent programs (threat-model E-07); that is the existing §7 **Agent tampering by root** residual, not a fresh gap. Open-source core already ships **partial** tamper-evidence via PR [#74](https://github.com/Neuromesh-Security/neuromesh/pull/74)/[#76](https://github.com/Neuromesh-Security/neuromesh/pull/76) (periodic integrity monitor: pin removal, agent binary replacement, detection window ≤60s). It does not stop a determined root who also controls the alert path or re-signs with a stolen key — same residual language as threat-model §7.
 
 > **Correction (post-release, [#126](https://github.com/Neuromesh-Security/neuromesh/issues/126)):** this section originally read "Alternative exec surfaces (`execveat`, `fexecve`) are not monitored", which conflated enforcement with telemetry. `execveat`/`fexecve` were always **enforced** in v0.1.0-core, because they share the `bprm_check_security` LSM hook with `execve` (see threat-model §4.2). What was missing was **C telemetry visibility**; that attach landed after this release via [#126](https://github.com/Neuromesh-Security/neuromesh/issues/126).
 
