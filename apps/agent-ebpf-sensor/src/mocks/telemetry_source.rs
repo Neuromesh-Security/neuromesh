@@ -62,6 +62,7 @@ mod tests {
         SecurityTelemetryEvent {
             pid: 7,
             ppid: 1,
+            ppid_unresolved: false,
             uid: 1000,
             euid: 1000,
             comm: [0u8; MAX_COMM_LEN],

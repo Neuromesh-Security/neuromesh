@@ -20,6 +20,7 @@ pub fn telemetry_event(
     SecurityTelemetryEvent {
         pid,
         ppid,
+        ppid_unresolved: false,
         uid,
         euid: uid,
         comm: comm_buf,

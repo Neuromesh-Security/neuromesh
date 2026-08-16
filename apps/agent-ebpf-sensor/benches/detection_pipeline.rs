@@ -19,6 +19,7 @@ fn telemetry_event(pid: u32, ppid: u32, path: &str, comm: &str) -> SecurityTelem
     SecurityTelemetryEvent {
         pid,
         ppid,
+        ppid_unresolved: false,
         uid: 1000,
         euid: 1000,
         comm: comm_buf,
