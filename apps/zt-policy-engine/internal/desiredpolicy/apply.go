@@ -50,7 +50,10 @@ func ApplyConfigMapJSON(raw []byte) error {
 		oldVersion = old.ContentVersion
 		oldPrefixes = old.DenyPathPrefixes
 	}
-	ApplyValidated(snap)
+	if err := ApplyValidated(snap); err != nil {
+		AuditRejected(rv, err.Error())
+		return err
+	}
 	AuditAccepted(rv, oldVersion, snap.ContentVersion, old, &snap)
 	// Loud signal only when the override flag was exercised to drop a floor.
 	if snap.AllowFloorPrefixRemoval {

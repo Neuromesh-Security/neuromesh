@@ -41,10 +41,12 @@ type evaluateResponse struct {
 func main() {
 	ctx := context.Background()
 
-	opa, err := evaluator.NewOPAEvaluator(ctx, evaluator.DefaultExecutionPolicy)
+	initialRego := desiredpolicy.RegoDataFromActive()
+	opa, err := evaluator.NewOPAEvaluator(ctx, evaluator.DefaultExecutionPolicy, initialRego.StoreDocument())
 	if err != nil {
 		log.Fatalf("failed to initialize OPA evaluator: %v", err)
 	}
+	desiredpolicy.SetRegoReloader(&opaRegoReloader{opa: opa})
 
 	spiffeCfg, err := identity.ConfigFromEnv()
 	if err != nil {
@@ -84,7 +86,7 @@ func main() {
 
 	// Issue #137 PR-1: DesiredPolicy ConfigMap watch is dual-gated and OFF by
 	// default. Production must NOT set NEUROMESH_DESIRED_POLICY_ENABLE until
-	// Rego PR-2 lands (ship rule: no dynamic bundle + static Rego).
+	// operators deliberately enable dynamic policy (PR-2 Rego coupling is wired).
 	watchCtx, cancelWatch := context.WithCancel(ctx)
 	defer cancelWatch()
 	if err := desiredpolicy.StartWatchFromEnv(watchCtx); err != nil {
@@ -145,6 +147,15 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	if _, err := w.Write([]byte(`{"status":"ok","service":"zt-policy-engine"}`)); err != nil {
 		log.Printf("health response write failed: %v", err)
 	}
+}
+
+// opaRegoReloader adapts OPAEvaluator to desiredpolicy.RegoReloader (Issue #137 PR-2).
+type opaRegoReloader struct {
+	opa *evaluator.OPAEvaluator
+}
+
+func (r *opaRegoReloader) Reload(ctx context.Context, data desiredpolicy.RegoData) error {
+	return r.opa.Reload(ctx, data.StoreDocument())
 }
 
 func evaluateHandler(opa *evaluator.OPAEvaluator, spiffe *identity.SPIFFEValidator) http.HandlerFunc {
