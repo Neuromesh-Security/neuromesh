@@ -60,28 +60,14 @@ pub struct EnvCaptureMeta {
 /// True when `name` looks like a credential identifier (CI must reject these
 /// on [`ENV_VALUE_ALLOWLIST`]).
 pub fn env_name_has_forbidden_suffix(name: &str) -> bool {
-    let upper = name.as_bytes();
-    for suf in ENV_FORBIDDEN_NAME_SUFFIXES {
-        let sb = suf.as_bytes();
-        if upper.len() >= sb.len() && eq_ignore_ascii_case(&upper[upper.len() - sb.len()..], sb) {
-            return true;
-        }
-    }
-    false
-}
-
-fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .all(|(x, y)| x.to_ascii_uppercase() == y.to_ascii_uppercase())
+    ENV_FORBIDDEN_NAME_SUFFIXES.iter().any(|suf| {
+        name.len() >= suf.len() && name[name.len() - suf.len()..].eq_ignore_ascii_case(suf)
+    })
 }
 
 /// True when `NAME` (no `=`) is on the compile-time value allowlist.
 pub fn env_name_is_allowlisted(name: &str) -> bool {
-    ENV_VALUE_ALLOWLIST.iter().any(|n| *n == name)
+    ENV_VALUE_ALLOWLIST.contains(&name)
 }
 
 /// `NAME=VALUE` (or truncated) is allowlisted iff the name before `=` matches.
@@ -261,7 +247,7 @@ mod tests {
         ];
         for (entry, want) in cases {
             let mut slot = [0u8; MAX_ENV_STR_LEN];
-            let n = entry.as_bytes().len().min(MAX_ENV_STR_LEN);
+            let n = entry.len().min(MAX_ENV_STR_LEN);
             slot[..n].copy_from_slice(&entry.as_bytes()[..n]);
             let got = redact_env_slot(&mut slot);
             assert_eq!(got, want, "{entry}");

@@ -391,25 +391,48 @@ static __always_inline void capture_argv(struct exec_event_t *event,
 	}
 }
 
+/* Inlined byte-compare — `__builtin_memcmp` becomes an extern `memcmp` once
+ * capture_envp is a bounded loop (not fully unrolled), which BPF cannot resolve. */
+static __always_inline int nm_prefix_eq(const char *s, const char *p, const int n)
+{
+	int i;
+
+#pragma clang loop unroll(full)
+	for (i = 0; i < n; i++) {
+		if (s[i] != p[i])
+			return 0;
+	}
+	return 1;
+}
+
+static __always_inline void nm_copy32(char *dst, const char *src)
+{
+	int i;
+
+#pragma clang loop unroll(full)
+	for (i = 0; i < (int)MAX_ENV_STR_LEN; i++)
+		dst[i] = src[i];
+}
+
 static __always_inline __u16 env_allowlist_bit(const char *s)
 {
-	if (__builtin_memcmp(s, "LD_PRELOAD=", 11) == 0)
+	if (nm_prefix_eq(s, "LD_PRELOAD=", 11))
 		return 1U << 0;
-	if (__builtin_memcmp(s, "LD_AUDIT=", 9) == 0)
+	if (nm_prefix_eq(s, "LD_AUDIT=", 9))
 		return 1U << 1;
-	if (__builtin_memcmp(s, "LD_LIBRARY_PATH=", 16) == 0)
+	if (nm_prefix_eq(s, "LD_LIBRARY_PATH=", 16))
 		return 1U << 2;
-	if (__builtin_memcmp(s, "PATH=", 5) == 0)
+	if (nm_prefix_eq(s, "PATH=", 5))
 		return 1U << 3;
-	if (__builtin_memcmp(s, "NODE_OPTIONS=", 13) == 0)
+	if (nm_prefix_eq(s, "NODE_OPTIONS=", 13))
 		return 1U << 4;
-	if (__builtin_memcmp(s, "PYTHONPATH=", 11) == 0)
+	if (nm_prefix_eq(s, "PYTHONPATH=", 11))
 		return 1U << 5;
-	if (__builtin_memcmp(s, "BASH_ENV=", 9) == 0)
+	if (nm_prefix_eq(s, "BASH_ENV=", 9))
 		return 1U << 6;
-	if (__builtin_memcmp(s, "PROMPT_COMMAND=", 15) == 0)
+	if (nm_prefix_eq(s, "PROMPT_COMMAND=", 15))
 		return 1U << 7;
-	if (__builtin_memcmp(s, "SSLKEYLOGFILE=", 14) == 0)
+	if (nm_prefix_eq(s, "SSLKEYLOGFILE=", 14))
 		return 1U << 8;
 	return 0;
 }
@@ -424,6 +447,13 @@ static __always_inline void capture_envp(struct exec_event_t *event,
 	 * (execve args[2] / execveat args[3]) — NOT mm_struct / BTF.
 	 * Only compile-time allowlisted NAME=VALUE strings are copied into
 	 * fixed 8×32 slots. All other names are omitted (not name-redacted).
+	 *
+	 * Verifier: argv can `#pragma unroll(full)` because dest is argv[i]
+	 * with i folded to a constant. Envp cannot — it scans MAX_ENV_SCAN (32)
+	 * pointers and packs hits into 8 slots, so a full unroll duplicates
+	 * the 8-way store + 9 memcmps 32 times and blows the complexity budget.
+	 * Keep the scan as a bounded loop (PATH_DENY-style); copy the already-
+	 * probed 32 B stack buffer into a constant slot (no second user walk).
 	 */
 	__u32 i;
 	__u32 hits = 0;
@@ -446,7 +476,7 @@ static __always_inline void capture_envp(struct exec_event_t *event,
 		return;
 	}
 
-#pragma clang loop unroll(full)
+#pragma clang loop unroll(disable)
 	for (i = 0; i < MAX_ENV_SCAN; i++) {
 		if (bpf_probe_read_user(&env_ptr, sizeof(env_ptr), &envp[i]) < 0) {
 			event->capture_status |= CAPTURE_ENV;
@@ -457,7 +487,6 @@ static __always_inline void capture_envp(struct exec_event_t *event,
 			break;
 
 		scanned++;
-		__builtin_memset(probe, 0, sizeof(probe));
 		ret = bpf_probe_read_user_str(probe, sizeof(probe), env_ptr);
 		if (ret <= 0) {
 			event->capture_status |= CAPTURE_ENV;
@@ -479,35 +508,35 @@ static __always_inline void capture_envp(struct exec_event_t *event,
 			}
 
 			/*
-			 * Destination slot must be a constant index (same verifier
-			 * constraint as argv — variable offsets into event->env fail).
+			 * Packed dest must be a literal index in each arm
+			 * (argv pattern). Do not memcpy(event->env[hits]) —
+			 * variable offset is rejected.
 			 */
-#define NM_STORE_ENV_SLOT(n)                                                       \
+#define NM_PACK_ENV_SLOT(n)                                                        \
 	if (hits == (n)) {                                                         \
-		ret = bpf_probe_read_user_str(event->env[(n)],                     \
-					      sizeof(event->env[(n)]), env_ptr);   \
-		if (ret <= 0) {                                                    \
-			event->capture_status |= CAPTURE_ENV;                      \
-			event->env_flags |= ENV_FLAG_PROBE_FAULT;                  \
-			continue;                                                  \
-		}                                                                  \
+		nm_copy32(event->env[(n)], probe);                                 \
 		if (ret >= (long)sizeof(event->env[(n)])) {                        \
 			event->env_trunc_mask |= (__u8)(1U << (n));                \
 			event->capture_status |= CAPTURE_ENV;                      \
 		}                                                                  \
-		seen |= bit;                                                       \
-		hits++;                                                            \
-		continue;                                                          \
-	}
-			NM_STORE_ENV_SLOT(0);
-			NM_STORE_ENV_SLOT(1);
-			NM_STORE_ENV_SLOT(2);
-			NM_STORE_ENV_SLOT(3);
-			NM_STORE_ENV_SLOT(4);
-			NM_STORE_ENV_SLOT(5);
-			NM_STORE_ENV_SLOT(6);
-			NM_STORE_ENV_SLOT(7);
-#undef NM_STORE_ENV_SLOT
+	} else
+			NM_PACK_ENV_SLOT(0)
+			NM_PACK_ENV_SLOT(1)
+			NM_PACK_ENV_SLOT(2)
+			NM_PACK_ENV_SLOT(3)
+			NM_PACK_ENV_SLOT(4)
+			NM_PACK_ENV_SLOT(5)
+			NM_PACK_ENV_SLOT(6)
+			{
+				nm_copy32(event->env[7], probe);
+				if (ret >= (long)sizeof(event->env[7])) {
+					event->env_trunc_mask |= (__u8)(1U << 7);
+					event->capture_status |= CAPTURE_ENV;
+				}
+			}
+#undef NM_PACK_ENV_SLOT
+			seen |= bit;
+			hits++;
 		}
 	}
 
