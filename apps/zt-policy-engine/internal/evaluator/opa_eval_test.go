@@ -3,12 +3,43 @@ package evaluator
 import (
 	"context"
 	"testing"
+
+	"neuromesh/zt-policy-engine/internal/policybundle"
 )
+
+func bootstrapStoreRoot() map[string]interface{} {
+	prefixes := make([]interface{}, len(policybundle.BootstrapDenyPathPrefixes))
+	for i, p := range policybundle.BootstrapDenyPathPrefixes {
+		prefixes[i] = p
+	}
+	ids := make([]interface{}, len(policybundle.BootstrapIdentityAllowSPIFFEIDS))
+	for i, id := range policybundle.BootstrapIdentityAllowSPIFFEIDS {
+		ids[i] = id
+	}
+	return map[string]interface{}{
+		"neuromesh": map[string]interface{}{
+			"desired": map[string]interface{}{
+				"deny_path_prefixes":              prefixes,
+				"spiffe_ids":                      ids,
+				"identity_exception_scope_prefix": policybundle.IdentityExceptionScopePrefix,
+			},
+		},
+	}
+}
+
+func storeRootWithExtraPrefix(extra string) map[string]interface{} {
+	root := bootstrapStoreRoot()
+	desired := root["neuromesh"].(map[string]interface{})["desired"].(map[string]interface{})
+	old := desired["deny_path_prefixes"].([]interface{})
+	prefixes := append(append([]interface{}(nil), old...), extra)
+	desired["deny_path_prefixes"] = prefixes
+	return root
+}
 
 func TestOPAEvaluator_AllowsBenignPath(t *testing.T) {
 	t.Parallel()
 
-	evaluator, err := NewOPAEvaluator(context.Background(), DefaultExecutionPolicy)
+	evaluator, err := NewOPAEvaluator(context.Background(), DefaultExecutionPolicy, bootstrapStoreRoot())
 	if err != nil {
 		t.Fatalf("NewOPAEvaluator: %v", err)
 	}
@@ -28,7 +59,7 @@ func TestOPAEvaluator_AllowsBenignPath(t *testing.T) {
 func TestOPAEvaluator_DeniesTmpWithoutWhitelist(t *testing.T) {
 	t.Parallel()
 
-	evaluator, err := NewOPAEvaluator(context.Background(), DefaultExecutionPolicy)
+	evaluator, err := NewOPAEvaluator(context.Background(), DefaultExecutionPolicy, bootstrapStoreRoot())
 	if err != nil {
 		t.Fatalf("NewOPAEvaluator: %v", err)
 	}
@@ -51,7 +82,7 @@ func TestOPAEvaluator_DeniesTmpWithoutWhitelist(t *testing.T) {
 func TestOPAEvaluator_AllowsTmpForWhitelistedIdentity(t *testing.T) {
 	t.Parallel()
 
-	evaluator, err := NewOPAEvaluator(context.Background(), DefaultExecutionPolicy)
+	evaluator, err := NewOPAEvaluator(context.Background(), DefaultExecutionPolicy, bootstrapStoreRoot())
 	if err != nil {
 		t.Fatalf("NewOPAEvaluator: %v", err)
 	}
@@ -71,7 +102,7 @@ func TestOPAEvaluator_AllowsTmpForWhitelistedIdentity(t *testing.T) {
 func TestOPAEvaluator_DeniesTmpForFlatFormIdentity(t *testing.T) {
 	t.Parallel()
 
-	evaluator, err := NewOPAEvaluator(context.Background(), DefaultExecutionPolicy)
+	evaluator, err := NewOPAEvaluator(context.Background(), DefaultExecutionPolicy, bootstrapStoreRoot())
 	if err != nil {
 		t.Fatalf("NewOPAEvaluator: %v", err)
 	}
@@ -96,7 +127,7 @@ func TestOPAEvaluator_DeniesTmpForFlatFormIdentity(t *testing.T) {
 func TestOPAEvaluator_HardDeniesDevShmAndVarTmpForAllIdentities(t *testing.T) {
 	t.Parallel()
 
-	evaluator, err := NewOPAEvaluator(context.Background(), DefaultExecutionPolicy)
+	evaluator, err := NewOPAEvaluator(context.Background(), DefaultExecutionPolicy, bootstrapStoreRoot())
 	if err != nil {
 		t.Fatalf("NewOPAEvaluator: %v", err)
 	}

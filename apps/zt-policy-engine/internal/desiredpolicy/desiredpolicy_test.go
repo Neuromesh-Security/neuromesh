@@ -111,7 +111,9 @@ func TestValidChangeReflectedInCurrentAt(t *testing.T) {
 		t.Fatalf("Validate: %v", err)
 	}
 	snap.ResourceVersion = "42"
-	ApplyValidated(snap)
+	if err := ApplyValidated(snap); err != nil {
+		t.Fatalf("ApplyValidated: %v", err)
+	}
 
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	b := policybundle.CurrentAt(now)
@@ -147,7 +149,9 @@ func TestInvalidApplyRetainsLastKnownGood(t *testing.T) {
 			SpiffeIDs:       []string{"spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor"},
 		},
 	})
-	ApplyValidated(good)
+	if err := ApplyValidated(good); err != nil {
+		t.Fatalf("ApplyValidated: %v", err)
+	}
 	before := policybundle.CurrentAt(time.Now().UTC()).Version
 
 	raw := mustCMJSON(t, "99", `{
