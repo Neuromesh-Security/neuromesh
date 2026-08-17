@@ -391,6 +391,140 @@ static __always_inline void capture_argv(struct exec_event_t *event,
 	}
 }
 
+static __always_inline __u16 env_allowlist_bit(const char *s)
+{
+	if (__builtin_memcmp(s, "LD_PRELOAD=", 11) == 0)
+		return 1U << 0;
+	if (__builtin_memcmp(s, "LD_AUDIT=", 9) == 0)
+		return 1U << 1;
+	if (__builtin_memcmp(s, "LD_LIBRARY_PATH=", 16) == 0)
+		return 1U << 2;
+	if (__builtin_memcmp(s, "PATH=", 5) == 0)
+		return 1U << 3;
+	if (__builtin_memcmp(s, "NODE_OPTIONS=", 13) == 0)
+		return 1U << 4;
+	if (__builtin_memcmp(s, "PYTHONPATH=", 11) == 0)
+		return 1U << 5;
+	if (__builtin_memcmp(s, "BASH_ENV=", 9) == 0)
+		return 1U << 6;
+	if (__builtin_memcmp(s, "PROMPT_COMMAND=", 15) == 0)
+		return 1U << 7;
+	if (__builtin_memcmp(s, "SSLKEYLOGFILE=", 14) == 0)
+		return 1U << 8;
+	return 0;
+}
+
+static __always_inline void capture_envp(struct exec_event_t *event,
+					 const char __user *const __user *envp)
+{
+	/*
+	 * Telemetry-only env capture at sys_enter_execve / execveat (Issue #140).
+	 *
+	 * Same mechanism as capture_argv: syscall envp pointer
+	 * (execve args[2] / execveat args[3]) — NOT mm_struct / BTF.
+	 * Only compile-time allowlisted NAME=VALUE strings are copied into
+	 * fixed 8×32 slots. All other names are omitted (not name-redacted).
+	 */
+	__u32 i;
+	__u32 hits = 0;
+	__u16 seen = 0;
+	__u32 scanned = 0;
+	const char __user *env_ptr = 0;
+	char probe[MAX_ENV_STR_LEN];
+	long ret;
+
+	__builtin_memset(event->env, 0, sizeof(event->env));
+	event->env_len = 0;
+	event->env_trunc_mask = 0;
+	event->env_flags = 0;
+	event->env_ptr_count = 0;
+	event->env_header_pad = 0;
+
+	if (!envp) {
+		event->capture_status |= CAPTURE_ENV;
+		event->env_flags |= ENV_FLAG_PROBE_FAULT;
+		return;
+	}
+
+#pragma clang loop unroll(full)
+	for (i = 0; i < MAX_ENV_SCAN; i++) {
+		if (bpf_probe_read_user(&env_ptr, sizeof(env_ptr), &envp[i]) < 0) {
+			event->capture_status |= CAPTURE_ENV;
+			event->env_flags |= ENV_FLAG_PROBE_FAULT;
+			break;
+		}
+		if (!env_ptr)
+			break;
+
+		scanned++;
+		__builtin_memset(probe, 0, sizeof(probe));
+		ret = bpf_probe_read_user_str(probe, sizeof(probe), env_ptr);
+		if (ret <= 0) {
+			event->capture_status |= CAPTURE_ENV;
+			event->env_flags |= ENV_FLAG_PROBE_FAULT;
+			continue;
+		}
+
+		{
+			__u16 bit = env_allowlist_bit(probe);
+
+			if (!bit)
+				continue;
+			if (seen & bit)
+				continue;
+			if (hits >= MAX_ENV_CAPTURE) {
+				event->env_flags |= ENV_FLAG_SLOTS_FULL;
+				event->capture_status |= CAPTURE_ENV;
+				continue;
+			}
+
+			/*
+			 * Destination slot must be a constant index (same verifier
+			 * constraint as argv — variable offsets into event->env fail).
+			 */
+#define NM_STORE_ENV_SLOT(n)                                                       \
+	if (hits == (n)) {                                                         \
+		ret = bpf_probe_read_user_str(event->env[(n)],                     \
+					      sizeof(event->env[(n)]), env_ptr);   \
+		if (ret <= 0) {                                                    \
+			event->capture_status |= CAPTURE_ENV;                      \
+			event->env_flags |= ENV_FLAG_PROBE_FAULT;                  \
+			continue;                                                  \
+		}                                                                  \
+		if (ret >= (long)sizeof(event->env[(n)])) {                        \
+			event->env_trunc_mask |= (__u8)(1U << (n));                \
+			event->capture_status |= CAPTURE_ENV;                      \
+		}                                                                  \
+		seen |= bit;                                                       \
+		hits++;                                                            \
+		continue;                                                          \
+	}
+			NM_STORE_ENV_SLOT(0);
+			NM_STORE_ENV_SLOT(1);
+			NM_STORE_ENV_SLOT(2);
+			NM_STORE_ENV_SLOT(3);
+			NM_STORE_ENV_SLOT(4);
+			NM_STORE_ENV_SLOT(5);
+			NM_STORE_ENV_SLOT(6);
+			NM_STORE_ENV_SLOT(7);
+#undef NM_STORE_ENV_SLOT
+		}
+	}
+
+	event->env_ptr_count = (__u16)scanned;
+	event->env_len = (__u16)hits;
+
+	if (scanned == MAX_ENV_SCAN && envp) {
+		const char __user *extra = 0;
+
+		if (bpf_probe_read_user(&extra, sizeof(extra), &envp[MAX_ENV_SCAN]) == 0 &&
+		    extra) {
+			event->env_flags |= ENV_FLAG_COUNT_TRUNCATED;
+			event->capture_status |= CAPTURE_ENV;
+		}
+	}
+}
+
 /*
  * Shared emit path for every traced exec syscall variant.
  *
@@ -400,6 +534,7 @@ static __always_inline void capture_argv(struct exec_event_t *event,
  */
 static __always_inline int emit_exec_event(const char __user *filename_ptr,
 					   const char __user *const __user *argv_ptr,
+					   const char __user *const __user *envp_ptr,
 					   __u8 syscall_flags)
 {
 	struct exec_event_t *event;
@@ -443,6 +578,7 @@ static __always_inline int emit_exec_event(const char __user *filename_ptr,
 	}
 
 	capture_argv(event, argv_ptr);
+	capture_envp(event, envp_ptr);
 
 	/* Atomic schema publish — written last so userspace rejects torn records. */
 	event->schema_version = EXEC_EVENT_SCHEMA_VERSION;
@@ -457,7 +593,8 @@ int nm_proc_events(void *ctx)
 	struct trace_event_raw_sys_enter *trace = ctx;
 
 	return emit_exec_event((const char __user *)trace->args[0],
-			       (const char __user *const __user *)trace->args[1], 0);
+			       (const char __user *const __user *)trace->args[1],
+			       (const char __user *const __user *)trace->args[2], 0);
 }
 
 /*
@@ -465,9 +602,9 @@ int nm_proc_events(void *ctx)
  *          char *const envp[], int flags)
  *
  * Note the argument shift versus execve: dfd occupies args[0], so pathname is
- * args[1] and argv is args[2]. Also covers fexecve(3), which glibc implements
- * as execveat(fd, "", argv, envp, AT_EMPTY_PATH) — there is no separate
- * fexecve syscall to attach.
+ * args[1], argv is args[2], envp is args[3]. Also covers fexecve(3), which
+ * glibc implements as execveat(fd, "", argv, envp, AT_EMPTY_PATH) — there is
+ * no separate fexecve syscall to attach.
  */
 SEC("tracepoint/syscalls/sys_enter_execveat")
 int nm_execveat(void *ctx)
@@ -476,5 +613,6 @@ int nm_execveat(void *ctx)
 
 	return emit_exec_event((const char __user *)trace->args[1],
 			       (const char __user *const __user *)trace->args[2],
+			       (const char __user *const __user *)trace->args[3],
 			       EXEC_FLAG_SYSCALL_EXECVEAT);
 }

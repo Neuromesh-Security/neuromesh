@@ -1,13 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Shared ExecEvent v2 layout — must match neuromesh_common::ExecEvent byte-for-byte. */
+/* Shared ExecEvent v3 layout — must match neuromesh_common::ExecEvent byte-for-byte. */
 
 #pragma once
 
 #include "bpf_helpers.h"
 
-#define EXEC_EVENT_SCHEMA_VERSION 2U
+#define EXEC_EVENT_SCHEMA_VERSION 3U
 #define EXEC_EVENT_TYPE_EXECVE    1U
-#define EXEC_EVENT_STRUCT_SIZE    668U
+#define EXEC_EVENT_STRUCT_SIZE    932U
 
 /*
  * Header `flags` bits — syscall-variant discriminator (Issue #126).
@@ -15,8 +15,7 @@
  * `event_type` stays EXEC_EVENT_TYPE_EXECVE for every exec record: userspace
  * validation (`neuromesh_common::ExecEvent::is_valid`) hard-requires that value,
  * so introducing a second event_type would make execveat records fail decode and
- * be dropped silently. The variant is therefore a flag, which also keeps
- * struct_size at 668 and leaves every field offset untouched.
+ * be dropped silently. The variant is therefore a flag.
  */
 #define EXEC_FLAG_SYSCALL_EXECVEAT (1U << 0)
 /*
@@ -49,6 +48,7 @@
 #define CAPTURE_NAMESPACE_ID (1U << 10)
 #define CAPTURE_TIMESTAMP    (1U << 11)
 #define CAPTURE_ARGV         (1U << 12)
+#define CAPTURE_ENV          (1U << 13)
 
 /*
  * Issue #46: verifier-safe argv capture at sys_enter_execve.
@@ -64,6 +64,19 @@
 /* argv_flags bits (Issue #46 truncation / fault signaling). */
 #define ARGV_FLAG_ARGC_TRUNCATED (1U << 0)
 #define ARGV_FLAG_PROBE_FAULT    (1U << 1)
+
+/*
+ * Issue #140: allowlisted env capture — same 8×32 slots as argv.
+ * ENV_ALLOWLIST names (compile-time, must match neuromesh_common::ENV_VALUE_ALLOWLIST):
+ * LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH PATH NODE_OPTIONS PYTHONPATH BASH_ENV PROMPT_COMMAND SSLKEYLOGFILE
+ */
+#define MAX_ENV_CAPTURE  8U
+#define MAX_ENV_STR_LEN  32U
+#define MAX_ENV_SCAN     32U
+
+#define ENV_FLAG_COUNT_TRUNCATED (1U << 0)
+#define ENV_FLAG_PROBE_FAULT     (1U << 1)
+#define ENV_FLAG_SLOTS_FULL      (1U << 2)
 
 #define UNKNOWN_LITERAL "UNKNOWN"
 
@@ -91,6 +104,13 @@ struct exec_event_t {
 	/* ARGV_FLAG_* — argc overflow / probe fault beyond per-slot mask. */
 	__u8 argv_flags;
 	char argv[MAX_ARGS_CAPTURE][MAX_ARG_STR_LEN];
+
+	__u16 env_len;
+	__u8 env_trunc_mask;
+	__u8 env_flags;
+	__u16 env_ptr_count;
+	__u16 env_header_pad;
+	char env[MAX_ENV_CAPTURE][MAX_ENV_STR_LEN];
 
 	char container_id[EXEC_CONTAINER_ID_LEN];
 	__u8 align_pad[4];

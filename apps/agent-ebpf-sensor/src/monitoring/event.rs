@@ -104,8 +104,7 @@ mod tests {
     use super::{drain_events, EventStream, MockEventStream, ProcessEventHandler};
     use core::mem::{offset_of, size_of};
     use neuromesh_common::{
-        ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
-        MAX_ARGV_LEN, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
+        ExecEvent, EXEC_EVENT_STRUCT_SIZE, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
     };
 
     fn bytes_with_prefix<const N: usize>(prefix: &[u8]) -> [u8; N] {
@@ -117,12 +116,6 @@ mod tests {
 
     fn sample_event() -> ExecEvent {
         ExecEvent {
-            schema_version: EXEC_EVENT_SCHEMA_VERSION,
-            event_type: EXEC_EVENT_TYPE_EXECVE,
-            flags: 0,
-            struct_size: EXEC_EVENT_STRUCT_SIZE,
-            header_reserved: 0,
-            header_pad: [0; 8],
             pid: 4242,
             ppid: 1,
             tgid: 4242,
@@ -132,17 +125,10 @@ mod tests {
             comm: bytes_with_prefix::<MAX_COMM_LEN>(b"ls"),
             filename: bytes_with_prefix::<MAX_FILENAME_LEN>(b"/bin/ls"),
             args_count: 1,
-            argv_len: 0,
-            argv_trunc_mask: 0,
-            argv_flags: 0,
-            argv: [0; MAX_ARGV_LEN],
             container_id: bytes_with_prefix::<MAX_CONTAINER_ID_LEN>(b"host"),
-            align_pad: [0; 4],
             namespace_id: 1,
             timestamp_ns: 1_234_567_890,
-            enforcement_action: 0,
-            capture_status: 0,
-            status_reserved: [0; 5],
+            ..ExecEvent::default()
         }
     }
 
@@ -152,8 +138,9 @@ mod tests {
         assert_eq!(offset_of!(ExecEvent, comm), 40);
         assert_eq!(offset_of!(ExecEvent, filename), 56);
         assert_eq!(offset_of!(ExecEvent, argv), 320);
-        assert_eq!(offset_of!(ExecEvent, namespace_id), 644);
-        assert_eq!(offset_of!(ExecEvent, timestamp_ns), 652);
+        assert_eq!(offset_of!(ExecEvent, env), 584);
+        assert_eq!(offset_of!(ExecEvent, namespace_id), 908);
+        assert_eq!(offset_of!(ExecEvent, timestamp_ns), 916);
     }
 
     #[test]

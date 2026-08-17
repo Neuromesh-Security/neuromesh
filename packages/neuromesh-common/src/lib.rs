@@ -1,5 +1,8 @@
 #![no_std]
 
+mod env_capture;
+pub use env_capture::*;
+
 /// Maximum buffer size for intercepted file paths in kernel telemetry events.
 pub const MAX_FILENAME_LEN: usize = 256;
 
@@ -16,10 +19,19 @@ pub const MAX_ARGS_CAPTURE: usize = 8;
 pub const MAX_ARG_STR_LEN: usize = 32;
 pub const MAX_ARGV_LEN: usize = MAX_ARGS_CAPTURE * MAX_ARG_STR_LEN;
 
+/// Allowlisted env slots (Issue #140) — same verifier-safe 8×32 layout as argv.
+/// Non-allowlisted names are omitted entirely (not name-only redacted).
+pub const MAX_ENV_CAPTURE: usize = 8;
+pub const MAX_ENV_STR_LEN: usize = 32;
+pub const MAX_ENV_LEN: usize = MAX_ENV_CAPTURE * MAX_ENV_STR_LEN;
+/// Max envp pointers visited (full env blocks are not copied).
+pub const MAX_ENV_SCAN: usize = 32;
+
 /// Schema revision for `ExecEvent` ring-buffer records.
 ///
 /// v2 adds capped argv payload (`argv` / `argv_len`) — see Issue #46.
-pub const EXEC_EVENT_SCHEMA_VERSION: u16 = 2;
+/// v3 adds capped allowlist env payload (`env` / `env_len`) — see Issue #140.
+pub const EXEC_EVENT_SCHEMA_VERSION: u16 = 3;
 
 /// Event type discriminator — `execve` syscall visibility.
 ///
@@ -43,8 +55,9 @@ pub const EXEC_FLAG_SYSCALL_EXECVEAT: u8 = 1 << 0;
 /// Distinguishes an fd-named exec from a probe fault.
 pub const EXEC_FLAG_PATH_FROM_FD: u8 = 1 << 1;
 
-/// Serialized size of `ExecEvent` v2 (fixed for verifier + userspace bounds checks).
-pub const EXEC_EVENT_STRUCT_SIZE: u16 = 668;
+/// Serialized size of `ExecEvent` v3 (fixed for verifier + userspace bounds checks).
+/// v2 was 668; v3 adds 264 B of env metadata + 8×32 slots (Issue #140).
+pub const EXEC_EVENT_STRUCT_SIZE: u16 = 932;
 
 /// Maximum argv pointers probed / slots filled when capturing arguments.
 pub const MAX_ARGS_PROBE: u32 = MAX_ARGS_CAPTURE as u32;
@@ -73,6 +86,8 @@ pub const CAPTURE_NAMESPACE_ID: u16 = 1 << 10;
 pub const CAPTURE_TIMESTAMP: u16 = 1 << 11;
 /// Argv string copy truncated, faulted, or unavailable (Issue #46).
 pub const CAPTURE_ARGV: u16 = 1 << 12;
+/// Env allowlist copy truncated, scan-capped, faulted, or slots full (Issue #140).
+pub const CAPTURE_ENV: u16 = 1 << 13;
 
 /// Sentinel written by the kernel when a string field cannot be captured.
 pub const UNKNOWN_SENTINEL: &[u8] = b"UNKNOWN";
@@ -81,6 +96,13 @@ pub const UNKNOWN_SENTINEL: &[u8] = b"UNKNOWN";
 pub const ARGV_FLAG_ARGC_TRUNCATED: u8 = 1 << 0;
 /// Argv probe fault (null argv / read error) distinct from length truncation.
 pub const ARGV_FLAG_PROBE_FAULT: u8 = 1 << 1;
+
+/// Env scan overflow: more than [`MAX_ENV_SCAN`] pointers were present.
+pub const ENV_FLAG_COUNT_TRUNCATED: u8 = 1 << 0;
+/// Env probe fault (null envp / read error).
+pub const ENV_FLAG_PROBE_FAULT: u8 = 1 << 1;
+/// More unique allowlisted names than [`MAX_ENV_CAPTURE`] slots.
+pub const ENV_FLAG_SLOTS_FULL: u8 = 1 << 2;
 
 /// Enterprise exec visibility record — shared between C BPF and user-space consumers.
 ///
@@ -113,6 +135,17 @@ pub struct ExecEvent {
     /// Argv storage: [`MAX_ARGS_CAPTURE`] × [`MAX_ARG_STR_LEN`] fixed slots
     /// (flat `[u8; MAX_ARGV_LEN]`).
     pub argv: [u8; MAX_ARGV_LEN],
+    /// Number of filled allowlisted env slots (0..=[`MAX_ENV_CAPTURE`]).
+    pub env_len: u16,
+    /// Bit `i` set when env slot `i` filled the 32-byte buffer.
+    pub env_trunc_mask: u8,
+    /// [`ENV_FLAG_COUNT_TRUNCATED`] / [`ENV_FLAG_PROBE_FAULT`] / [`ENV_FLAG_SLOTS_FULL`].
+    pub env_flags: u8,
+    /// Env pointers visited (capped at [`MAX_ENV_SCAN`]).
+    pub env_ptr_count: u16,
+    pub env_header_pad: u16,
+    /// Allowlisted `NAME=VALUE` slots (flat `[u8; MAX_ENV_LEN]`).
+    pub env: [u8; MAX_ENV_LEN],
     pub container_id: [u8; MAX_CONTAINER_ID_LEN],
     pub align_pad: [u8; 4],
     pub namespace_id: u64,
@@ -174,6 +207,73 @@ pub struct SecurityTelemetryEvent {
     pub argv_truncated: bool,
     pub argv_trunc_mask: u8,
     pub argv: [u8; MAX_ARGV_LEN],
+    pub env_len: u16,
+    pub env_truncated: bool,
+    pub env_trunc_mask: u8,
+    pub env_redacted: bool,
+    pub env: [u8; MAX_ENV_LEN],
+}
+
+impl Default for ExecEvent {
+    fn default() -> Self {
+        Self {
+            schema_version: EXEC_EVENT_SCHEMA_VERSION,
+            event_type: EXEC_EVENT_TYPE_EXECVE,
+            flags: 0,
+            struct_size: EXEC_EVENT_STRUCT_SIZE,
+            header_reserved: 0,
+            header_pad: [0; 8],
+            pid: 0,
+            ppid: 0,
+            tgid: 0,
+            uid: 0,
+            euid: 0,
+            gid: 0,
+            comm: [0; MAX_COMM_LEN],
+            filename: [0; MAX_FILENAME_LEN],
+            args_count: 0,
+            argv_len: 0,
+            argv_trunc_mask: 0,
+            argv_flags: 0,
+            argv: [0; MAX_ARGV_LEN],
+            env_len: 0,
+            env_trunc_mask: 0,
+            env_flags: 0,
+            env_ptr_count: 0,
+            env_header_pad: 0,
+            env: [0; MAX_ENV_LEN],
+            container_id: [0; MAX_CONTAINER_ID_LEN],
+            align_pad: [0; 4],
+            namespace_id: 0,
+            timestamp_ns: 0,
+            enforcement_action: ENFORCEMENT_ALLOWED,
+            capture_status: 0,
+            status_reserved: [0; 5],
+        }
+    }
+}
+
+impl Default for SecurityTelemetryEvent {
+    fn default() -> Self {
+        Self {
+            pid: 0,
+            ppid: 0,
+            ppid_unresolved: false,
+            uid: 0,
+            euid: 0,
+            comm: [0; MAX_COMM_LEN],
+            filename: [0; MAX_FILENAME_LEN],
+            argv_len: 0,
+            argv_truncated: false,
+            argv_trunc_mask: 0,
+            argv: [0; MAX_ARGV_LEN],
+            env_len: 0,
+            env_truncated: false,
+            env_trunc_mask: 0,
+            env_redacted: false,
+            env: [0; MAX_ENV_LEN],
+        }
+    }
 }
 
 /// Kernel/user-space health counters exposed via the `TELEMETRY_STATS` BPF array map.
@@ -438,5 +538,20 @@ mod path_deny_key_tests {
         let p33 = b"/opt/neuromesh/staging/binXXXXXXX";
         assert_eq!(p33.len(), 33);
         assert!(PathDenyEntry::from_prefix(p33).is_none());
+    }
+}
+
+#[cfg(test)]
+mod exec_event_v3_layout {
+    use super::*;
+    use core::mem::size_of;
+
+    #[test]
+    fn schema_v3_size_matches_header_constant() {
+        assert_eq!(size_of::<ExecEvent>(), EXEC_EVENT_STRUCT_SIZE as usize);
+        assert_eq!(EXEC_EVENT_STRUCT_SIZE, 932);
+        assert_eq!(EXEC_EVENT_SCHEMA_VERSION, 3);
+        assert_eq!(MAX_ENV_LEN, 256);
+        assert_eq!(MAX_ENV_SCAN, 32);
     }
 }

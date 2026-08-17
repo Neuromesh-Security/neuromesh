@@ -4,10 +4,7 @@ use agent_ebpf_sensor::monitoring::event::{ProcessEvent, ProcessEventHandler};
 use agent_ebpf_sensor::monitoring::network_event::{NetworkEvent, NetworkEventHandler};
 use agent_ebpf_sensor::monitoring::ringbuf_decode::{decode_exec_event, decode_network_event};
 use core::mem::size_of;
-use neuromesh_common::{
-    ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
-    MAX_ARGV_LEN, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
-};
+use neuromesh_common::ExecEvent;
 
 const DEFAULT_ITERATIONS: usize = 50_000;
 
@@ -29,32 +26,14 @@ fn random_bytes(state: &mut u64, max_len: usize) -> Vec<u8> {
 
 fn sample_valid_event() -> ProcessEvent {
     ExecEvent {
-        schema_version: EXEC_EVENT_SCHEMA_VERSION,
-        event_type: EXEC_EVENT_TYPE_EXECVE,
-        flags: 0,
-        struct_size: EXEC_EVENT_STRUCT_SIZE,
-        header_reserved: 0,
-        header_pad: [0; 8],
         pid: 4242,
         ppid: 1,
         tgid: 4242,
         uid: 1000,
         euid: 1000,
         gid: 1000,
-        comm: [0; MAX_COMM_LEN],
-        filename: [0; MAX_FILENAME_LEN],
-        args_count: 0,
-        argv_len: 0,
-        argv_trunc_mask: 0,
-        argv_flags: 0,
-        argv: [0; MAX_ARGV_LEN],
-        container_id: [0; MAX_CONTAINER_ID_LEN],
-        align_pad: [0; 4],
-        namespace_id: 0,
         timestamp_ns: 99,
-        enforcement_action: 0,
-        capture_status: 0,
-        status_reserved: [0; 5],
+        ..ExecEvent::default()
     }
 }
 

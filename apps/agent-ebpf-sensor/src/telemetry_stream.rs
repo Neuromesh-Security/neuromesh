@@ -325,6 +325,9 @@ mod tests {
                 argv: String::new(),
                 argv_truncated: false,
                 argv_trunc_mask: 0,
+                env: String::new(),
+                env_truncated: false,
+                env_redacted: false,
                 matched_pattern: "/tmp/".to_string(),
             },
         )
