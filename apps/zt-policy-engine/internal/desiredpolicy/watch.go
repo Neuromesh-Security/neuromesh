@@ -140,10 +140,12 @@ func k8sHTTPClient() (baseURL, token string, client *http.Client, err error) {
 	}, nil
 }
 
-// Run GETs the ConfigMap then watches it until ctx is cancelled.
+// Run reconciles from the ConfigMap's current state (GET + ApplyConfigMapJSON)
+// then watches until ctx is cancelled. Reconnects repeat the GET so a restart
+// re-applies the live object, not only future MODIFIED events.
 func (w *Watcher) Run(ctx context.Context) {
 	log.Printf(
-		"desired_policy_watch starting configmap=%s/%s (Issue #137 PR-1; Rego still static until PR-2)",
+		"desired_policy_watch starting configmap=%s/%s (Issue #137; GET+apply current object then watch)",
 		w.namespace, w.name,
 	)
 	backoff := time.Second
@@ -175,6 +177,7 @@ func (w *Watcher) objectURL() string {
 	)
 }
 
+// fetchAndApply GETs the live ConfigMap object and applies it (startup / reconnect reconcile).
 func (w *Watcher) fetchAndApply(ctx context.Context) (resourceVersion string, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, w.objectURL(), nil)
 	if err != nil {

@@ -30,6 +30,9 @@ func Active() *Snapshot {
 
 // ApplyValidated stores snap as LKG and publishes it into policybundle and Rego.
 // Rego reload runs first; on failure LKG is unchanged on both planes.
+// Crash between a successful Reload and SetDesiredOverride is healed on the
+// next process start: Watcher.Run always GETs the current ConfigMap and
+// re-applies it before watching for later events (not wait-for-next-change).
 func ApplyValidated(snap Snapshot) error {
 	applyMu.Lock()
 	defer applyMu.Unlock()
