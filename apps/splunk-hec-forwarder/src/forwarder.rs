@@ -235,20 +235,26 @@ mod tests {
         let (addr, hits) = spawn_mock_hec(axum::http::StatusCode::OK).await;
         let url = format!("http://{addr}/services/collector/event");
         let metrics = HecMetrics::new().expect("metrics");
-        let forwarder = SplunkForwarder::spawn(
-            &test_config(url, "secret-token".into(), 8),
-            metrics,
-        );
+        let forwarder =
+            SplunkForwarder::spawn(&test_config(url, "secret-token".into(), 8), metrics);
 
         forwarder.handle().try_enqueue(sample_envelope("e1"));
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         assert_eq!(
-            forwarder.handle().stats().enqueued.load(AtomicOrdering::Relaxed),
+            forwarder
+                .handle()
+                .stats()
+                .enqueued
+                .load(AtomicOrdering::Relaxed),
             1
         );
         assert_eq!(
-            forwarder.handle().stats().forwarded.load(AtomicOrdering::Relaxed),
+            forwarder
+                .handle()
+                .stats()
+                .forwarded
+                .load(AtomicOrdering::Relaxed),
             1
         );
         assert!(*hits.lock().expect("lock") >= 1);
@@ -259,21 +265,28 @@ mod tests {
         let (addr, _hits) = spawn_mock_hec(axum::http::StatusCode::SERVICE_UNAVAILABLE).await;
         let url = format!("http://{addr}/services/collector/event");
         let metrics = HecMetrics::new().expect("metrics");
-        let forwarder = SplunkForwarder::spawn(
-            &test_config(url, "secret-token".into(), 1),
-            metrics,
-        );
+        let forwarder =
+            SplunkForwarder::spawn(&test_config(url, "secret-token".into(), 1), metrics);
 
         forwarder.handle().try_enqueue(sample_envelope("e1"));
         forwarder.handle().try_enqueue(sample_envelope("e2"));
         forwarder.handle().try_enqueue(sample_envelope("e3"));
 
         assert_eq!(
-            forwarder.handle().stats().enqueued.load(AtomicOrdering::Relaxed),
+            forwarder
+                .handle()
+                .stats()
+                .enqueued
+                .load(AtomicOrdering::Relaxed),
             1
         );
         assert!(
-            forwarder.handle().stats().dropped.load(AtomicOrdering::Relaxed) >= 2,
+            forwarder
+                .handle()
+                .stats()
+                .dropped
+                .load(AtomicOrdering::Relaxed)
+                >= 2,
             "expected queue_full drops under backpressure"
         );
     }

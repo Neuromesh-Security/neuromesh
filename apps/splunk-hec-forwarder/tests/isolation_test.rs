@@ -57,6 +57,13 @@ fn forwarder_handle_runs_on_separate_async_task_from_callers() {
             metrics_port: 9091,
         };
         let forwarder = SplunkForwarder::spawn(&cfg, Arc::clone(&metrics));
-        assert!(forwarder.handle().stats().enqueued.load(std::sync::atomic::Ordering::Relaxed) == 0);
+        assert!(
+            forwarder
+                .handle()
+                .stats()
+                .enqueued
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 0
+        );
     });
 }

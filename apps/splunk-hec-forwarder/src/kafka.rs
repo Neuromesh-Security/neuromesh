@@ -1,7 +1,7 @@
 //! Kafka consumer wiring and Prometheus /metrics server.
 
 use anyhow::{Context, Result};
-use rskafka::client::partition::{UnknownTopicHandling};
+use rskafka::client::partition::UnknownTopicHandling;
 use rskafka::client::ClientBuilder;
 use splunk_hec_forwarder::config::ForwarderConfig;
 use splunk_hec_forwarder::envelope::TelemetryEnvelope;
@@ -21,11 +21,7 @@ pub async fn run_kafka_consumer(
         .context("kafka client")?;
 
     let partition_client = client
-        .partition_client(
-            config.kafka_topic.clone(),
-            0,
-            UnknownTopicHandling::Retry,
-        )
+        .partition_client(config.kafka_topic.clone(), 0, UnknownTopicHandling::Retry)
         .await
         .context("kafka partition client")?;
 

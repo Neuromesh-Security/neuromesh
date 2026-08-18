@@ -24,10 +24,8 @@ async fn main() -> Result<()> {
 
     let metrics = HecMetrics::new()?;
     let metrics_for_server = Arc::clone(&metrics);
-    let forwarder = splunk_hec_forwarder::forwarder::SplunkForwarder::spawn(
-        &config,
-        Arc::clone(&metrics),
-    );
+    let forwarder =
+        splunk_hec_forwarder::forwarder::SplunkForwarder::spawn(&config, Arc::clone(&metrics));
 
     let metrics_port = config.metrics_port;
     tokio::spawn(async move {
