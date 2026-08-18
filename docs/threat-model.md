@@ -2,7 +2,7 @@
 
 **Status:** Living document  
 **Release scope:** `v0.1.0-core`  
-**Last updated:** 2026-08-17  
+**Last updated:** 2026-08-18  
 **Component:** `apps/agent-ebpf-sensor` — kernel hooks, telemetry contracts, user-space detection pipeline
 
 ---
@@ -18,7 +18,6 @@
 
 ### Out of scope (v0.1.0-core)
 
-- Rust passive tracepoint `neuromesh_exec_hook` (built, not attached)
 - Wasm policy evaluation on hot path (`wasm_policy.rs` scaffold only)
 - Slow Path GNN inference (`ai-threat-detector`)
 - Full argv/env dump from execve tracepoint context (capped argv: Issue #46; capped **allowlist** env values: Issue #140; full env dump remains out of scope)
@@ -65,7 +64,7 @@
 |-----------|-----|-----|-------------------|
 | Process Injection | [T1055](https://attack.mitre.org/techniques/T1055/) | No `ptrace`/`memfd_create` hooks | v0.2 hook expansion |
 | Impair Defenses | [T1562.001](https://attack.mitre.org/techniques/T1562/001/) | Attacker with CAP_BPF can detach programs | Agent tamper detection, signed bytecode attestation |
-| Hide Artifacts | [T1070](https://attack.mitre.org/techniques/T1070/) | Short-lived processes may evade correlation | Enriched C tracepoint (`neuromesh_exec_hook`) |
+| Hide Artifacts | [T1070](https://attack.mitre.org/techniques/T1070/) | Short-lived processes may evade correlation | C exec visibility (`nm_proc_events` + `nm_execveat`) already on the hot path; residual is correlation-window, not a missing hook |
 | Signed Binary Proxy Execution | [T1218](https://attack.mitre.org/techniques/T1218/) | LotL from whitelisted paths without burst | Wasm policies + Slow Path GNN |
 
 ---
@@ -355,7 +354,7 @@ Integration tests run via `cargo test -p neuromesh-integration-tests` **without*
 |------|----------|-------|-------|--------|
 | C execve tracepoint argv capture | Medium → **Mitigated ([#46](https://github.com/Neuromesh-Security/neuromesh/issues/46))** | Capped argv capture landed in `ExecEvent` schema v2: **8 slots × 32 bytes** via `bpf_probe_read_user` + `bpf_probe_read_user_str` on `sys_enter_execve` argv (not `bprm`). **Truncation is explicit:** per-slot `argv_trunc_mask` (bit i when slot i filled the 32 B buffer), `argv_flags` (`ARGC_TRUNCATED` / `PROBE_FAULT`), `CAPTURE_ARGV`, and CRITICAL_ALERT JSON fields `argv_truncated` + `argv_trunc_mask` — analysts must not treat a filled slot as a proven-complete argument. Residual: content beyond caps. Ringbuf depth dropped ~39% vs v1 (668 B vs 408 B). Env is a separate row (Issue #140). | Dragan Flavius (@DraganFlavius) | Closed via [#46](https://github.com/Neuromesh-Security/neuromesh/issues/46) / PR #77 |
 | C execve env capture (secrets vs detection) | Medium → **Mitigated ([#140](https://github.com/Neuromesh-Security/neuromesh/issues/140))** | **Design:** compile-time name allowlist (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, `PATH`, `NODE_OPTIONS`, `PYTHONPATH`, `BASH_ENV`, `PROMPT_COMMAND`, `SSLKEYLOGFILE`); copy ≤8×32 B `NAME=VALUE` slots; omit all other names and values; integer `env_ptr_count` (scan cap 16); userspace redact of `eyJ` / `AKIA` / `-----BEGIN` on allowlisted values; CI rejects allowlist names matching `*_KEY`/`*_TOKEN`/`*_SECRET`/`*_PASSWORD`/… **Telemetry-only** (`sys_exec.bpf.c`); LSM deny path unchanged (LSM `ExecEvent` records carry empty env slots because they share the schema). Schema v3 size **932 B** → ~1126 events in 1 MiB `PROCESS_EVENTS` (~2.3 ms fill at 500k EPS) — same class of depth cut as #46. **Residuals:** (1) E-03 TOCTOU, same as argv. (2) 32 B truncation — do not treat a filled slot as complete. (3) Allowlist *names* are not attacker-chosen for hijack (loader only honors these names) but **values are attacker-controlled** — `LD_PRELOAD=<secret>` can put up to 32 B into SIEM if prefix-redact misses; treat `PROCESS_EVENTS` as sensitive. (4) Scan cap: allowlisted vars past the first 16 env pointers missed (`ENV_FLAG_COUNT_TRUNCATED`; may flag when exactly 16 vars present with no trailing probe). (5) More than 8 unique allowlisted names → `ENV_FLAG_SLOTS_FULL`. **Not in scope:** name-only dump, DesiredPolicy allowlist, `mm_struct` env walk, proxy URLs with embedded credentials. | Dragan Flavius (@DraganFlavius) | Closed via [#140](https://github.com/Neuromesh-Security/neuromesh/issues/140) |
-| `neuromesh_exec_hook` not attached | Low | Rich passive telemetry exists but unused at runtime | — | — |
+| `neuromesh_exec_hook` not attached | Low → **Resolved ([PR #35](https://github.com/Neuromesh-Security/neuromesh/pull/35))** | Prototype Rust `sys_enter_execve` tracepoint **removed** in `dc06aeda` (not dormant, not a future attach). Production exec visibility is C `nm_proc_events` + `nm_execveat`. Not a residual gap. | Dragan Flavius (@DraganFlavius) | Closed via PR #35; docs corrected 2026-08-18 |
 | Per-CPU drop accounting | Low | `RATE_LIMIT_DROPS` summed across CPUs; NUMA hot spots may dominate | — | — |
 | BTF offset resolver — cross-kernel coverage (hardcoded offsets RESOLVED) | Medium | **Resolved (PR #49):** the Rust LSM no longer uses compile-time hardcoded `task_struct` / `linux_binprm` offsets; the orchestrator resolves them from live BTF and aborts startup on resolution failure (no guessed-offset fallback). **Labeling fixed ([#52](https://github.com/Neuromesh-Security/neuromesh/issues/52)):** CI matrix jobs are now honestly named `ubuntu-22.04 / ~6.8-azure` and `ubuntu-24.04 / ~6.17-azure` (duplicate aspirational `"5.15"`/`"6.1"` cells collapsed — real coverage unchanged at two Azure HWE kernels). **Still open (severity not reduced):** live validation still does **not** cover real 5.15 / 6.1 LTS (or true non-Azure 6.8). Unit tests + one WSL2 5.15.167 fixture are cross-checked against bpftool ground truth but do not substitute for those pre-release hardware checks before those lines are claimed as validated. | Unassigned | Tracked in #TBD — new issue needed (real LTS hardware validation); labeling accuracy closed via #52 |
 | `execveat` as enforcement bypass (clarified) | Medium → **Not a bypass** | **Clarified ([#46](https://github.com/Neuromesh-Security/neuromesh/issues/46)):** do **not** treat “no `execveat` hook” as an exploitable deny-list bypass. Enforcement/decision is covered by the shared LSM hook `bprm_check_security` (`neuromesh_lsm_exec_guard`). Kernel architecture on the CI matrix (~6.8 / ~6.17): `execve` and `execveat` both funnel through `do_execveat_common` → … → `security_bprm_check` → `bprm_check_security`. No second LSM attach is required for `execveat` enforcement. | — | Closed as enforcement concern via #46 investigation; docs updated |
