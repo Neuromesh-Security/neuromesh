@@ -109,10 +109,7 @@ fn load_hec_token_file() -> Result<String> {
         .with_context(|| format!("read {SPLUNK_HEC_TOKEN_FILE_ENV} at {}", pb.display()))?;
     let token = raw.trim().to_string();
     if token.is_empty() {
-        bail!(
-            "{SPLUNK_HEC_TOKEN_FILE_ENV} ({}) is empty",
-            pb.display()
-        );
+        bail!("{SPLUNK_HEC_TOKEN_FILE_ENV} ({}) is empty", pb.display());
     }
     Ok(token)
 }
@@ -129,15 +126,15 @@ mod tests {
 
     #[test]
     fn missing_token_file_yields_inactive_not_panic() {
-        let dir = std::env::temp_dir().join(format!(
-            "nm-hec-token-missing-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("nm-hec-token-missing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
 
         let missing = dir.join("missing-token");
-        std::env::set_var(SPLUNK_HEC_TOKEN_FILE_ENV, missing.to_string_lossy().to_string());
+        std::env::set_var(
+            SPLUNK_HEC_TOKEN_FILE_ENV,
+            missing.to_string_lossy().to_string(),
+        );
         assert!(ForwarderConfig::load_hec_token_from_env().is_err());
         assert!(ForwarderConfig::from_env().is_none());
 
@@ -161,8 +158,14 @@ mod tests {
         let token_path = dir.join("hec.token");
         write_token(&token_path, "test-hec-token\n");
 
-        std::env::set_var(SPLUNK_HEC_URL_ENV, "http://127.0.0.1:8088/services/collector/event");
-        std::env::set_var(SPLUNK_HEC_TOKEN_FILE_ENV, token_path.to_string_lossy().to_string());
+        std::env::set_var(
+            SPLUNK_HEC_URL_ENV,
+            "http://127.0.0.1:8088/services/collector/event",
+        );
+        std::env::set_var(
+            SPLUNK_HEC_TOKEN_FILE_ENV,
+            token_path.to_string_lossy().to_string(),
+        );
         std::env::set_var(KAFKA_BROKERS_ENV, "localhost:9092");
 
         let cfg = ForwarderConfig::from_env().expect("configured");

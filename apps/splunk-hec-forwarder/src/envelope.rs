@@ -39,9 +39,7 @@ impl TelemetryEnvelope {
     }
 
     pub fn rule_id(&self) -> Option<&str> {
-        self.payload
-            .get("rule_id")
-            .and_then(|v| v.as_str())
+        self.payload.get("rule_id").and_then(|v| v.as_str())
     }
 
     pub fn severity(&self) -> Option<&str> {

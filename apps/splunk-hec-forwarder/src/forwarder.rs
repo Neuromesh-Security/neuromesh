@@ -104,12 +104,7 @@ async fn worker_loop(
     while let Some(envelope) = rx.recv().await {
         metrics.set_queue_depth(rx.len());
 
-        let body = build_hec_event(
-            &envelope,
-            &source,
-            &sourcetype,
-            index.as_deref(),
-        );
+        let body = build_hec_event(&envelope, &source, &sourcetype, index.as_deref());
 
         match send_with_retry(&hec, &body, &mut backoff).await {
             SendResult::Success => {
