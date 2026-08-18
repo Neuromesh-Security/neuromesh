@@ -28,6 +28,7 @@ fn telemetry_event(pid: u32, ppid: u32, path: &str, comm: &str) -> SecurityTelem
         argv_truncated: false,
         argv_trunc_mask: 0,
         argv: [0; neuromesh_common::MAX_ARGV_LEN],
+        ..SecurityTelemetryEvent::default()
     }
 }
 

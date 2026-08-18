@@ -6,45 +6,26 @@ use agent_ebpf_sensor::monitoring::event::{
 };
 use agent_ebpf_sensor::monitoring::network_event::{NetworkEvent, NetworkEventHandler};
 use agent_ebpf_sensor::observability::metrics::AgentMetrics;
-use neuromesh_common::{
-    ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
-    MAX_ARGV_LEN, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
-};
+use neuromesh_common::{ExecEvent, MAX_FILENAME_LEN};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 
 fn sample_process_event(pid: u32) -> ProcessEvent {
     ExecEvent {
-        schema_version: EXEC_EVENT_SCHEMA_VERSION,
-        event_type: EXEC_EVENT_TYPE_EXECVE,
-        flags: 0,
-        struct_size: EXEC_EVENT_STRUCT_SIZE,
-        header_reserved: 0,
-        header_pad: [0; 8],
         pid,
         ppid: 1,
         tgid: pid,
         uid: 1000,
         euid: 1000,
         gid: 1000,
-        comm: [0; MAX_COMM_LEN],
         filename: {
             let mut path = [0u8; MAX_FILENAME_LEN];
             path[..9].copy_from_slice(b"/bin/true");
             path
         },
         args_count: 1,
-        argv_len: 0,
-        argv_trunc_mask: 0,
-        argv_flags: 0,
-        argv: [0; MAX_ARGV_LEN],
-        container_id: [0; MAX_CONTAINER_ID_LEN],
-        align_pad: [0; 4],
-        namespace_id: 1,
         timestamp_ns: pid as u64,
-        enforcement_action: 0,
-        capture_status: 0,
-        status_reserved: [0; 5],
+        ..ExecEvent::default()
     }
 }
 

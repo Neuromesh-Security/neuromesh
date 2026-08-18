@@ -65,21 +65,19 @@ fn execveat_reads_the_shifted_tracepoint_arguments() {
     let source = normalized_source();
 
     assert!(
-        source.contains("(const char __user *)trace->args[1], (const char __user *const __user *)trace->args[2], EXEC_FLAG_SYSCALL_EXECVEAT"),
-        "nm_execveat must read pathname from args[1] and argv from args[2] (dfd is args[0])"
+        source.contains("(const char __user *)trace->args[1], (const char __user *const __user *)trace->args[2], (const char __user *const __user *)trace->args[3], EXEC_FLAG_SYSCALL_EXECVEAT"),
+        "nm_execveat must read pathname from args[1], argv from args[2], envp from args[3]"
     );
     assert!(
         source.contains(
-            "(const char __user *)trace->args[0], (const char __user *const __user *)trace->args[1], 0"
+            "(const char __user *)trace->args[0], (const char __user *const __user *)trace->args[1], (const char __user *const __user *)trace->args[2], 0"
         ),
-        "nm_proc_events must keep reading pathname from args[0] and argv from args[1]"
+        "nm_proc_events must keep reading pathname from args[0], argv from args[1], envp from args[2]"
     );
 }
 
 /// The variant is a `flags` bit rather than a new `event_type` because userspace
 /// `ExecEvent::is_valid()` hard-requires `event_type == EXEC_EVENT_TYPE_EXECVE`.
-/// Keeping it in `flags` also holds `struct_size` at 668 so every field offset and
-/// the C `_Static_assert` stay valid.
 #[test]
 fn syscall_variant_flags_agree_between_c_header_and_rust_mirror() {
     let header = normalized(EXEC_EVENT_HEADER);
@@ -96,10 +94,27 @@ fn syscall_variant_flags_agree_between_c_header_and_rust_mirror() {
     assert_eq!(neuromesh_common::EXEC_FLAG_PATH_FROM_FD, 1 << 1);
 
     assert!(
-        header.contains("#define EXEC_EVENT_STRUCT_SIZE 668U"),
-        "adding the syscall-variant flag must not change ExecEvent's size"
+        header.contains("#define EXEC_EVENT_STRUCT_SIZE 932U"),
+        "ExecEvent v3 (Issue #140 env slots) must keep C/Rust size in lockstep"
     );
-    assert_eq!(neuromesh_common::EXEC_EVENT_STRUCT_SIZE, 668);
+    assert_eq!(neuromesh_common::EXEC_EVENT_STRUCT_SIZE, 932);
+    assert!(header.contains("#define EXEC_EVENT_SCHEMA_VERSION 3U"));
+    assert_eq!(neuromesh_common::EXEC_EVENT_SCHEMA_VERSION, 3);
+}
+
+#[test]
+fn env_allowlist_in_c_header_matches_rust() {
+    let header = EXEC_EVENT_HEADER;
+    for name in neuromesh_common::ENV_VALUE_ALLOWLIST {
+        assert!(
+            header.contains(name),
+            "exec_event.h must list allowlist name {name}"
+        );
+    }
+    assert!(
+        SYS_EXEC_BPF_SOURCE.contains("capture_envp("),
+        "sys_exec.bpf.c must call capture_envp"
+    );
 }
 
 /// Both tracepoints must go through the same rate limiter, otherwise the added

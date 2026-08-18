@@ -16,9 +16,8 @@ use aya_log_ebpf::info;
 use neuromesh_common::{
     ExecEvent, PathDenyEntry, TelemetryHealthStats, CAPTURE_COMM, CAPTURE_CONTAINER_ID,
     CAPTURE_EUID, CAPTURE_FILENAME, CAPTURE_NAMESPACE_ID, CAPTURE_PPID, ENFORCEMENT_BLOCKED,
-    EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
-    IDENTITY_ALLOW_CGROUPS_MAX_ENTRIES, IDENTITY_ALLOW_VALUE, IDENTITY_EXCEPTIONS_VALID_FRESH,
-    IDENTITY_EXCEPTION_SCOPE_PREFIX, MAX_ARGV_LEN, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN,
+    EXEC_EVENT_SCHEMA_VERSION, IDENTITY_ALLOW_CGROUPS_MAX_ENTRIES, IDENTITY_ALLOW_VALUE,
+    IDENTITY_EXCEPTIONS_VALID_FRESH, IDENTITY_EXCEPTION_SCOPE_PREFIX, MAX_COMM_LEN,
     MAX_FILENAME_LEN, PATH_DENY_KEY_BYTES, PATH_DENY_MAX_ENTRIES, TELEMETRY_STATS_INDEX,
     UNKNOWN_SENTINEL,
 };
@@ -146,31 +145,8 @@ fn identity_exception_allows() -> bool {
 fn init_exec_event(event: &mut ExecEvent, enforcement_action: u8) {
     *event = ExecEvent {
         schema_version: 0,
-        event_type: EXEC_EVENT_TYPE_EXECVE,
-        flags: 0,
-        struct_size: EXEC_EVENT_STRUCT_SIZE,
-        header_reserved: 0,
-        header_pad: [0; 8],
-        pid: 0,
-        ppid: 0,
-        tgid: 0,
-        uid: 0,
-        euid: 0,
-        gid: 0,
-        comm: [0; MAX_COMM_LEN],
-        filename: [0; MAX_FILENAME_LEN],
-        args_count: 0,
-        argv_len: 0,
-        argv_trunc_mask: 0,
-        argv_flags: 0,
-        argv: [0; MAX_ARGV_LEN],
-        container_id: [0; MAX_CONTAINER_ID_LEN],
-        align_pad: [0; 4],
-        namespace_id: 0,
-        timestamp_ns: 0,
         enforcement_action,
-        capture_status: 0,
-        status_reserved: [0; 5],
+        ..ExecEvent::default()
     };
 }
 

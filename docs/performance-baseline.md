@@ -119,7 +119,7 @@ Kernel eBPF capture latency is measured separately (Section 2).
 
 User-space exec consumer: `process_monitor.rs` — AsyncFd poller → bounded MPSC (default **8192**) → correlation worker.
 
-**Capacity note for the `execveat` attach (Issue #126):** the second tracepoint did **not** require a RingBuf resize. Both exec programs call the same `rate_limit_allow()` against the same `RLIMIT_BUCKET` per-CPU token bucket, so the *aggregate* admitted rate is still one ~500k EPS ceiling rather than one per hook — the figures below remain the governing numbers. At 668 B per record a 1 MiB buffer holds ~1,569 in-flight records, unchanged. `execveat`/`fexecve` are also a small fraction of real exec traffic, and any additional pressure surfaces in the existing `RATE_LIMIT_DROPS` and MPSC backpressure counters rather than silently.
+**Capacity note for the `execveat` attach (Issue #126):** the second tracepoint did **not** require a RingBuf resize. Both exec programs call the same `rate_limit_allow()` against the same `RLIMIT_BUCKET` per-CPU token bucket, so the *aggregate* admitted rate is still one ~500k EPS ceiling rather than one per hook — the figures below remain the governing numbers. At 932 B per record (ExecEvent v3, Issue #140) a 1 MiB buffer holds ~1,126 in-flight records. The `execveat` attach did **not** require a RingBuf resize; env capture grows record size but keeps the same 1 MiB map and shared 500k EPS ceiling.
 
 ### 2.2 Latency overhead (execve syscall path)
 
@@ -155,8 +155,9 @@ sudo perf stat -e syscalls:sys_enter_execve,cycles,instructions \
 |--------|---------------------|---------------------------|---------------------------------------------|
 | v1 (pre-#46) | 408 B | ≈ **2570** | ≈ **5.1 ms** |
 | v2 (with 256 B argv) | 668 B | ≈ **1569** | ≈ **3.1 ms** |
+| v3 (argv + allowlisted env, Issue #140) | 932 B | ≈ **1126** | ≈ **2.3 ms** |
 
-That is a **~39% reduction** in ringbuf depth (668/408 ≈ 1.64× bytes/event). Under a real execve burst (the same class of load that drives `DataNormalizer` spawn-burst `BEHAVIOR_ALERT`s), `bpf_ringbuf_reserve` failures become **more likely** if userspace drain lags — this is a real increase in drop risk, not negligible. Primary backpressure remains the per-CPU **500k EPS token bucket** (`RATE_LIMIT_DROPS`); ringbuf depth is the secondary cushion. Operators should watch `ebpf_events_dropped_total` and `PROCESS_EVENTS backpressure` logs after deploying v2.
+v3 is another ~28% reduction in ringbuf depth vs v2 (932/668 ≈ 1.40× bytes/event), in the **same class** as the #46 argv tradeoff. The full env block is **never** copied (scan ≤32 pointers, copy ≤8×32 B allowlisted hits). Primary backpressure remains the per-CPU **500k EPS token bucket**. Operators should watch `ebpf_events_dropped_total` after deploying v3.
 
 #### Kernel-side drops
 

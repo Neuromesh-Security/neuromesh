@@ -1,11 +1,12 @@
 //! ExecEvent v1 decode, SecurityTelemetryEvent mapping, and OTel attribute export.
 
 use neuromesh_common::{
-    ExecEvent, SecurityTelemetryEvent, ARGV_FLAG_ARGC_TRUNCATED, ARGV_FLAG_PROBE_FAULT,
-    CAPTURE_ARGS_COUNT, CAPTURE_ARGV, CAPTURE_COMM, CAPTURE_CONTAINER_ID, CAPTURE_EUID,
-    CAPTURE_FILENAME, CAPTURE_GID, CAPTURE_NAMESPACE_ID, CAPTURE_PPID, CAPTURE_TGID,
-    CAPTURE_TIMESTAMP, CAPTURE_UID, ENFORCEMENT_ALLOWED, ENFORCEMENT_BLOCKED, ENFORCEMENT_UNKNOWN,
-    EXEC_EVENT_STRUCT_SIZE, MAX_ARGV_LEN, UNKNOWN_SENTINEL,
+    redact_env_slots, ExecEvent, SecurityTelemetryEvent, ARGV_FLAG_ARGC_TRUNCATED,
+    ARGV_FLAG_PROBE_FAULT, CAPTURE_ARGS_COUNT, CAPTURE_ARGV, CAPTURE_COMM, CAPTURE_CONTAINER_ID,
+    CAPTURE_ENV, CAPTURE_EUID, CAPTURE_FILENAME, CAPTURE_GID, CAPTURE_NAMESPACE_ID, CAPTURE_PPID,
+    CAPTURE_TGID, CAPTURE_TIMESTAMP, CAPTURE_UID, ENFORCEMENT_ALLOWED, ENFORCEMENT_BLOCKED,
+    ENFORCEMENT_UNKNOWN, ENV_FLAG_COUNT_TRUNCATED, ENV_FLAG_PROBE_FAULT, ENV_FLAG_SLOTS_FULL,
+    EXEC_EVENT_STRUCT_SIZE, MAX_ARGV_LEN, MAX_ENV_LEN, UNKNOWN_SENTINEL,
 };
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -64,9 +65,40 @@ pub fn format_argv_cmdline(argv: &[u8], argv_len: u16) -> String {
     out
 }
 
+/// Join fixed env slots into a space-delimited `NAME=VALUE` list (Issue #140).
+pub fn format_env_slots(env: &[u8], env_len: u16) -> String {
+    use neuromesh_common::{MAX_ENV_CAPTURE, MAX_ENV_LEN, MAX_ENV_STR_LEN};
+
+    let slots = (env_len as usize).min(MAX_ENV_CAPTURE);
+    let buf = if env.len() >= MAX_ENV_LEN {
+        &env[..MAX_ENV_LEN]
+    } else {
+        env
+    };
+    let mut out = String::new();
+    for i in 0..slots {
+        let start = i * MAX_ENV_STR_LEN;
+        let end = (start + MAX_ENV_STR_LEN).min(buf.len());
+        if start >= end {
+            break;
+        }
+        let slot = &buf[start..end];
+        let nul = slot.iter().position(|&b| b == 0).unwrap_or(slot.len());
+        if nul == 0 {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&String::from_utf8_lossy(&slot[..nul]));
+    }
+    out
+}
+
 /// Map kernel `ExecEvent` into the canonical `SecurityTelemetryEvent` without silent data loss.
 pub fn exec_event_to_security_telemetry(event: &ExecEvent) -> SecurityTelemetryEvent {
     let (argv_len, argv) = argv_field(event);
+    let (env_len, env, env_redacted) = env_field(event);
     SecurityTelemetryEvent {
         pid: scalar_or_zero(event.pid, event.field_unknown(CAPTURE_TGID)),
         ppid: scalar_or_zero(event.ppid, event.field_unknown(CAPTURE_PPID)),
@@ -81,6 +113,15 @@ pub fn exec_event_to_security_telemetry(event: &ExecEvent) -> SecurityTelemetryE
             || event.field_unknown(CAPTURE_ARGV),
         argv_trunc_mask: event.argv_trunc_mask,
         argv,
+        env_len,
+        env_truncated: event.env_trunc_mask != 0
+            || (event.env_flags
+                & (ENV_FLAG_COUNT_TRUNCATED | ENV_FLAG_PROBE_FAULT | ENV_FLAG_SLOTS_FULL))
+                != 0
+            || event.field_unknown(CAPTURE_ENV),
+        env_trunc_mask: event.env_trunc_mask,
+        env_redacted,
+        env,
     }
 }
 
@@ -163,6 +204,21 @@ pub fn exec_event_otel_attributes(event: &ExecEvent) -> OtelExecAttributes {
         "neuromesh.argv_trunc_mask".into(),
         format!("0x{:02x}", event.argv_trunc_mask),
     );
+    let (env_export, env_redacted) = display_env(event);
+    attributes.insert("neuromesh.env".into(), env_export);
+    let env_truncated = event.env_trunc_mask != 0
+        || (event.env_flags
+            & (ENV_FLAG_COUNT_TRUNCATED | ENV_FLAG_PROBE_FAULT | ENV_FLAG_SLOTS_FULL))
+            != 0
+        || event.field_unknown(CAPTURE_ENV);
+    attributes.insert("neuromesh.env_truncated".into(), env_truncated.to_string());
+    attributes.insert(
+        "neuromesh.env_trunc_mask".into(),
+        format!("0x{:02x}", event.env_trunc_mask),
+    );
+    attributes.insert("neuromesh.env_redacted".into(), env_redacted.to_string());
+    let env_ptr_count = event.env_ptr_count;
+    attributes.insert("neuromesh.env_ptr_count".into(), env_ptr_count.to_string());
     attributes.insert(
         "neuromesh.container_id".into(),
         display_string(
@@ -242,6 +298,27 @@ fn argv_field(event: &ExecEvent) -> (u16, [u8; MAX_ARGV_LEN]) {
     (slots as u16, out)
 }
 
+fn env_field(event: &ExecEvent) -> (u16, [u8; MAX_ENV_LEN], bool) {
+    use neuromesh_common::{MAX_ENV_CAPTURE, MAX_ENV_STR_LEN};
+
+    let mut out = [0u8; MAX_ENV_LEN];
+    let slots = (event.env_len as usize).min(MAX_ENV_CAPTURE);
+    let bytes = (slots * MAX_ENV_STR_LEN).min(MAX_ENV_LEN);
+    out[..bytes].copy_from_slice(&event.env[..bytes]);
+    let redacted = redact_env_slots(&mut out, slots as u16);
+    (slots as u16, out, redacted)
+}
+
+#[inline]
+fn display_env(event: &ExecEvent) -> (String, bool) {
+    let (_, env, redacted) = env_field(event);
+    let formatted = format_env_slots(&env, event.env_len);
+    if event.field_unknown(CAPTURE_ENV) && formatted.is_empty() {
+        return (format!("UNKNOWN:{}", bit_name(CAPTURE_ENV)), redacted);
+    }
+    (formatted, redacted)
+}
+
 #[inline]
 fn display_argv(event: &ExecEvent) -> String {
     let formatted = format_argv_cmdline(&event.argv, event.argv_len);
@@ -306,6 +383,7 @@ fn bit_name(bit: u16) -> &'static str {
         CAPTURE_FILENAME => "filename_probe_fault",
         CAPTURE_ARGS_COUNT => "args_count_probe_fault",
         CAPTURE_ARGV => "argv_probe_fault",
+        CAPTURE_ENV => "env_probe_fault",
         CAPTURE_CONTAINER_ID => "cgroup_probe_fault",
         CAPTURE_NAMESPACE_ID => "namespace_probe_fault",
         CAPTURE_TIMESTAMP => "timestamp_probe_fault",
@@ -318,9 +396,8 @@ mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
     use neuromesh_common::{
-        ExecEvent, EXEC_EVENT_SCHEMA_VERSION, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE,
-        EXEC_FLAG_PATH_FROM_FD, EXEC_FLAG_SYSCALL_EXECVEAT, MAX_ARGV_LEN, MAX_COMM_LEN,
-        MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
+        ExecEvent, EXEC_EVENT_STRUCT_SIZE, EXEC_EVENT_TYPE_EXECVE, EXEC_FLAG_PATH_FROM_FD,
+        EXEC_FLAG_SYSCALL_EXECVEAT, MAX_COMM_LEN, MAX_CONTAINER_ID_LEN, MAX_FILENAME_LEN,
     };
 
     fn as_bytes(event: &ExecEvent) -> &[u8] {
@@ -341,12 +418,6 @@ mod tests {
 
     fn valid_event() -> ExecEvent {
         ExecEvent {
-            schema_version: EXEC_EVENT_SCHEMA_VERSION,
-            event_type: EXEC_EVENT_TYPE_EXECVE,
-            flags: 0,
-            struct_size: EXEC_EVENT_STRUCT_SIZE,
-            header_reserved: 0,
-            header_pad: [0; 8],
             pid: 100,
             ppid: 1,
             tgid: 100,
@@ -356,17 +427,10 @@ mod tests {
             comm: bytes_with_prefix::<MAX_COMM_LEN>(b"curl"),
             filename: bytes_with_prefix::<MAX_FILENAME_LEN>(b"/usr/bin/curl"),
             args_count: 2,
-            argv_len: 0,
-            argv_trunc_mask: 0,
-            argv_flags: 0,
-            argv: [0; MAX_ARGV_LEN],
             container_id: bytes_with_prefix::<MAX_CONTAINER_ID_LEN>(b"neuromesh-agent"),
-            align_pad: [0; 4],
             namespace_id: 4026531836,
             timestamp_ns: 9_999,
-            enforcement_action: ENFORCEMENT_ALLOWED,
-            capture_status: 0,
-            status_reserved: [0; 5],
+            ..ExecEvent::default()
         }
     }
 
@@ -380,7 +444,8 @@ mod tests {
         assert_eq!(offset_of!(ExecEvent, comm), 40);
         assert_eq!(offset_of!(ExecEvent, filename), 56);
         assert_eq!(offset_of!(ExecEvent, argv), 320);
-        assert_eq!(offset_of!(ExecEvent, namespace_id), 644);
+        assert_eq!(offset_of!(ExecEvent, env), 584);
+        assert_eq!(offset_of!(ExecEvent, namespace_id), 908);
     }
 
     /// Issue #126: `execveat` telemetry is only actually visible if the decoder
@@ -537,5 +602,32 @@ mod tests {
             otel.attributes.get("neuromesh.comm").map(String::as_str),
             Some("UNKNOWN:comm_capture_fault")
         );
+    }
+
+    #[test]
+    fn mapper_redacts_allowlisted_secret_prefix_and_omits_nothing_already_kernel_side() {
+        let mut event = valid_event();
+        let entry = b"LD_PRELOAD=eyJhbGciOiJIUzI1NiJ9";
+        event.env[..entry.len()].copy_from_slice(entry);
+        event.env_len = 1;
+
+        let mapped = exec_event_to_security_telemetry(&event);
+        assert!(mapped.env_redacted);
+        let formatted = format_env_slots(&mapped.env, mapped.env_len);
+        assert!(formatted.contains("REDACTED"));
+        assert!(!formatted.contains("eyJ"));
+
+        let otel = exec_event_otel_attributes(&event);
+        assert_eq!(
+            otel.attributes
+                .get("neuromesh.env_redacted")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert!(otel
+            .attributes
+            .get("neuromesh.env")
+            .unwrap()
+            .contains("REDACTED"));
     }
 }

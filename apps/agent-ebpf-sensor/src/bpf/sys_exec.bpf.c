@@ -391,6 +391,215 @@ static __always_inline void capture_argv(struct exec_event_t *event,
 	}
 }
 
+/* Word-sized prefix tests — byte-by-byte compares forked ~1M verifier states. */
+static __always_inline __u64 env_load_u64(const char *s)
+{
+	__u64 v;
+
+	__builtin_memcpy(&v, s, 8);
+	return v;
+}
+
+static __always_inline __u32 env_load_u32(const char *s)
+{
+	__u32 v;
+
+	__builtin_memcpy(&v, s, 4);
+	return v;
+}
+
+static __always_inline int env_is_ld_preload(const char *s)
+{
+	return env_load_u64(s) == 0x4f4c4552505f444cULL && s[8] == 'A' &&
+	       s[9] == 'D' && s[10] == '=';
+}
+
+static __always_inline int env_is_ld_audit(const char *s)
+{
+	return env_load_u64(s) == 0x54494455415f444cULL && s[8] == '=';
+}
+
+static __always_inline int env_is_ld_library_path(const char *s)
+{
+	return env_load_u64(s) == 0x415242494c5f444cULL &&
+	       env_load_u32(s + 8) == 0x505f5952U && s[12] == 'A' &&
+	       s[13] == 'T' && s[14] == 'H' && s[15] == '=';
+}
+
+static __always_inline int env_is_path(const char *s)
+{
+	return env_load_u32(s) == 0x48544150U && s[4] == '=';
+}
+
+static __always_inline int env_is_node_options(const char *s)
+{
+	return env_load_u64(s) == 0x54504f5f45444f4eULL &&
+	       env_load_u32(s + 8) == 0x534e4f49U && s[12] == '=';
+}
+
+static __always_inline int env_is_pythonpath(const char *s)
+{
+	return env_load_u64(s) == 0x41504e4f48545950ULL && s[8] == 'T' &&
+	       s[9] == 'H' && s[10] == '=';
+}
+
+static __always_inline int env_is_bash_env(const char *s)
+{
+	return env_load_u64(s) == 0x564e455f48534142ULL && s[8] == '=';
+}
+
+static __always_inline int env_is_prompt_command(const char *s)
+{
+	return env_load_u64(s) == 0x435f54504d4f5250ULL &&
+	       env_load_u32(s + 8) == 0x414d4d4fU && s[12] == 'N' &&
+	       s[13] == 'D' && s[14] == '=';
+}
+
+static __always_inline int env_is_sslkeylogfile(const char *s)
+{
+	return env_load_u64(s) == 0x4f4c59454b4c5353ULL &&
+	       env_load_u32(s + 8) == 0x4c494647U && s[12] == 'E' &&
+	       s[13] == '=';
+}
+
+/*
+ * Last-wins fill of name-fixed slots. Do not track a `seen` bitmask inside
+ * the scan loop: 9 bits × loop iterations was the 1000001-insn cliff
+ * (3 names passed; 6+ names failed at every MAX_ENV_SCAN).
+ */
+static __always_inline void env_store32(char *dst, const char *src, long ret,
+					struct exec_event_t *event, __u8 bit)
+{
+	__builtin_memcpy(dst, src, MAX_ENV_STR_LEN);
+	if (ret >= (long)MAX_ENV_STR_LEN) {
+		event->env_trunc_mask |= bit;
+		event->capture_status |= CAPTURE_ENV;
+	}
+}
+
+static __always_inline void env_match_store(struct exec_event_t *event,
+					    const char *probe, long ret, char c0)
+{
+	if (c0 == 'L' && probe[1] == 'D') {
+		if (env_is_ld_preload(probe)) {
+			env_store32(event->env[0], probe, ret, event, 1U);
+			return;
+		}
+		if (env_is_ld_audit(probe)) {
+			env_store32(event->env[1], probe, ret, event, 2U);
+			return;
+		}
+		if (env_is_ld_library_path(probe))
+			env_store32(event->env[2], probe, ret, event, 4U);
+		return;
+	}
+	if (c0 == 'P') {
+		if (probe[1] == 'A' && env_is_path(probe)) {
+			env_store32(event->env[3], probe, ret, event, 8U);
+			return;
+		}
+		if (probe[1] == 'Y' && env_is_pythonpath(probe)) {
+			env_store32(event->env[5], probe, ret, event, 32U);
+			return;
+		}
+		if (probe[1] == 'R' && env_is_prompt_command(probe))
+			env_store32(event->env[7], probe, ret, event, 128U);
+		return;
+	}
+	if (c0 == 'N' && env_is_node_options(probe)) {
+		env_store32(event->env[4], probe, ret, event, 16U);
+		return;
+	}
+	if (c0 == 'B' && env_is_bash_env(probe)) {
+		env_store32(event->env[6], probe, ret, event, 64U);
+		return;
+	}
+	if (c0 == 'S' && env_is_sslkeylogfile(probe)) {
+		if (event->env[7][0]) {
+			event->env_flags |= ENV_FLAG_SLOTS_FULL;
+			event->capture_status |= CAPTURE_ENV;
+		} else {
+			env_store32(event->env[7], probe, ret, event, 128U);
+		}
+	}
+}
+
+static __always_inline void capture_envp(struct exec_event_t *event,
+					 const char __user *const __user *envp)
+{
+	/*
+	 * Telemetry-only env capture at sys_enter_execve / execveat (Issue #140).
+	 *
+	 * Same mechanism as capture_argv: syscall envp pointer
+	 * (execve args[2] / execveat args[3]) — NOT mm_struct / BTF.
+	 * Only compile-time allowlisted NAME=VALUE strings are copied into
+	 * fixed 8x32 slots. All other names are omitted (not name-redacted).
+	 *
+	 * Verifier: no `seen` bitmask in the scan loop (that 2^n state
+	 * explosion was processed 1000001 / 1M). Last-wins per fixed slot.
+	 */
+	__u32 i;
+	__u32 hits = 0;
+	__u32 scanned = 0;
+	const char __user *env_ptr = 0;
+	char probe[MAX_ENV_STR_LEN];
+	long ret;
+
+	__builtin_memset(event->env, 0, sizeof(event->env));
+	event->env_len = 0;
+	event->env_trunc_mask = 0;
+	event->env_flags = 0;
+	event->env_ptr_count = 0;
+	event->env_header_pad = 0;
+
+	if (!envp) {
+		event->capture_status |= CAPTURE_ENV;
+		event->env_flags |= ENV_FLAG_PROBE_FAULT;
+		return;
+	}
+
+#pragma clang loop unroll(disable)
+	for (i = 0; i < MAX_ENV_SCAN; i++) {
+		if (bpf_probe_read_user(&env_ptr, sizeof(env_ptr), &envp[i]) < 0) {
+			event->capture_status |= CAPTURE_ENV;
+			event->env_flags |= ENV_FLAG_PROBE_FAULT;
+			break;
+		}
+		if (!env_ptr)
+			break;
+
+		scanned++;
+		ret = bpf_probe_read_user_str(probe, sizeof(probe), env_ptr);
+		if (ret <= 0) {
+			event->capture_status |= CAPTURE_ENV;
+			event->env_flags |= ENV_FLAG_PROBE_FAULT;
+			continue;
+		}
+
+		{
+			char c0 = probe[0];
+
+			if (c0 != 'L' && c0 != 'P' && c0 != 'N' && c0 != 'B' && c0 != 'S')
+				continue;
+			env_match_store(event, probe, ret, c0);
+		}
+	}
+
+#pragma clang loop unroll(full)
+	for (i = 0; i < MAX_ENV_CAPTURE; i++) {
+		if (event->env[i][0])
+			hits++;
+	}
+
+	event->env_ptr_count = (__u16)scanned;
+	event->env_len = (__u16)hits;
+
+	if (scanned == MAX_ENV_SCAN) {
+		event->env_flags |= ENV_FLAG_COUNT_TRUNCATED;
+		event->capture_status |= CAPTURE_ENV;
+	}
+}
+
 /*
  * Shared emit path for every traced exec syscall variant.
  *
@@ -400,6 +609,7 @@ static __always_inline void capture_argv(struct exec_event_t *event,
  */
 static __always_inline int emit_exec_event(const char __user *filename_ptr,
 					   const char __user *const __user *argv_ptr,
+					   const char __user *const __user *envp_ptr,
 					   __u8 syscall_flags)
 {
 	struct exec_event_t *event;
@@ -443,6 +653,7 @@ static __always_inline int emit_exec_event(const char __user *filename_ptr,
 	}
 
 	capture_argv(event, argv_ptr);
+	capture_envp(event, envp_ptr);
 
 	/* Atomic schema publish — written last so userspace rejects torn records. */
 	event->schema_version = EXEC_EVENT_SCHEMA_VERSION;
@@ -457,7 +668,8 @@ int nm_proc_events(void *ctx)
 	struct trace_event_raw_sys_enter *trace = ctx;
 
 	return emit_exec_event((const char __user *)trace->args[0],
-			       (const char __user *const __user *)trace->args[1], 0);
+			       (const char __user *const __user *)trace->args[1],
+			       (const char __user *const __user *)trace->args[2], 0);
 }
 
 /*
@@ -465,9 +677,9 @@ int nm_proc_events(void *ctx)
  *          char *const envp[], int flags)
  *
  * Note the argument shift versus execve: dfd occupies args[0], so pathname is
- * args[1] and argv is args[2]. Also covers fexecve(3), which glibc implements
- * as execveat(fd, "", argv, envp, AT_EMPTY_PATH) — there is no separate
- * fexecve syscall to attach.
+ * args[1], argv is args[2], envp is args[3]. Also covers fexecve(3), which
+ * glibc implements as execveat(fd, "", argv, envp, AT_EMPTY_PATH) — there is
+ * no separate fexecve syscall to attach.
  */
 SEC("tracepoint/syscalls/sys_enter_execveat")
 int nm_execveat(void *ctx)
@@ -476,5 +688,6 @@ int nm_execveat(void *ctx)
 
 	return emit_exec_event((const char __user *)trace->args[1],
 			       (const char __user *const __user *)trace->args[2],
+			       (const char __user *const __user *)trace->args[3],
 			       EXEC_FLAG_SYSCALL_EXECVEAT);
 }

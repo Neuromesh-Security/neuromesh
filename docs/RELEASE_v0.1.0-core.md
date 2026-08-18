@@ -106,7 +106,7 @@ The following limitations are **known and documented** — not bugs filed under 
 
 ### C execve tracepoint is a verifier-safe skeleton
 
-`neuromesh_process_events` (`sys_exec.bpf.c`) emits enriched `ExecEvent` v2 records: pid/tgid/uid/euid/gid, ppid, comm, filename, capped argv (256-byte NUL-separated payload, Issue #46), container/namespace ids, and timestamp. Env capture remains out of scope.
+`neuromesh_process_events` (`sys_exec.bpf.c`) emits enriched `ExecEvent` v3 records: pid/tgid/uid/euid/gid, ppid, comm, filename, capped argv (Issue #46), capped **allowlist** env values (Issue #140; non-allowlisted names omitted), container/namespace ids, and timestamp. Full env dump remains out of scope.
 
 **Impact:** High-volume exec visibility includes command-line correlation for incident review (within the argv byte cap).
 

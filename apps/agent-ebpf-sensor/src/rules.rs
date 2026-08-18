@@ -38,6 +38,9 @@ pub struct SiemAlert {
     pub argv: String,
     pub argv_truncated: bool,
     pub argv_trunc_mask: u8,
+    pub env: String,
+    pub env_truncated: bool,
+    pub env_redacted: bool,
     pub matched_pattern: String,
 }
 
@@ -73,6 +76,9 @@ impl RuleEngine {
                 argv: format_argv_cmdline(&event.argv, event.argv_len),
                 argv_truncated: event.argv_truncated,
                 argv_trunc_mask: event.argv_trunc_mask,
+                env: crate::monitoring::exec_mapper::format_env_slots(&event.env, event.env_len),
+                env_truncated: event.env_truncated,
+                env_redacted: event.env_redacted,
                 matched_pattern: prefix.to_string(),
             }));
         }
@@ -167,6 +173,7 @@ mod tests {
             argv_truncated: false,
             argv_trunc_mask: 0,
             argv: [0; MAX_ARGV_LEN],
+            ..SecurityTelemetryEvent::default()
         }
     }
 
@@ -258,5 +265,31 @@ mod tests {
         let json = RuleEngine::format_json(&alert).expect("json");
         assert!(json.contains("\"argv_truncated\":true"));
         assert!(json.contains(truncated));
+    }
+
+    #[test]
+    fn critical_alert_json_includes_env_and_redaction_flag() {
+        use neuromesh_common::{redact_env_slots, MAX_ENV_STR_LEN};
+
+        let engine = RuleEngine::new();
+        let mut event = event_with_path("/tmp/stager");
+        let raw = b"LD_PRELOAD=eyJhbGciOiJIUzI1NiJ9";
+        event.env[..raw.len()].copy_from_slice(raw);
+        event.env_len = 1;
+        event.env_redacted = redact_env_slots(&mut event.env, event.env_len);
+
+        let verdict = engine.evaluate(&event);
+        let RuleVerdict::Alert(alert) = verdict else {
+            panic!("expected CRITICAL_ALERT");
+        };
+        assert!(alert.env_redacted);
+        assert!(alert.env.contains("REDACTED"));
+        assert!(!alert.env.contains("eyJ"));
+        let _ = MAX_ENV_STR_LEN;
+
+        let json = RuleEngine::format_json(&alert).expect("json");
+        assert!(json.contains("\"env\""));
+        assert!(json.contains("\"env_redacted\":true"));
+        assert!(json.contains("REDACTED"));
     }
 }
