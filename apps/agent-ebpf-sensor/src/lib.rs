@@ -19,6 +19,9 @@ pub mod shutdown;
 pub mod telemetry_stream;
 pub mod wasm_policy;
 
+#[cfg(feature = "orchestrator")]
+pub mod startup_sequence;
+
 pub mod monitoring;
 
 #[cfg(feature = "orchestrator")]
