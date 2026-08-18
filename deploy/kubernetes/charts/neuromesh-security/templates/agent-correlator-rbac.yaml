@@ -1,0 +1,31 @@
+{{- if .Values.agent.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: neuromesh-agent-correlator
+  labels:
+    app.kubernetes.io/name: neuromesh-agent
+    app.kubernetes.io/component: identity-correlator
+    app.kubernetes.io/part-of: neuromesh
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: neuromesh-agent-correlator
+  labels:
+    app.kubernetes.io/name: neuromesh-agent
+    app.kubernetes.io/component: identity-correlator
+    app.kubernetes.io/part-of: neuromesh
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: neuromesh-agent-correlator
+subjects:
+  - kind: ServiceAccount
+    name: neuromesh-agent
+    namespace: {{ include "neuromesh.namespace" . }}
+{{- end }}

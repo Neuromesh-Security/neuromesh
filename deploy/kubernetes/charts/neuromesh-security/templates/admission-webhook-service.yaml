@@ -1,0 +1,20 @@
+{{- if .Values.admissionWebhook.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: neuromesh-admission-webhook
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+  ports:
+    - name: https
+      port: {{ .Values.admissionWebhook.service.port }}
+      targetPort: {{ .Values.admissionWebhook.service.targetPort }}
+      protocol: TCP
+{{- end }}
