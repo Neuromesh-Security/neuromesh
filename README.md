@@ -2,7 +2,7 @@
 
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 ![Version](https://img.shields.io/badge/Version-v0.1.0--core-blue.svg)
-![Architecture](https://img.shields.io/badge/Architecture-eBPF%20%7C%20Wasm%20%7C%20GNN-success.svg)
+![Architecture](https://img.shields.io/badge/Architecture-eBPF%20%7C%20Wasm%20(scaffold)%20%7C%20GNN%20(scaffold)-blue.svg)
 [![Live site](https://img.shields.io/badge/Live%20site-neuromesh--security.netlify.app-00C7B7.svg)](https://neuromesh-security.netlify.app/)
 
 > **Kernel-native runtime security for Linux and Kubernetes.**
@@ -20,7 +20,7 @@ Neuromesh is transitioning from the marketing-oriented `v0.1.0-alpha` to **`v0.1
 |-----------|-------|
 | `v0.1.0-alpha` | Architecture narrative, integration scaffolding |
 | **`v0.1.0-core`** | **Production-grade execve telemetry, LSM blocking, load-test harness, threat model, performance baseline** |
-| `v0.1.0` (GA) | Full argv capture, Wasm policy hot path, fleet policy sync |
+| `v0.1.0` (GA) | Full argv capture, fleet policy sync. Wasm policy hot path remains an intentional deferred scaffold (see Community Edition), not a GA deliverable. |
 
 ---
 
@@ -172,6 +172,7 @@ Neuromesh follows an **Open Core** strategy: the runtime sensor and deterministi
 |------------|----------|
 | eBPF Sensor Core (LSM blocking + execve/tcp_connect visibility) | Yes |
 | User-space `RuleEngine` (whitelist + blacklist path rules) | Yes |
+| Wasm policy hot-path on LSM (`wasm_policy.rs`) | Scaffold — `WasmPolicyEngine` is constructed at startup and held; load/evaluate are not wired (`NotImplemented` / always Allow). Intentional deferred initiative, not abandoned code. Out of scope for v0.1.0-core ([`docs/threat-model.md`](docs/threat-model.md) §1); planned v0.2.0 ([`docs/RELEASE_v0.1.0-core.md`](docs/RELEASE_v0.1.0-core.md)). Multi-week, not a sprint item. |
 | `DataNormalizer` spawn-burst detection | Yes |
 | Local JSON alert logging (stdout) | Yes |
 | Prometheus metrics + health monitor | Yes |
