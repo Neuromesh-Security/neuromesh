@@ -24,8 +24,8 @@ pub const MAX_ARGV_LEN: usize = MAX_ARGS_CAPTURE * MAX_ARG_STR_LEN;
 pub const MAX_ENV_CAPTURE: usize = 8;
 pub const MAX_ENV_STR_LEN: usize = 32;
 pub const MAX_ENV_LEN: usize = MAX_ENV_CAPTURE * MAX_ENV_STR_LEN;
-/// Max envp pointers visited (full env blocks are not copied).
-pub const MAX_ENV_SCAN: usize = 32;
+/// Scan cap 16 — typical exec env depth; verifier uses c0/c1-grouped cascade.
+pub const MAX_ENV_SCAN: usize = 16;
 
 /// Schema revision for `ExecEvent` ring-buffer records.
 ///
@@ -552,6 +552,6 @@ mod exec_event_v3_layout {
         assert_eq!(EXEC_EVENT_STRUCT_SIZE, 932);
         assert_eq!(EXEC_EVENT_SCHEMA_VERSION, 3);
         assert_eq!(MAX_ENV_LEN, 256);
-        assert_eq!(MAX_ENV_SCAN, 32);
+        assert_eq!(MAX_ENV_SCAN, 16);
     }
 }

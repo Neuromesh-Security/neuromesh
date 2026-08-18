@@ -72,7 +72,7 @@
  */
 #define MAX_ENV_CAPTURE  8U
 #define MAX_ENV_STR_LEN  32U
-#define MAX_ENV_SCAN     32U
+#define MAX_ENV_SCAN     16U
 
 #define ENV_FLAG_COUNT_TRUNCATED (1U << 0)
 #define ENV_FLAG_PROBE_FAULT     (1U << 1)

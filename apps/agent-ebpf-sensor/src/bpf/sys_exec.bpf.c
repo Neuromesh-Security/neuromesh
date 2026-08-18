@@ -391,50 +391,137 @@ static __always_inline void capture_argv(struct exec_event_t *event,
 	}
 }
 
-/* Inlined byte-compare — `__builtin_memcmp` becomes an extern `memcmp` once
- * capture_envp is a bounded loop (not fully unrolled), which BPF cannot resolve. */
-static __always_inline int nm_prefix_eq(const char *s, const char *p, const int n)
+/* Word-sized prefix tests — byte-by-byte compares forked ~1M verifier states. */
+static __always_inline __u64 env_load_u64(const char *s)
 {
-	int i;
+	__u64 v;
 
-#pragma clang loop unroll(full)
-	for (i = 0; i < n; i++) {
-		if (s[i] != p[i])
-			return 0;
+	__builtin_memcpy(&v, s, 8);
+	return v;
+}
+
+static __always_inline __u32 env_load_u32(const char *s)
+{
+	__u32 v;
+
+	__builtin_memcpy(&v, s, 4);
+	return v;
+}
+
+static __always_inline int env_is_ld_preload(const char *s)
+{
+	return env_load_u64(s) == 0x4f4c4552505f444cULL && s[8] == 'A' &&
+	       s[9] == 'D' && s[10] == '=';
+}
+
+static __always_inline int env_is_ld_audit(const char *s)
+{
+	return env_load_u64(s) == 0x54494455415f444cULL && s[8] == '=';
+}
+
+static __always_inline int env_is_ld_library_path(const char *s)
+{
+	return env_load_u64(s) == 0x415242494c5f444cULL &&
+	       env_load_u32(s + 8) == 0x505f5952U && s[12] == 'A' &&
+	       s[13] == 'T' && s[14] == 'H' && s[15] == '=';
+}
+
+static __always_inline int env_is_path(const char *s)
+{
+	return env_load_u32(s) == 0x48544150U && s[4] == '=';
+}
+
+static __always_inline int env_is_node_options(const char *s)
+{
+	return env_load_u64(s) == 0x54504f5f45444f4eULL &&
+	       env_load_u32(s + 8) == 0x534e4f49U && s[12] == '=';
+}
+
+static __always_inline int env_is_pythonpath(const char *s)
+{
+	return env_load_u64(s) == 0x41504e4f48545950ULL && s[8] == 'T' &&
+	       s[9] == 'H' && s[10] == '=';
+}
+
+static __always_inline int env_is_bash_env(const char *s)
+{
+	return env_load_u64(s) == 0x564e455f48534142ULL && s[8] == '=';
+}
+
+static __always_inline int env_is_prompt_command(const char *s)
+{
+	return env_load_u64(s) == 0x435f54504d4f5250ULL &&
+	       env_load_u32(s + 8) == 0x414d4d4fU && s[12] == 'N' &&
+	       s[13] == 'D' && s[14] == '=';
+}
+
+static __always_inline int env_is_sslkeylogfile(const char *s)
+{
+	return env_load_u64(s) == 0x4f4c59454b4c5353ULL &&
+	       env_load_u32(s + 8) == 0x4c494647U && s[12] == 'E' &&
+	       s[13] == '=';
+}
+
+/*
+ * Last-wins fill of name-fixed slots. Do not track a `seen` bitmask inside
+ * the scan loop: 9 bits × loop iterations was the 1000001-insn cliff
+ * (3 names passed; 6+ names failed at every MAX_ENV_SCAN).
+ */
+static __always_inline void env_store32(char *dst, const char *src, long ret,
+					struct exec_event_t *event, __u8 bit)
+{
+	__builtin_memcpy(dst, src, MAX_ENV_STR_LEN);
+	if (ret >= (long)MAX_ENV_STR_LEN) {
+		event->env_trunc_mask |= bit;
+		event->capture_status |= CAPTURE_ENV;
 	}
-	return 1;
 }
 
-static __always_inline void nm_copy32(char *dst, const char *src)
+static __always_inline void env_match_store(struct exec_event_t *event,
+					    const char *probe, long ret, char c0)
 {
-	int i;
-
-#pragma clang loop unroll(full)
-	for (i = 0; i < (int)MAX_ENV_STR_LEN; i++)
-		dst[i] = src[i];
-}
-
-static __always_inline __u16 env_allowlist_bit(const char *s)
-{
-	if (nm_prefix_eq(s, "LD_PRELOAD=", 11))
-		return 1U << 0;
-	if (nm_prefix_eq(s, "LD_AUDIT=", 9))
-		return 1U << 1;
-	if (nm_prefix_eq(s, "LD_LIBRARY_PATH=", 16))
-		return 1U << 2;
-	if (nm_prefix_eq(s, "PATH=", 5))
-		return 1U << 3;
-	if (nm_prefix_eq(s, "NODE_OPTIONS=", 13))
-		return 1U << 4;
-	if (nm_prefix_eq(s, "PYTHONPATH=", 11))
-		return 1U << 5;
-	if (nm_prefix_eq(s, "BASH_ENV=", 9))
-		return 1U << 6;
-	if (nm_prefix_eq(s, "PROMPT_COMMAND=", 15))
-		return 1U << 7;
-	if (nm_prefix_eq(s, "SSLKEYLOGFILE=", 14))
-		return 1U << 8;
-	return 0;
+	if (c0 == 'L' && probe[1] == 'D') {
+		if (env_is_ld_preload(probe)) {
+			env_store32(event->env[0], probe, ret, event, 1U);
+			return;
+		}
+		if (env_is_ld_audit(probe)) {
+			env_store32(event->env[1], probe, ret, event, 2U);
+			return;
+		}
+		if (env_is_ld_library_path(probe))
+			env_store32(event->env[2], probe, ret, event, 4U);
+		return;
+	}
+	if (c0 == 'P') {
+		if (probe[1] == 'A' && env_is_path(probe)) {
+			env_store32(event->env[3], probe, ret, event, 8U);
+			return;
+		}
+		if (probe[1] == 'Y' && env_is_pythonpath(probe)) {
+			env_store32(event->env[5], probe, ret, event, 32U);
+			return;
+		}
+		if (probe[1] == 'R' && env_is_prompt_command(probe))
+			env_store32(event->env[7], probe, ret, event, 128U);
+		return;
+	}
+	if (c0 == 'N' && env_is_node_options(probe)) {
+		env_store32(event->env[4], probe, ret, event, 16U);
+		return;
+	}
+	if (c0 == 'B' && env_is_bash_env(probe)) {
+		env_store32(event->env[6], probe, ret, event, 64U);
+		return;
+	}
+	if (c0 == 'S' && env_is_sslkeylogfile(probe)) {
+		if (event->env[7][0]) {
+			event->env_flags |= ENV_FLAG_SLOTS_FULL;
+			event->capture_status |= CAPTURE_ENV;
+		} else {
+			env_store32(event->env[7], probe, ret, event, 128U);
+		}
+	}
 }
 
 static __always_inline void capture_envp(struct exec_event_t *event,
@@ -446,18 +533,13 @@ static __always_inline void capture_envp(struct exec_event_t *event,
 	 * Same mechanism as capture_argv: syscall envp pointer
 	 * (execve args[2] / execveat args[3]) — NOT mm_struct / BTF.
 	 * Only compile-time allowlisted NAME=VALUE strings are copied into
-	 * fixed 8×32 slots. All other names are omitted (not name-redacted).
+	 * fixed 8x32 slots. All other names are omitted (not name-redacted).
 	 *
-	 * Verifier: argv can `#pragma unroll(full)` because dest is argv[i]
-	 * with i folded to a constant. Envp cannot — it scans MAX_ENV_SCAN (32)
-	 * pointers and packs hits into 8 slots, so a full unroll duplicates
-	 * the 8-way store + 9 memcmps 32 times and blows the complexity budget.
-	 * Keep the scan as a bounded loop (PATH_DENY-style); copy the already-
-	 * probed 32 B stack buffer into a constant slot (no second user walk).
+	 * Verifier: no `seen` bitmask in the scan loop (that 2^n state
+	 * explosion was processed 1000001 / 1M). Last-wins per fixed slot.
 	 */
 	__u32 i;
 	__u32 hits = 0;
-	__u16 seen = 0;
 	__u32 scanned = 0;
 	const char __user *env_ptr = 0;
 	char probe[MAX_ENV_STR_LEN];
@@ -495,62 +577,26 @@ static __always_inline void capture_envp(struct exec_event_t *event,
 		}
 
 		{
-			__u16 bit = env_allowlist_bit(probe);
+			char c0 = probe[0];
 
-			if (!bit)
+			if (c0 != 'L' && c0 != 'P' && c0 != 'N' && c0 != 'B' && c0 != 'S')
 				continue;
-			if (seen & bit)
-				continue;
-			if (hits >= MAX_ENV_CAPTURE) {
-				event->env_flags |= ENV_FLAG_SLOTS_FULL;
-				event->capture_status |= CAPTURE_ENV;
-				continue;
-			}
-
-			/*
-			 * Packed dest must be a literal index in each arm
-			 * (argv pattern). Do not memcpy(event->env[hits]) —
-			 * variable offset is rejected.
-			 */
-#define NM_PACK_ENV_SLOT(n)                                                        \
-	if (hits == (n)) {                                                         \
-		nm_copy32(event->env[(n)], probe);                                 \
-		if (ret >= (long)sizeof(event->env[(n)])) {                        \
-			event->env_trunc_mask |= (__u8)(1U << (n));                \
-			event->capture_status |= CAPTURE_ENV;                      \
-		}                                                                  \
-	} else
-			NM_PACK_ENV_SLOT(0)
-			NM_PACK_ENV_SLOT(1)
-			NM_PACK_ENV_SLOT(2)
-			NM_PACK_ENV_SLOT(3)
-			NM_PACK_ENV_SLOT(4)
-			NM_PACK_ENV_SLOT(5)
-			NM_PACK_ENV_SLOT(6)
-			{
-				nm_copy32(event->env[7], probe);
-				if (ret >= (long)sizeof(event->env[7])) {
-					event->env_trunc_mask |= (__u8)(1U << 7);
-					event->capture_status |= CAPTURE_ENV;
-				}
-			}
-#undef NM_PACK_ENV_SLOT
-			seen |= bit;
-			hits++;
+			env_match_store(event, probe, ret, c0);
 		}
+	}
+
+#pragma clang loop unroll(full)
+	for (i = 0; i < MAX_ENV_CAPTURE; i++) {
+		if (event->env[i][0])
+			hits++;
 	}
 
 	event->env_ptr_count = (__u16)scanned;
 	event->env_len = (__u16)hits;
 
-	if (scanned == MAX_ENV_SCAN && envp) {
-		const char __user *extra = 0;
-
-		if (bpf_probe_read_user(&extra, sizeof(extra), &envp[MAX_ENV_SCAN]) == 0 &&
-		    extra) {
-			event->env_flags |= ENV_FLAG_COUNT_TRUNCATED;
-			event->capture_status |= CAPTURE_ENV;
-		}
+	if (scanned == MAX_ENV_SCAN) {
+		event->env_flags |= ENV_FLAG_COUNT_TRUNCATED;
+		event->capture_status |= CAPTURE_ENV;
 	}
 }
 
