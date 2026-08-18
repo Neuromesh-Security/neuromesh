@@ -110,9 +110,16 @@ The following limitations are **known and documented** — not bugs filed under 
 
 **Impact:** High-volume exec visibility includes command-line correlation for incident review (within the argv byte cap).
 
-### Rust passive tracepoint not attached
+### Rust `neuromesh_exec_hook` (historical — not a limitation)
 
-`neuromesh_exec_hook` (Rust tracepoint in `ebpf/src/main.rs`) is compiled and verifier-tested but **not loaded or attached** in the orchestrator. Production passive exec enrichment flows through the C tracepoint; rich lineage telemetry on **all** exec events is a planned follow-up.
+`neuromesh_exec_hook` was a prototype Rust `sys_enter_execve` tracepoint. It was
+**removed** in [PR #35](https://github.com/Neuromesh-Security/neuromesh/pull/35)
+(`dc06aeda`). It is not in `ebpf/src/main.rs`, is not verifier-tested in CI, and
+is not reserved for a future release. Production exec visibility is C
+`nm_proc_events` (`sys_enter_execve`) and `nm_execveat` (`sys_enter_execveat`).
+
+Earlier core notes that called this “compiled and verifier-tested but not
+attached” were stale after PR #35.
 
 ### LSM enforcement scope
 
@@ -133,7 +140,7 @@ User-space micro-benchmarks are measured. Kernel syscall latency delta, burst CP
 | Item | Target |
 |------|--------|
 | Enriched C tracepoint (comm, filename, capped argv) | **Landed (argv via [#46](https://github.com/Neuromesh-Security/neuromesh/issues/46))** |
-| Attach Rust `neuromesh_exec_hook` or consolidate dual tracepoint | v0.1.1 |
+| Attach Rust `neuromesh_exec_hook` or consolidate dual tracepoint | **Not planned.** Prototype **removed** in [PR #35](https://github.com/Neuromesh-Security/neuromesh/pull/35) (`dc06aeda`). Visibility is C `nm_proc_events` + `nm_execveat`. |
 | `execveat` tracepoint hook | **Landed (via [#126](https://github.com/Neuromesh-Security/neuromesh/issues/126))** — one `sys_enter_execveat` attach also covers `fexecve` |
 | Wasm policy hot-path evaluation | v0.2.0 |
 | Runtime policy API (no code change for whitelist) | Enterprise |

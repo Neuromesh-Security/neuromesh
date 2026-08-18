@@ -23,12 +23,12 @@ We implement a **dual-hook architecture**:
 
 | Surface | Program | Role |
 |---------|---------|------|
-| Tracepoint | `neuromesh_exec_hook` | Passive telemetry for all exec events |
-| LSM | `neuromesh_lsm_exec_guard` | Active deny for blacklisted path prefixes |
+| Tracepoint | `nm_proc_events` + `nm_execveat` (C) | Passive telemetry for all `execve` / `execveat` (`fexecve`) events |
+| LSM | `nm_lsm_bprm` (Rust) | Active deny for blacklisted path prefixes |
 
-Both hooks emit enriched `SecurityTelemetryEvent` records (pid, ppid, comm,
-uid/euid, filename) into a shared RingBuf. User-space applies static rules,
-behavioral frequency analysis, and (future) Wasm policies.
+Visibility events go to `PROCESS_EVENTS`. LSM **blocked** events go to `TELEMETRY_RINGBUF`. User-space applies static rules, behavioral frequency analysis, and (future) Wasm policies.
+
+The 2026-07-12 draft of this table named a Rust tracepoint `neuromesh_exec_hook` and LSM `neuromesh_lsm_exec_guard` in one ELF, sharing one RingBuf. That prototype TP was **removed** in [PR #35](https://github.com/Neuromesh-Security/neuromesh/pull/35) (`dc06aeda`); it is not compiled, not verifier-tested, and not a future-work item. See Amendments.
 
 ### Why LSM for blocking
 
@@ -68,6 +68,16 @@ behavioral frequency analysis, and (future) Wasm policies.
   full CO-RE; behavior normalizer treats `ppid == 0` as non-actionable.
 
 ## Amendments
+
+### 2026-07-15 — Rust `neuromesh_exec_hook` removed ([PR #35](https://github.com/Neuromesh-Security/neuromesh/pull/35), `dc06aeda`)
+
+The original Decision table named `neuromesh_exec_hook` as the passive
+tracepoint inside the Rust eBPF object. That program was a prototype
+`sys_enter_execve` hook. PR #35 deleted it to resolve split-brain C vs Rust
+tracepoints. Production visibility is C `nm_proc_events` /
+`nm_execveat` → `PROCESS_EVENTS`. Enforcement remains Rust `nm_lsm_bprm` →
+`TELEMETRY_RINGBUF` (blocked events only). This **does not** reopen attaching
+the Rust TP; it is historical, not a gap.
 
 ### 2026-08-16 — exec tracepoint coverage extended to `execveat` ([#126](https://github.com/Neuromesh-Security/neuromesh/issues/126))
 

@@ -39,7 +39,7 @@ The **eBPF Sensor Core** (`apps/agent-ebpf-sensor`) is Neuromesh's Ring 0 runtim
 
 **Exec visibility covers both syscall entry points.** `nm_execveat` closes the observability gap previously tracked in the threat model: `execveat(2)` — and therefore `fexecve(3)`, which glibc implements as `execveat(fd, "", argv, envp, AT_EMPTY_PATH)` — now reaches `PROCESS_EVENTS` alongside `execve(2)`. Records are distinguished by the `EXEC_FLAG_SYSCALL_EXECVEAT` bit in `ExecEvent::flags`. **Enforcement was never affected:** `nm_lsm_bprm` already covered both syscalls because they share the `bprm_check_security` hook.
 
-**Not attached at runtime:** `neuromesh_exec_hook` (Rust tracepoint) — compiled and verifier-tested, reserved for enriched passive exec telemetry in a future release. Production visibility volume flows through the C tracepoint; enforcement and rich lineage flow through LSM.
+**Historical (not a gap):** `neuromesh_exec_hook` was a prototype Rust `sys_enter_execve` tracepoint. It was **removed** in [PR #35](https://github.com/Neuromesh-Security/neuromesh/pull/35) (`dc06aeda`) — it is not in the current enforcement ELF, is not verifier-tested, and is not reserved for a future release. Production exec visibility is entirely the C programs `nm_proc_events` (`sys_enter_execve`) and `nm_execveat` (`sys_enter_execveat`). Enforcement remains Rust `nm_lsm_bprm` (blocked events on `TELEMETRY_RINGBUF`).
 
 ### Architecture
 
