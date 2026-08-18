@@ -1,3 +1,19 @@
+//! Intentional scaffold for a deferred Wasm policy hot-path on LSM events.
+//!
+//! This is **not** abandoned or dead code. `WasmPolicyEngine::new()` is
+//! constructed at orchestrator startup and held for the agent lifetime so a
+//! future wasmtime integration can plug in without a bootstrap rewrite.
+//! Load/evaluate are not production-wired: `load_policy_from_path` returns
+//! [`PolicyError::NotImplemented`]; [`WasmPolicyEngine::evaluate`] always
+//! [`PolicyVerdict::Allow`].
+//!
+//! Out of scope for current sprints: wasmtime, a module ABI, and fail-closed
+//! deny on the LSM hot path are a multi-week initiative, not a sprint item.
+//! Deferred explicitly as v0.1.0-core out-of-scope in
+//! `docs/threat-model.md` §1 and planned as v0.2.0 in
+//! `docs/RELEASE_v0.1.0-core.md` ("Wasm policy hot-path evaluation").
+//! Related: ADR-001 related work ("Wasm policy engine scaffolding").
+
 #![allow(dead_code)]
 
 use neuromesh_common::SecurityTelemetryEvent;
