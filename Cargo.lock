@@ -2359,6 +2359,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "splunk-hec-forwarder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "prometheus",
+ "reqwest",
+ "rskafka",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
