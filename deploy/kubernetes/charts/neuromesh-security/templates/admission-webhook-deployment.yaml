@@ -1,0 +1,109 @@
+{{- if .Values.admissionWebhook.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neuromesh-admission-webhook
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook
+    app.kubernetes.io/part-of: neuromesh
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: neuromesh-admission-webhook
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: neuromesh-admission-webhook
+        app.kubernetes.io/component: admission-webhook
+        app.kubernetes.io/part-of: neuromesh
+    spec:
+      serviceAccountName: neuromesh-admission-webhook
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: webhook
+          image: {{ include "neuromesh.imageRef" .Values.images.admissionWebhook }}
+          imagePullPolicy: {{ .Values.images.admissionWebhook.pullPolicy }}
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          env:
+            - name: WEBHOOK_LISTEN_ADDR
+              value: {{ .Values.admissionWebhook.env.listenAddr | quote }}
+            - name: WEBHOOK_TLS_CERT_FILE
+              value: {{ .Values.admissionWebhook.env.tlsCertFile | quote }}
+            - name: WEBHOOK_TLS_KEY_FILE
+              value: {{ .Values.admissionWebhook.env.tlsKeyFile | quote }}
+            - name: NEUROMESH_COSIGN_PUBLIC_KEY_PATH
+              value: {{ .Values.admissionWebhook.env.cosignPublicKeyPath | quote }}
+            - name: NEUROMESH_COSIGN_VERIFY_MODE
+              value: {{ .Values.admissionWebhook.env.cosignVerifyMode | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /etc/webhook/certs
+              readOnly: true
+            - name: cosign-pubkey
+              mountPath: /etc/webhook/cosign
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+{{ toYaml .Values.admissionWebhook.resources | indent 12 }}
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: {{ .Values.secrets.admissionWebhookTls.name }}
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        - name: cosign-pubkey
+          secret:
+            secretName: {{ .Values.secrets.cosignPubkey.name }}
+            items:
+              - key: cosign.pub
+                path: cosign.pub
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: neuromesh-admission-webhook
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/part-of: neuromesh
+{{- end }}

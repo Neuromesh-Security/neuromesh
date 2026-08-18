@@ -1,0 +1,41 @@
+{{- if and .Values.admissionWebhook.enabled .Values.validatingWebhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: neuromesh-validate-pods
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/part-of: neuromesh
+webhooks:
+  - name: neuromesh.security.validate-pods
+    clientConfig:
+      service:
+        name: neuromesh-admission-webhook
+        namespace: {{ include "neuromesh.namespace" . }}
+        path: /validate
+        port: {{ .Values.admissionWebhook.service.port }}
+      caBundle: {{ .Values.validatingWebhook.caBundle | quote }}
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: {{ .Values.validatingWebhook.failurePolicy }}
+    timeoutSeconds: {{ .Values.validatingWebhook.timeoutSeconds }}
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-public
+            - kube-node-lease
+    objectSelector:
+      matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: NotIn
+          values:
+            - neuromesh-admission-webhook
+{{- end }}

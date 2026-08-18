@@ -1,0 +1,50 @@
+{{- if .Values.desiredPolicy.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.desiredPolicy.name }}
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-zt-policy-engine
+    app.kubernetes.io/component: desired-policy
+    app.kubernetes.io/part-of: neuromesh
+  annotations:
+    neuromesh.security/desired-policy-plane: bundle-only-pr1
+    neuromesh.security/rego-coupling: "blocked-until-pr2"
+data:
+  policy.json: |
+{{ .Values.desiredPolicy.config.policyJson | indent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: neuromesh-zt-policy-engine-desired-policy
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-zt-policy-engine
+    app.kubernetes.io/component: desired-policy
+    app.kubernetes.io/part-of: neuromesh
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ .Values.desiredPolicy.name | quote }}]
+    verbs: ["get", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: neuromesh-zt-policy-engine-desired-policy
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-zt-policy-engine
+    app.kubernetes.io/component: desired-policy
+    app.kubernetes.io/part-of: neuromesh
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: neuromesh-zt-policy-engine-desired-policy
+subjects:
+  - kind: ServiceAccount
+    name: neuromesh-zt-policy-engine
+    namespace: {{ include "neuromesh.namespace" . }}
+{{- end }}

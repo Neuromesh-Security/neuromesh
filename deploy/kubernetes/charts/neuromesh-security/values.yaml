@@ -1,0 +1,124 @@
+namespace:
+  create: true
+  name: neuromesh-system
+
+images:
+  agent:
+    repository: ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor
+    tag: ""
+    digest: sha256:413424ce5ec990e97b58014daa05ae8addab27de5afcac74904eb28fdcd5de2d
+    pullPolicy: IfNotPresent
+  policyEngine:
+    repository: ghcr.io/neuromesh-security/neuromesh-zt-policy-engine
+    tag: ""
+    digest: sha256:eceb694cc12409a935ca3d83a9ac856b0f3e4461131c63b193142aa828572255
+    pullPolicy: IfNotPresent
+  admissionWebhook:
+    repository: ghcr.io/neuromesh-security/neuromesh-k8s-admission-webhook
+    tag: "0.1.0"
+    digest: ""
+    pullPolicy: IfNotPresent
+
+agent:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  env:
+    rustLog: info
+    policyEngineUrl: http://neuromesh-zt-policy-engine.neuromesh-system.svc.cluster.local:8080
+    policyBundleTokenFile: /etc/neuromesh/policy-bundle/token
+    policyBundlePublicKeyPath: /etc/neuromesh/policy-bundle-pubkey/bundle.pub
+    cosignPublicKeyPath: /etc/neuromesh/cosign/cosign.pub
+    bytecodeManifestPath: /etc/neuromesh/bytecode-manifest.json
+    bytecodeManifestSigPath: /etc/neuromesh/bytecode-manifest.sig
+    identityCorrelator: "1"
+    cgroupRoot: /host/sys/fs/cgroup
+    pathDenyKeyBytes: ""
+
+policyEngine:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    port: "8080"
+    spiffeTrustDomain: neuromesh.security
+    spiffeTrustBundleMode: static_file
+    spiffeBundlePath: /etc/neuromesh/spiffe/bundle.pem
+    policyBundleTokenFile: /etc/neuromesh/policy-bundle/token
+    policyBundleSigningKeyPath: /etc/neuromesh/policy-bundle-signing/signing.pem
+    desiredPolicyEnable: "false"
+    desiredPolicyConfigMap: neuromesh-desired-policy
+
+admissionWebhook:
+  enabled: true
+  service:
+    port: 443
+    targetPort: https
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  env:
+    listenAddr: ":8443"
+    tlsCertFile: /etc/webhook/certs/tls.crt
+    tlsKeyFile: /etc/webhook/certs/tls.key
+    cosignPublicKeyPath: /etc/webhook/cosign/cosign.pub
+    cosignVerifyMode: key
+
+desiredPolicy:
+  enabled: true
+  name: neuromesh-desired-policy
+  config:
+    policyJson: |
+      {
+        "deny_path_prefixes": ["/tmp/", "/dev/shm/", "/var/tmp/"],
+        "identity_allow_exceptions": {
+          "scope_path_prefix": "/tmp/",
+          "spiffe_ids": [
+            "spiffe://neuromesh.security/ns/default/sa/agent-ebpf-sensor",
+            "spiffe://neuromesh.security/ns/default/sa/zt-policy-engine",
+            "spiffe://neuromesh.security/ns/default/sa/ai-threat-detector"
+          ]
+        }
+      }
+
+validatingWebhook:
+  enabled: true
+  caBundle: REPLACE_WITH_BASE64_CA_BUNDLE
+  failurePolicy: Ignore
+  timeoutSeconds: 15
+
+secrets:
+  create: false
+  policyBundleToken:
+    name: neuromesh-policy-bundle-token
+    token: ""
+  policyBundleSigningKey:
+    name: neuromesh-policy-bundle-signing-key
+    signingPem: ""
+  policyBundlePubkey:
+    name: neuromesh-policy-bundle-pubkey
+    bundlePub: ""
+  spiffeTrustBundle:
+    name: neuromesh-spiffe-trust-bundle
+    bundlePem: ""
+  cosignPubkey:
+    name: neuromesh-cosign-pubkey
+    cosignPub: ""
+  admissionWebhookTls:
+    name: neuromesh-admission-webhook-tls
+    tlsCrt: ""
+    tlsKey: ""

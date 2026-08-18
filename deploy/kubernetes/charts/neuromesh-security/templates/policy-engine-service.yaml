@@ -1,0 +1,20 @@
+{{- if .Values.policyEngine.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: neuromesh-zt-policy-engine
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-zt-policy-engine
+    app.kubernetes.io/component: zt-policy-engine
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: neuromesh-zt-policy-engine
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+{{- end }}

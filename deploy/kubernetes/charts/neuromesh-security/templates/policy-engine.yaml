@@ -1,0 +1,122 @@
+{{- if .Values.policyEngine.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neuromesh-zt-policy-engine
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-zt-policy-engine
+    app.kubernetes.io/component: zt-policy-engine
+    app.kubernetes.io/part-of: neuromesh
+    app.kubernetes.io/version: "0.1.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: neuromesh-zt-policy-engine
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: neuromesh-zt-policy-engine
+        app.kubernetes.io/component: zt-policy-engine
+        app.kubernetes.io/part-of: neuromesh
+    spec:
+      serviceAccountName: neuromesh-zt-policy-engine
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: zt-policy-engine
+          image: {{ include "neuromesh.imageRef" .Values.images.policyEngine }}
+          imagePullPolicy: {{ .Values.images.policyEngine.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: ZT_POLICY_ENGINE_PORT
+              value: {{ .Values.policyEngine.env.port | quote }}
+            - name: NEUROMESH_SPIFFE_TRUST_DOMAIN
+              value: {{ .Values.policyEngine.env.spiffeTrustDomain | quote }}
+            - name: NEUROMESH_SPIFFE_TRUST_BUNDLE_MODE
+              value: {{ .Values.policyEngine.env.spiffeTrustBundleMode | quote }}
+            - name: NEUROMESH_SPIFFE_BUNDLE_PATH
+              value: {{ .Values.policyEngine.env.spiffeBundlePath | quote }}
+            - name: NEUROMESH_POLICY_BUNDLE_TOKEN_FILE
+              value: {{ .Values.policyEngine.env.policyBundleTokenFile | quote }}
+            - name: NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH
+              value: {{ .Values.policyEngine.env.policyBundleSigningKeyPath | quote }}
+            {{- if eq (.Values.policyEngine.env.desiredPolicyEnable | toString) "true" }}
+            - name: NEUROMESH_DESIRED_POLICY_ENABLE
+              value: "true"
+            - name: NEUROMESH_DESIRED_POLICY_CONFIGMAP
+              value: {{ .Values.policyEngine.env.desiredPolicyConfigMap | quote }}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: policy-bundle-token
+              mountPath: /etc/neuromesh/policy-bundle
+              readOnly: true
+            - name: policy-bundle-signing-key
+              mountPath: /etc/neuromesh/policy-bundle-signing
+              readOnly: true
+            - name: spiffe-trust-bundle
+              mountPath: /etc/neuromesh/spiffe
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+{{ toYaml .Values.policyEngine.resources | indent 12 }}
+      volumes:
+        - name: policy-bundle-token
+          secret:
+            secretName: {{ .Values.secrets.policyBundleToken.name }}
+            items:
+              - key: token
+                path: token
+        - name: policy-bundle-signing-key
+          secret:
+            secretName: {{ .Values.secrets.policyBundleSigningKey.name }}
+            items:
+              - key: signing.pem
+                path: signing.pem
+        - name: spiffe-trust-bundle
+          secret:
+            secretName: {{ .Values.secrets.spiffeTrustBundle.name }}
+            items:
+              - key: bundle.pem
+                path: bundle.pem
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: neuromesh-zt-policy-engine
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-zt-policy-engine
+    app.kubernetes.io/part-of: neuromesh
+{{- end }}

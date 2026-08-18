@@ -1,0 +1,6 @@
+apiVersion: v2
+name: neuromesh-security
+description: Production Helm chart for Neuromesh Kubernetes deployment manifests.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
