@@ -118,14 +118,26 @@ fn load_hec_token_file() -> Result<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_token(path: &std::path::Path, token: &str) {
         let mut f = std::fs::File::create(path).expect("create token file");
         f.write_all(token.as_bytes()).expect("write token");
     }
 
+    fn clear_forwarder_env() {
+        std::env::remove_var(SPLUNK_HEC_URL_ENV);
+        std::env::remove_var(SPLUNK_HEC_TOKEN_FILE_ENV);
+        std::env::remove_var(KAFKA_BROKERS_ENV);
+    }
+
     #[test]
     fn missing_token_file_yields_inactive_not_panic() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_forwarder_env();
+
         let dir = std::env::temp_dir().join(format!("nm-hec-token-missing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
@@ -138,20 +150,22 @@ mod tests {
         assert!(ForwarderConfig::load_hec_token_from_env().is_err());
         assert!(ForwarderConfig::from_env().is_none());
 
-        std::env::remove_var(SPLUNK_HEC_TOKEN_FILE_ENV);
+        clear_forwarder_env();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn from_env_none_without_url_or_kafka() {
-        std::env::remove_var(SPLUNK_HEC_URL_ENV);
-        std::env::remove_var(SPLUNK_HEC_TOKEN_FILE_ENV);
-        std::env::remove_var(KAFKA_BROKERS_ENV);
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_forwarder_env();
         assert!(ForwarderConfig::from_env().is_none());
     }
 
     #[test]
     fn from_env_active_when_url_token_kafka_present() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_forwarder_env();
+
         let dir = std::env::temp_dir().join(format!("nm-hec-token-ok-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
@@ -172,9 +186,7 @@ mod tests {
         assert_eq!(cfg.hec_token, "test-hec-token");
         assert_eq!(cfg.kafka_topic, DEFAULT_KAFKA_TOPIC);
 
-        std::env::remove_var(SPLUNK_HEC_URL_ENV);
-        std::env::remove_var(SPLUNK_HEC_TOKEN_FILE_ENV);
-        std::env::remove_var(KAFKA_BROKERS_ENV);
+        clear_forwarder_env();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
