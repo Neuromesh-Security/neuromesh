@@ -73,6 +73,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY packages packages
 COPY tests tests
 COPY apps/agent-ebpf-sensor apps/agent-ebpf-sensor
+# Workspace member required for cargo metadata even though this image
+# only builds -p agent-ebpf-sensor (not linked into the agent binary).
+COPY apps/splunk-hec-forwarder apps/splunk-hec-forwarder
 COPY --from=ebpf-builder \
     /build/apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf \
     /build/apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/release/agent-ebpf-sensor-ebpf
