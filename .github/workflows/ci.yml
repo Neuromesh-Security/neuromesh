@@ -234,6 +234,9 @@ jobs:
       - name: Unit tests — splunk-hec-forwarder (Kafka slow-path consumer)
         run: cargo test -p splunk-hec-forwarder
 
+      - name: Unit tests — datadog-forwarder (Kafka slow-path consumer)
+        run: cargo test -p datadog-forwarder
+
       - name: Coverage gate (≥70% line coverage)
         run: |
           cargo llvm-cov \
