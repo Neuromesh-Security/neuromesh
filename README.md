@@ -352,10 +352,24 @@ The orchestrator handles `SIGINT`/`SIGTERM` with a **500 ms drain window** befor
 
 ---
 
+## Contributing
+
+Install the **required** pre-commit hook before your first commit:
+
+```bash
+git config core.hooksPath scripts/hooks
+```
+
+The hook runs `cargo fmt`, `cargo clippy -D warnings`, and `shellcheck` on
+staged Rust/shell files and **blocks the commit** if tooling is missing or
+checks fail. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for toolchain requirements
+and troubleshooting.
+
 ## Documentation index
 
 | Document | Purpose |
 |----------|---------|
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Pre-commit hook install, local lint gates, CI parity |
 | [`docs/performance-baseline.md`](docs/performance-baseline.md) | Criterion micro-benchmarks, load-test methodology, Prometheus metrics |
 | [`docs/threat-model.md`](docs/threat-model.md) | MITRE ATT&CK mapping, execve evasion surface, mitigations |
 | [`docs/architecture-decision-records/adr-001-lsm-vs-tracepoint.md`](docs/architecture-decision-records/adr-001-lsm-vs-tracepoint.md) | LSM vs tracepoint design rationale |
