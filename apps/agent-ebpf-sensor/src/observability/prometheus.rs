@@ -22,7 +22,13 @@ async fn metrics_handler(metrics: Arc<AgentMetrics>) -> Result<String, axum::htt
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-async fn healthz_handler(probe: Arc<AgentHealthProbe>) -> (StatusCode, [(axum::http::HeaderName, &'static str); 1], String) {
+async fn healthz_handler(
+    probe: Arc<AgentHealthProbe>,
+) -> (
+    StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
     let report = probe.evaluate();
     let body = AgentHealthProbe::to_json(&report);
     let status = if report.live {
