@@ -30,7 +30,7 @@ use neuromesh_common::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 const SYS_EXEC_BPF: &[u8] = include_bytes!("../target/bpf/sys_exec.bpf.o");
@@ -73,6 +73,8 @@ pub struct EnforcementLoaded {
 pub struct EnforcementArmed {
     pub shutdown: CancellationToken,
     pub bpf_pin_root: PathBuf,
+    pub enf_paths: agent_ebpf_sensor::lsm_pin::EnforcementPinPaths,
+    pub policy_sync_state: Arc<RwLock<PolicySyncState>>,
     pub enforcement_bpf: Ebpf,
     pub metrics: Arc<AgentMetrics>,
     pub _lsm_link_pin: PinnedLink,
@@ -347,6 +349,7 @@ pub async fn arm_correlator_deny_and_lsm(
             policy_state_for_pinned_resume()
         }
     };
+    let policy_sync_state = Arc::new(RwLock::new(policy_state));
 
     let lsm_program: &mut Lsm = enforcement_bpf
         .program_mut(LSM_EXEC_GUARD_PROG)
@@ -361,7 +364,7 @@ pub async fn arm_correlator_deny_and_lsm(
     let _policy_sync = policy_sync::spawn_policy_sync(
         deny_maps,
         Arc::clone(&identity_maps),
-        policy_state,
+        Arc::clone(&policy_sync_state),
         Some(policy_hooks),
         shutdown.clone(),
     );
@@ -369,6 +372,8 @@ pub async fn arm_correlator_deny_and_lsm(
     Ok(EnforcementArmed {
         shutdown,
         bpf_pin_root,
+        enf_paths,
+        policy_sync_state,
         enforcement_bpf,
         metrics,
         _lsm_link_pin,

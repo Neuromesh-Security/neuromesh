@@ -27,7 +27,7 @@ use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 /// Environment variable for the policy-engine base URL (e.g. `http://127.0.0.1:8080`).
@@ -440,7 +440,7 @@ async fn run_allowlist_followup(hooks: &IdentityPolicyHooks, identity: &Identity
 pub fn spawn_policy_sync(
     deny_maps: PathDenyMaps,
     identity_maps: Arc<Mutex<IdentityAllowMaps>>,
-    mut state: PolicySyncState,
+    state: Arc<RwLock<PolicySyncState>>,
     hooks: Option<IdentityPolicyHooks>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
@@ -479,7 +479,7 @@ pub fn spawn_policy_sync(
                     tokio::select! {
                         _ = shutdown.cancelled() => return,
                         _ = tokio::time::sleep(POLICY_SYNC_INTERVAL) => {
-                            state.mark_success("bootstrap");
+                            state.write().await.mark_success("bootstrap");
                         }
                     }
                 }
@@ -518,7 +518,7 @@ pub fn spawn_policy_sync(
                     tokio::select! {
                         _ = shutdown.cancelled() => return,
                         _ = tokio::time::sleep(POLICY_SYNC_INTERVAL) => {
-                            state.refresh_stale_flag();
+                            state.write().await.refresh_stale_flag();
                         }
                     }
                 }
@@ -556,7 +556,7 @@ pub fn spawn_policy_sync(
                     tokio::select! {
                         _ = shutdown.cancelled() => return,
                         _ = tokio::time::sleep(POLICY_SYNC_INTERVAL) => {
-                            state.refresh_stale_flag();
+                            state.write().await.refresh_stale_flag();
                         }
                     }
                 }
@@ -600,6 +600,7 @@ pub fn spawn_policy_sync(
                     let identity_outcome = {
                         let mut deny_guard = deny_maps.lock().await;
                         let mut id_guard = identity_maps.lock().await;
+                        let mut state_guard = state.write().await;
                         // TTL gate every tick — outage past expires_at kills ALL exceptions.
                         let _ = invalidate_if_expired(
                             &mut id_guard,
@@ -613,7 +614,7 @@ pub fn spawn_policy_sync(
                             &public_key_pem,
                             &mut deny_guard,
                             &mut id_guard,
-                            &mut state,
+                            &mut state_guard,
                             &mut identity_expires_at,
                             hooks.as_ref(),
                         )
@@ -621,24 +622,24 @@ pub fn spawn_policy_sync(
                         {
                             Ok(identity) => Some(identity),
                             Err(error) => {
-                                state.refresh_stale_flag();
+                                state_guard.refresh_stale_flag();
                                 let _ = invalidate_if_expired(
                                     &mut id_guard,
                                     identity_expires_at,
                                     SystemTime::now(),
                                 );
-                                if state.stale {
+                                if state_guard.stale {
                                     tracing::warn!(
                                         target: "neuromesh::policy_sync",
                                         %error,
-                                        last_version = %state.last_version,
+                                        last_version = %state_guard.last_version,
                                         "policy sync failed; deny list STALE — continuing with last-known-good"
                                     );
                                 } else {
                                     tracing::warn!(
                                         target: "neuromesh::policy_sync",
                                         %error,
-                                        last_version = %state.last_version,
+                                        last_version = %state_guard.last_version,
                                         "policy sync failed — retaining last-known-good deny list"
                                     );
                                 }
