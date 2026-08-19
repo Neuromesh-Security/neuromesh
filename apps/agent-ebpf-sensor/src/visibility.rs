@@ -4,7 +4,9 @@ use crate::startup::{network_filter_bpf, sys_exec_bpf, EnforcementArmed};
 use agent_ebpf_sensor::ingestion;
 use agent_ebpf_sensor::load_with_map_pinning;
 use agent_ebpf_sensor::monitoring::{start_network_monitor, start_process_monitor};
-use agent_ebpf_sensor::observability::{spawn_health_monitor, spawn_metrics_server};
+use agent_ebpf_sensor::observability::{
+    spawn_health_monitor, spawn_metrics_server, AgentHealthProbe,
+};
 use agent_ebpf_sensor::pipeline::TelemetryPipeline;
 use agent_ebpf_sensor::telemetry_stream::{self, TelemetryStreamHandle};
 use agent_ebpf_sensor::wasm_policy::WasmPolicyEngine;
@@ -44,6 +46,8 @@ pub async fn arm_visibility_and_observability(
     let EnforcementArmed {
         shutdown,
         bpf_pin_root,
+        enf_paths,
+        policy_sync_state,
         mut enforcement_bpf,
         metrics,
         _lsm_link_pin,
@@ -87,7 +91,11 @@ pub async fn arm_visibility_and_observability(
     .await?;
 
     spawn_health_monitor(rate_limit_drops, Arc::clone(&metrics), shutdown.clone());
-    spawn_metrics_server(Arc::clone(&metrics), shutdown.clone()).await?;
+    let health_probe = Arc::new(AgentHealthProbe::new(
+        enf_paths,
+        Arc::clone(&policy_sync_state),
+    ));
+    spawn_metrics_server(Arc::clone(&metrics), health_probe, shutdown.clone()).await?;
 
     let mut network_bpf = Ebpf::load(network_filter_bpf())?;
     start_network_monitor(

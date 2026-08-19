@@ -84,6 +84,10 @@ spec:
                 - SYS_RESOURCE
                 - PERFMON
                 - SYS_PTRACE
+          ports:
+            - name: http
+              containerPort: 9090
+              protocol: TCP
           volumeMounts:
             - name: sys-fs-bpf
               mountPath: /sys/fs/bpf
@@ -111,10 +115,13 @@ spec:
           resources:
 {{ toYaml .Values.agent.resources | indent 12 }}
           livenessProbe:
-            exec:
-              command: ["/bin/sh", "-c", "pgrep -x agent-ebpf-sensor"]
+            httpGet:
+              path: /healthz
+              port: http
             initialDelaySeconds: 15
-            periodSeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
       volumes:
         - name: sys-fs-bpf
           hostPath:
