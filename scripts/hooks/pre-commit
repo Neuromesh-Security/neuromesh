@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Neuromesh pre-commit hook — fail-closed local gate mirroring Production CI Lint.
+#
+# Triggered file types:
+#   *.rs (staged) → cargo fmt --all --check, cargo clippy -D warnings (workspace)
+#   *.sh (staged) → shellcheck on each staged script
+#
+# Missing required tools when matching files are staged → exit 1 (never skip).
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+mapfile -t STAGED_RS < <(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.rs$' || true)
+mapfile -t STAGED_SH < <(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.sh$' || true)
+
+require_cmd() {
+  local cmd="$1"
+  local hint="$2"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "pre-commit: ERROR: required command '$cmd' not found in PATH." >&2
+    echo "pre-commit: $hint" >&2
+    echo "pre-commit: Commit blocked (fail-closed — incomplete toolchain)." >&2
+    exit 1
+  fi
+}
+
+if ((${#STAGED_RS[@]} > 0)); then
+  require_cmd cargo "Install Rust via rustup: https://rustup.rs"
+  require_cmd rustfmt "Install rustfmt: rustup component add rustfmt"
+
+  echo "pre-commit: ${#STAGED_RS[@]} staged .rs file(s) — checking workspace formatting..."
+  if ! cargo fmt --all -- --check; then
+    echo "" >&2
+    echo "pre-commit: ERROR: cargo fmt --all -- --check failed (formatting drift)." >&2
+    echo "pre-commit: Fix with: cargo fmt --all" >&2
+    echo "pre-commit: Commit blocked." >&2
+    exit 1
+  fi
+
+  if ! cargo clippy --version >/dev/null 2>&1; then
+    echo "pre-commit: ERROR: cargo clippy not available (clippy component missing)." >&2
+    echo "pre-commit: Install with: rustup component add clippy" >&2
+    echo "pre-commit: Commit blocked (fail-closed — incomplete toolchain)." >&2
+    exit 1
+  fi
+
+  echo "pre-commit: running cargo clippy --workspace --all-targets -- -D warnings ..."
+  if ! cargo clippy --workspace --all-targets -- -D warnings; then
+    echo "" >&2
+    echo "pre-commit: ERROR: Clippy reported warnings or errors (-D warnings)." >&2
+    echo "pre-commit: Commit blocked." >&2
+    exit 1
+  fi
+fi
+
+if ((${#STAGED_SH[@]} > 0)); then
+  require_cmd shellcheck "Install shellcheck (e.g. apt install shellcheck, brew install shellcheck)."
+
+  echo "pre-commit: ${#STAGED_SH[@]} staged .sh file(s) — running shellcheck..."
+  for script in "${STAGED_SH[@]}"; do
+    if [[ ! -f "$script" ]]; then
+      echo "pre-commit: ERROR: staged shell script missing on disk: $script" >&2
+      exit 1
+    fi
+    echo "pre-commit: shellcheck $script"
+    if ! shellcheck "$script"; then
+      echo "" >&2
+      echo "pre-commit: ERROR: shellcheck failed on $script" >&2
+      echo "pre-commit: Commit blocked." >&2
+      exit 1
+    fi
+  done
+fi
+
+echo "pre-commit: all checks passed."
+exit 0
