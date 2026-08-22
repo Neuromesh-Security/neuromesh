@@ -29,7 +29,7 @@ For the narrative summary of the same live checks, see [Security Verification](.
 
 ## Executive Summary
 
-The eBPF Sensor Core adds **sub-microsecond user-space detection overhead** on the LSM telemetry hot path. **Live-tested execve throughput after the OS-thread generator fix ([PR #160](https://github.com/Neuromesh-Security/neuromesh/pull/160)) is `average_eps=816`** on the same **1-vCPU** Ubuntu 24.04 BPF-LSM host (`spawned=24860`, `failed=0`, `elapsed=30.48s`, `workers=128`, `worker_model=std::thread`). A 15 s worker sweep in the same session reported `SWEEP_BEST workers=8 average_eps=738` (`host_parallelism=1`). Both figures are **generator-bound**, not agent-bound — same honesty as the historical pre-#160 **962** (30 s Tokio-serialized best). That comfortably exceeds realistic Kubernetes **node process-creation** (tens to low hundreds of `execve`/s; §2.3.1) — about **16×** a conservative typical worker (~50 EPS) at 816, and about **4×** a pathological 110-pod exec-probe farm. The BPF token bucket at ~500k/CPU is a **fork-bomb safety valve**, not a tested SLO and not a production-justified target.
+The eBPF Sensor Core adds **sub-microsecond user-space detection overhead** on the LSM telemetry hot path. **Live-tested execve throughput after the OS-thread generator fix ([PR #160](https://github.com/Neuromesh-Security/neuromesh/pull/160)) is `average_eps=816`** on the same **1-vCPU** Ubuntu 24.04 BPF-LSM host (`spawned=24860`, `failed=0`, `elapsed=30.48s`, `workers=128`, `worker_model=std::thread`). A 15 s worker sweep in the same session reported `SWEEP_BEST workers=8 average_eps=738` (`host_parallelism=1`). Both figures are **generator-bound**, not agent-bound — same honesty as the historical pre-#160 **962** (30 s Tokio-serialized best). That comfortably exceeds realistic Kubernetes **node process-creation** (tens to low hundreds of `execve`/s; §2.3.1) — about **16×** a conservative typical worker (~50 EPS) at 816, and about **3.7×** a pathological 110-pod exec-probe farm (816 / 220). The BPF token bucket at ~500k/CPU is a **fork-bomb safety valve**, not a tested SLO and not a production-justified target.
 
 | Layer | Median latency | Throughput | Measurement status |
 |-------|----------------|------------|-------------------|
@@ -237,7 +237,7 @@ On `host_parallelism=1`, 128 OS threads are **oversubscribed**. A 15 s cell at 8
 
 Kubernetes is designed for **≤ 110 pods per node** ([Considerations for large clusters](https://kubernetes.io/docs/setup/best-practices/cluster-large/)). An `exec` probe **forks a process on every check**; default `periodSeconds` is **10**, minimum **1**. Official docs warn that exec probes at high density / low period cost node CPU and recommend HTTP/TCP/gRPC instead ([Pod lifecycle](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/), [Configure probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/)).
 
-Headroom below uses **816** (post-#160 30 s standard). vs historical 962 the typical-worker multiplier moves **~19× → ~16×** (material). Pathological 110-pod 1 s farm stays **~4×** (816/220 ≈ 3.7). Sweep-best 738 would be **~15×** vs ~50 EPS.
+Headroom below uses **816** (post-#160 30 s standard). vs historical 962 the typical-worker multiplier moves **~19× → ~16×** (material: 962/50 vs 816/50). The pathological 110-pod 1 s farm uses the **same formula** (tested EPS / 220). It is **not** a different baseline: 962/220 ≈ **4.4×**, 816/220 ≈ **3.7×**. One-significant-figure “~4×” would hide that drop; the table uses **~3.7×**. Sweep-best 738 would be **~15×** vs ~50 EPS and **~3.4×** vs 220.
 
 | Node scenario | Execve/s (reasoned) | Headroom vs **816 EPS** (post-#160 standard) |
 |---------------|---------------------|-----------------------------------------------|
@@ -245,10 +245,10 @@ Headroom below uses **816** (post-#160 30 s standard). vs historical 962 the typ
 | **Conservative typical (headline)** | **~50** | **~16×** (816 / 50) |
 | Max-density, one exec liveness probe, default 10 s period (110 × 1 / 10) | 11 | **~74×** |
 | Max-density, exec liveness **and** readiness, default 10 s (110 × 2 / 10) | 22 | **~37×** |
-| Pathological anti-pattern: 110 pods × 2 exec probes × 1 s period (Kubernetes warns against this) | 220 | **~4×** |
+| Pathological anti-pattern: 110 pods × 2 exec probes × 1 s period (Kubernetes warns against this) | 220 | **~3.7×** (816 / 220; historical 962 / 220 ≈ 4.4×) |
 | CI/builder bursts (shell, compilers) | hundreds–low thousands | ~1× to a few ×; **not** the typical-worker claim |
 
-**Headline for evaluators:** live-tested at **`average_eps=816`** (post-#160, 1 vCPU, generator-bound; 30 s standard) — about **16×** a conservative typical production worker (~50 execve/s) and about **4×** even a pathological 110-pod exec-probe farm. Typical workers using HTTP/TCP probes sit in the tens of execve/s, so headroom is larger than 16×. CI builder nodes can approach this band in bursts; that is a different workload class and is **not** claimed as 16×.
+**Headline for evaluators:** live-tested at **`average_eps=816`** (post-#160, 1 vCPU, generator-bound; 30 s standard) — about **16×** a conservative typical production worker (~50 execve/s) and about **3.7×** even a pathological 110-pod exec-probe farm (816 / 220). Typical workers using HTTP/TCP probes sit in the tens of execve/s, so headroom is larger than 16×. CI builder nodes can approach this band in bursts; that is a different workload class and is **not** claimed as 16×.
 
 **Still unmeasured (and not required for the production claim above):** `perf stat` execve latency delta; full post-burst drain-to-idle; post-#160 `ebpf_events_dropped_total` (not in the paste-back); whether the BPF token bucket drops when *synthetically* driven at its 500k/CPU constant. Those remain optional lab items, not procurement blockers.
 
@@ -489,7 +489,7 @@ Stress and live kernel benchmarks are **`#[ignore]`** — not executed in GitHub
 | How much user-space tax per exec event? | **~1 µs** (benign LSM path) |
 | Can RuleEngine keep up with production? | **>8M evaluations/sec** per core (benign) |
 | **What execve rate is tested?** | Post-#160 (1 vCPU, generator-bound): **`average_eps=816`** (30 s standard, 128 workers); sweep **`SWEEP_BEST workers=8 average_eps=738`**. Historical pre-#160: **962** (band 880–962, zero RingBuf drops, 3 runs). |
-| **How does that compare to production?** | **~16×** a conservative typical worker (~50 execve/s) at 816; **~4×** a pathological 110-pod exec-probe farm (~220/s). Typical HTTP-probe workers are tens/s, so headroom is larger. See §2.3.1. |
+| **How does that compare to production?** | **~16×** a conservative typical worker (~50 execve/s) at 816; **~3.7×** a pathological 110-pod exec-probe farm (816 / 220). Typical HTTP-probe workers are tens/s, so headroom is larger. See §2.3.1. |
 | What is the 500k/CPU number? | In-kernel **fork-bomb safety valve** (`RATE_LIMIT_BUCKET`). Not a tested SLO and not a production-justified target. |
 | What is still unmeasured? | Syscall latency delta (`perf stat`); full post-burst drain-to-idle; post-#160 Prometheus drop counters (not in the paste-back). **Not** “we still owe a 500k run.” |
 | Where are graphs? | Placeholders in Section 2; populate into `docs/assets/` |
