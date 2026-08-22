@@ -53,7 +53,7 @@ flowchart TB
         RB1[("PROCESS_EVENTS<br/>1 MiB RingBuf")]
         RB2[("NETWORK_EVENTS<br/>256 KiB RingBuf")]
         RB3[("TELEMETRY_RINGBUF<br/>1 MiB RingBuf")]
-        RL["RLIMIT_BUCKET<br/>~500k evt/s per CPU<br/>shared by both tracepoints"]
+        RL["RLIMIT_BUCKET<br/>fork-bomb safety valve<br/>(BPF constant; not a tested SLO)"]
         TP --> RL
         TPAT --> RL
         RL --> RB1
@@ -86,7 +86,7 @@ flowchart TB
 
 ### Performance summary
 
-Measured user-space detection latency (Criterion, Linux x86_64, release profile). Kernel syscall overhead and end-to-end EPS require live hardware validation — see [`docs/performance-baseline.md`](docs/performance-baseline.md).
+Measured user-space detection latency (Criterion, Linux x86_64, release profile). **Live-tested execve throughput is 962 EPS with zero drops** (band 880–962, three independent runs) — see [`docs/performance-baseline.md`](docs/performance-baseline.md) §2.3. That is the documented ceiling, not 100k or 500k.
 
 #### User-space detection (measured)
 
@@ -97,20 +97,19 @@ Measured user-space detection latency (Criterion, Linux x86_64, release profile)
 | `DataNormalizer` (single spawn) | **956 ns** | **1.05 Melem/s** | Criterion |
 | End-to-end benign path | **~1.07 µs** | RuleEngine + DataNormalizer | Derived |
 
-#### Kernel telemetry pipeline (CI / load-test targets)
+#### Kernel telemetry pipeline (live-tested)
 
-| Metric | Standard tier | Extreme tier | Status |
-|--------|---------------|--------------|--------|
-| **Execve EPS (generator target)** | 100,000/sec | 500,000/sec | Stress harness defined; `#[ignore]` |
-| **Kernel rate-limit ceiling** | 500,000/sec per CPU | 500,000/sec per CPU | Implemented (`RATE_LIMIT_BUCKET`) |
-| **RingBuf reserve drop counter** | `DROPPED_EVENTS` (network) | — | Kernel-side only |
-| **User-space MPSC backpressure** | Channel default 8192 | Tunable via env | Implemented |
-| **Syscall latency overhead (execve)** | _TBD_ | _TBD_ | Post-CI: `perf stat` delta |
-| **RingBuf drop rate under burst** | _TBD_ | _TBD_ | Post-CI: stress test + Prometheus |
-| **Agent CPU utilization (steady state)** | _TBD_ | _TBD_ | Post-CI: `/metrics` + node exporter |
-| **Agent CPU utilization (burst)** | _TBD_ | _TBD_ | Post-CI: `execve_stress_test` |
-
-> Placeholders marked _TBD_ are filled by running the load-test methodology in [`docs/performance-baseline.md`](docs/performance-baseline.md) on Linux hardware with the live agent attached. Do not treat placeholders as procurement guarantees.
+| Metric | Value | Status |
+|--------|-------|--------|
+| **Execve EPS (tested live, zero drops)** | **962/sec** (band 880–962, 3 runs) | Measured on 1-vCPU Ubuntu 24.04 BPF-LSM host |
+| **Headroom vs typical K8s worker** | **~19×** vs ~50 execve/s conservative typical | Derived from Kubernetes 110-pods/node envelope + probe defaults — [`performance-baseline.md`](docs/performance-baseline.md) §2.3.1 |
+| **Kernel token-bucket (fork-bomb valve)** | 500,000/sec per CPU (`RATE_LIMIT_BUCKET`) | Implemented BPF constant — **not a tested SLO**, not a production-justified target |
+| **RingBuf reserve drop counter** | `DROPPED_EVENTS` (network) | Kernel-side only |
+| **User-space MPSC backpressure** | Channel default 8192 | Implemented; kept up at tested 962 EPS |
+| **Syscall latency overhead (execve)** | _TBD_ | Optional `perf stat` delta — not required for the 962 EPS claim |
+| **RingBuf drop rate at tested load** | **0%** | Measured (3 runs) |
+| **Agent CPU utilization (idle)** | **0.400%** of 1 core | Measured (Issue #100) |
+| **Agent CPU utilization (tested burst)** | **~38–41%** of 1 core during burst | Measured (`pidstat`) |
 
 #### Observability endpoints
 

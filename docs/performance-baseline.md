@@ -12,15 +12,15 @@ It does **not** measure **security correctness** (whether enforcement and detect
 | Runtime tamper detection of pinned enforcement artifacts | [PR #74](https://github.com/Neuromesh-Security/neuromesh/pull/74) / [PR #76](https://github.com/Neuromesh-Security/neuromesh/pull/76), [`scripts/manual_verify_runtime_integrity.sh`](../scripts/manual_verify_runtime_integrity.sh) |
 | Identity-exception allow / deny / scope / TTL correctness (all 7 scenarios) | [PR #79](https://github.com/Neuromesh-Security/neuromesh/pull/79), [`scripts/manual_verify_identity_exception.sh`](../scripts/manual_verify_identity_exception.sh) |
 
-These two categories are **independent**. Security correctness being verified does **not** close the high-throughput performance/load TBDs in this document — those require generating load near the documented EPS tier targets. Three independent live standard-tier stress runs (see §2.3–§2.4) validated **zero-drop correctness and two-phase agent CPU behavior at ~880–962 EPS only**. That band was **generator-bound** (blocking `Command::status()` on a non-yielding Tokio task). The OS-thread generator fix must be re-measured on the **existing** 1-vCPU droplet **before** any hardware scale-up; it does **not** by itself make 500k EPS realistic (see §2.3.1).
+These two categories are **independent**. Security correctness being verified does **not** by itself prove throughput. The **tested execve claim** in this document is the live-measured figure in §2.3: **962 EPS** (band **880–962**, three independent runs, **zero** RingBuf/MPSC drops). That is the procurement ceiling. Those runs were **generator-bound** (blocking `Command::status()` on a non-yielding Tokio task). The OS-thread generator fix ([PR #160](https://github.com/Neuromesh-Security/neuromesh/pull/160)) is in the tree; **post-fix EPS has not been re-measured**, so 962 remains the documented number. The in-kernel **500k/CPU** token bucket is a fork-bomb **safety valve** (`NS_PER_TOKEN` in `sys_exec.bpf.c`), not a measured production rate and not a load-test obligation — see §2.3.1 (production headroom) and §2.3.2 (generator physics).
 
 For the narrative summary of the same live checks, see [Security Verification](../README.md#security-verification) in the repository README.
 
 ---
 
-**Status:** Security correctness verified live (see section above) · §2.3 measured (pre-fix generator-bound ~880–962 EPS, zero drops, 3 independent runs) · §2.3.1 generator OS-thread fix landed, **post-fix ceiling not yet re-measured** · §2.4 measured (two-phase CPU documented; full drain-to-idle not captured) · §2.5 measured (Slice 2b-ii correlator overhead, single droplet run, Issue #100) · Extreme tier / kernel rate-limiter saturation untested — blocked on generator physics, not only on “bigger hardware”  
+**Status:** Security correctness verified live (see section above) · **§2.3 tested ceiling: 962 EPS, zero drops** (band 880–962, 3 independent runs, generator-bound pre-#160) · §2.3.1 production-headroom justification · §2.3.2 OS-thread generator fix landed, **post-fix EPS not re-measured** · §2.4 measured (two-phase CPU; full drain-to-idle not captured) · §2.5 measured (Slice 2b-ii correlator overhead, single droplet run, Issue #100) · 500k/CPU token-bucket saturation is **not** a test target  
 **Release:** `v0.1.0-core`  
-**Date:** 2026-08-03  
+**Date:** 2026-08-22  
 **Component:** `apps/agent-ebpf-sensor`  
 **Harness:** [Criterion.rs](https://github.com/bheisler/criterion.rs) v0.5 (user space) · `execve_stress_test` (kernel load)  
 **Environment:** Linux x86_64, release profile
@@ -29,15 +29,15 @@ For the narrative summary of the same live checks, see [Security Verification](.
 
 ## Executive Summary
 
-The eBPF Sensor Core adds **sub-microsecond user-space detection overhead** on the LSM telemetry hot path and implements **kernel-side rate limiting at ~500k execve events/sec per CPU** before events reach user space. This document separates **measured** micro-benchmark results from **reproducible load-test procedures** used to populate end-to-end kernel metrics post-CI.
+The eBPF Sensor Core adds **sub-microsecond user-space detection overhead** on the LSM telemetry hot path. **Live-tested execve throughput is 962 EPS with zero drops** (best of three 30 s runs on a 1-vCPU Ubuntu 24.04 BPF-LSM host; pre-#160 generator). That comfortably exceeds realistic Kubernetes **node process-creation** (tens to low hundreds of `execve`/s; §2.3.1) — about **19×** a conservative typical worker (~50 EPS) and about **4×** a pathological 110-pod exec-probe farm. The OS-thread generator fix is merged; it has **not** produced a new live number, so **962 remains the documented ceiling**. The BPF token bucket at ~500k/CPU is a **fork-bomb safety valve**, not a tested SLO and not a production-justified target.
 
 | Layer | Median latency | Throughput | Measurement status |
 |-------|----------------|------------|-------------------|
 | User-space `RuleEngine` (benign) | **115 ns** | **8.69 Melem/s** | Measured (Criterion) |
 | User-space `DataNormalizer` (spawn) | **956 ns** | **1.05 Melem/s** | Measured (Criterion) |
 | Combined benign detection path | **~1.07 µs** | — | Derived |
-| Kernel execve capture (tracepoint) | _TBD_ | Up to **500k EPS/CPU** (rate limit) | Load test required |
-| RingBuf → user-space drain | _TBD_ | Bounded by MPSC (default 8192) | Load test required |
+| Kernel execve capture (tracepoint) | — | **962 EPS** (band 880–962), **0 drops** | Measured (live, 3 runs) |
+| RingBuf → user-space drain | — | Kept up at 962 EPS (MPSC default 8192) | Measured at tested load |
 
 ---
 
@@ -112,14 +112,14 @@ Kernel eBPF capture latency is measured separately (Section 2).
 
 | Hook | Program | RingBuf | Backpressure mechanism |
 |------|---------|---------|------------------------|
-| `sys_enter_execve` | `nm_proc_events` | `PROCESS_EVENTS` (**1 MiB** in `sys_exec.bpf.c`) | Per-CPU token bucket (~500k/sec) → `RATE_LIMIT_DROPS` |
+| `sys_enter_execve` | `nm_proc_events` | `PROCESS_EVENTS` (**1 MiB** in `sys_exec.bpf.c`) | Per-CPU token bucket (BPF constant ~500k/sec, **fork-bomb valve**) → `RATE_LIMIT_DROPS` |
 | `sys_enter_execveat` | `nm_execveat` | `PROCESS_EVENTS` (same 1 MiB buffer) | **Same** per-CPU token bucket → `RATE_LIMIT_DROPS` |
 | `tcp_connect` | `nm_tcp_connect` | `NETWORK_EVENTS` (256 KiB) | RingBuf reserve failure → `DROPPED_EVENTS` |
 | `bprm_check_security` | `nm_lsm_bprm` | `TELEMETRY_RINGBUF` (256 KiB) | Reserve failure → `TELEMETRY_STATS.lost_events_count` |
 
 User-space exec consumer: `process_monitor.rs` — AsyncFd poller → bounded MPSC (default **8192**) → correlation worker.
 
-**Capacity note for the `execveat` attach (Issue #126):** the second tracepoint did **not** require a RingBuf resize. Both exec programs call the same `rate_limit_allow()` against the same `RLIMIT_BUCKET` per-CPU token bucket, so the *aggregate* admitted rate is still one ~500k EPS ceiling rather than one per hook — the figures below remain the governing numbers. At 932 B per record (ExecEvent v3, Issue #140) a 1 MiB buffer holds ~1,126 in-flight records. The `execveat` attach did **not** require a RingBuf resize; env capture grows record size but keeps the same 1 MiB map and shared 500k EPS ceiling.
+**Capacity note for the `execveat` attach (Issue #126):** the second tracepoint did **not** require a RingBuf resize. Both exec programs call the same `rate_limit_allow()` against the same `RLIMIT_BUCKET` per-CPU token bucket, so the *aggregate* admitted rate is still one shared BPF constant (~500k/CPU **safety valve**) rather than one per hook. At 932 B per record (ExecEvent v3, Issue #140) a 1 MiB buffer holds ~1,126 in-flight records. That constant is **not** a tested or production-justified throughput; live-tested throughput is **962 EPS** (§2.3).
 
 ### 2.2 Latency overhead (execve syscall path)
 
@@ -139,9 +139,8 @@ sudo perf stat -e syscalls:sys_enter_execve,cycles,instructions \
 
 | Scenario | Syscall rate | Agent CPU (cores) | Incremental execve latency | Status |
 |----------|--------------|-------------------|---------------------------|--------|
-| Idle agent | — | _TBD_ | _TBD_ | Post-CI |
-| Standard burst (100k EPS target) | 100k/sec | _TBD_ | _TBD_ | Post-CI |
-| Extreme burst (500k EPS target) | 500k/sec | _TBD_ | _TBD_ | Post-CI |
+| Idle agent | — | **0.400%** of 1 core (§2.5) | _TBD_ (`perf stat` delta) | CPU measured; latency TBD |
+| Tested live burst | **880–962 EPS** | **~38–41%** during burst (§2.4) | _TBD_ (`perf stat` delta) | EPS + CPU measured; latency TBD |
 
 > **Graph placeholder:** `docs/assets/perf-execve-latency-overhead.svg` — plot p50/p99 execve latency delta (agent attached vs detached) across EPS tiers. Generate from `perf stat` JSON export after CI run.
 
@@ -151,19 +150,19 @@ sudo perf stat -e syscalls:sys_enter_execve,cycles,instructions \
 
 `PROCESS_EVENTS` is sized at **1 MiB** (`max_entries = 1024 * 1024` in `sys_exec.bpf.c` — not 256 KiB). Approximate in-flight slots if the consumer stalls:
 
-| Schema | `sizeof(ExecEvent)` | ≈ events fitting in 1 MiB | Fill time at 500k EPS (rate-limit ceiling) |
-|--------|---------------------|---------------------------|---------------------------------------------|
-| v1 (pre-#46) | 408 B | ≈ **2570** | ≈ **5.1 ms** |
-| v2 (with 256 B argv) | 668 B | ≈ **1569** | ≈ **3.1 ms** |
-| v3 (argv + allowlisted env, Issue #140) | 932 B | ≈ **1126** | ≈ **2.3 ms** |
+| Schema | `sizeof(ExecEvent)` | ≈ events fitting in 1 MiB | Fill time at **962 EPS** (tested) | Fill time if token bucket saturated (~500k/CPU, **not a test target**) |
+|--------|---------------------|---------------------------|-----------------------------------|---------------------------------------------------------------------|
+| v1 (pre-#46) | 408 B | ≈ **2570** | ≈ **2.7 s** | ≈ **5.1 ms** |
+| v2 (with 256 B argv) | 668 B | ≈ **1569** | ≈ **1.6 s** | ≈ **3.1 ms** |
+| v3 (argv + allowlisted env, Issue #140) | 932 B | ≈ **1126** | ≈ **1.2 s** | ≈ **2.3 ms** |
 
-v3 is another ~28% reduction in ringbuf depth vs v2 (932/668 ≈ 1.40× bytes/event), in the **same class** as the #46 argv tradeoff. The full env block is **never** copied (scan ≤32 pointers, copy ≤8×32 B allowlisted hits). Primary backpressure remains the per-CPU **500k EPS token bucket**. Operators should watch `ebpf_events_dropped_total` after deploying v3.
+v3 is another ~28% reduction in ringbuf depth vs v2 (932/668 ≈ 1.40× bytes/event), in the **same class** as the #46 argv tradeoff. The full env block is **never** copied (scan ≤32 pointers, copy ≤8×32 B allowlisted hits). At the **tested** 962 EPS, v3 still holds ~1.2 s of in-flight records if the consumer stalls. The ~500k/CPU column is **safety-valve math only**. Operators should watch `ebpf_events_dropped_total` after deploying v3.
 
 #### Kernel-side drops
 
 | Map / counter | Trigger | User-space reader |
 |---------------|---------|-------------------|
-| `RATE_LIMIT_DROPS` | Token bucket exhausted (>500k evt/s per CPU) | Health monitor → `ebpf_events_dropped_total` |
+| `RATE_LIMIT_DROPS` | Token bucket exhausted (BPF constant ~500k evt/s per CPU; **fork-bomb valve**, not a production rate) | Health monitor → `ebpf_events_dropped_total` |
 | `DROPPED_EVENTS` (network) | `bpf_ringbuf_reserve` failure on `NETWORK_EVENTS` | Not exported to Prometheus (v0.1.0-core) |
 | `TELEMETRY_STATS.lost_events_count` | LSM RingBuf reserve failure | Polled every 5s in `main.rs` |
 
@@ -178,16 +177,18 @@ v3 is another ~28% reduction in ringbuf depth vs v2 (932/668 ≈ 1.40× bytes/ev
 
 ```
 drop_rate = (kernel_drops + userspace_drops) / (processed + kernel_drops + userspace_drops)
-
-observed_drop_rate ≈ max(0, generated_eps − min(500_000, user_space_drain_rate))
 ```
 
-| Load tier | Target EPS | Expected kernel drops | Expected user-space drops | Measured drop rate | Status |
-|-----------|------------|----------------------|--------------------------|-------------------|--------|
-| Below ceiling | < 100k | 0 | 0 | **0%** (measured @ ~880–962 EPS, 3 runs) | Measured (live) |
-| Standard | 100k | 0 (at limit) | 0 | **0%** (measured @ ~880–962 EPS achieved; see note) | Measured at low load only |
-| Extreme | 500k+ | > 0 (by design) | 0–_TBD_ | _TBD_ | Untested — generator physics (§2.3.1), not only hardware size |
-| Chaos (MPSC=64) | 100k+ | 0 | > 0 (by design) | _TBD_ | Untested |
+The older `min(500_000, …)` form described the **BPF safety valve**, not a load we have driven or a production-justified target.
+
+| Load | EPS | Expected kernel drops | Expected user-space drops | Measured drop rate | Status |
+|------|-----|----------------------|--------------------------|-------------------|--------|
+| **Tested live (this document’s claim)** | **880–962** | 0 | 0 | **0%** | Measured (3 independent runs, pre-#160 generator) |
+| Typical production worker | ~10–50 | 0 | 0 | — | Derived (§2.3.1); well below tested load |
+| Pathological 110-pod exec-probe farm | ~220 | 0 | 0 | — | Derived (§2.3.1); still below tested load |
+| Harness “standard” knob | 100k *target* | — | — | — | Generator did not hit this; **not a product SLO** |
+| Token-bucket valve | ~500k/CPU | > 0 by design | — | untested | BPF constant; **not a test target** (§2.3.2) |
+| Chaos (MPSC=64) | generator-limited | 0 | > 0 (by design) | _TBD_ | Untested |
 
 ##### Live measurement note (standard tier, Ubuntu 24.04 BPF-LSM host)
 
@@ -195,56 +196,68 @@ Three independent standard-tier harness runs (`EXECVE_STRESS_TIER=standard`, 128
 
 | Signal | Observed (all three runs) |
 |--------|---------------------------|
-| Generator `average_eps` | **880–962** (`target_eps=100000`) — ≈0.9–1.0% of target |
+| Generator `average_eps` | **880–962** (best **962**) |
 | Example run detail | `spawned=28868`, `failed=0`, `elapsed=30.00s`, `average_eps=962` |
 | `ebpf_events_dropped_total` | **0** throughout every run (zero kernel / MPSC drops before, during, and after) |
 | `ebpf_events_processed_total` | Tracks generator volume (example: 12 → 28897, **Δ 28885**) |
 
-**Reproducibility:** Hitting the same ~900 EPS band with **zero drops on every run** is evidence that this ceiling is a **reproducible generator-side bottleneck** on this hardware class — not a fluke and not a kernel-side drop or rate-limiter problem.
+**Reproducibility:** The same ~900 EPS band with **zero drops on every run** is a **reproducible** result on this hardware class — not a fluke and not a kernel-side drop or rate-limiter problem.
 
-**Root cause (pre-fix, generator-bound, not kernel-bound):** The stress harness issued blocking `Command::new("/bin/true").status()` (full `fork`/`posix_spawn`+`execve`+wait) from **async** worker tasks whose loops never `.await`. On a single shared vCPU, Tokio has ~one runtime thread, so one task monopolized that thread until the deadline; the 128-worker knob did not create 128 concurrent spawn pipelines. Aggregate spawn rate saturated near ~900 EPS. The agent’s ~500k/CPU token bucket was never approached.
+**What bound the generator (pre-[PR #160](https://github.com/Neuromesh-Security/neuromesh/pull/160)):** The harness issued blocking `Command::new("/bin/true").status()` (full `fork`/`posix_spawn`+`execve`+wait) from **async** worker tasks whose loops never `.await`. On a single shared vCPU, Tokio has ~one runtime thread, so one task monopolized that thread until the deadline; the 128-worker knob did not create 128 concurrent spawn pipelines. Process lifetime is ~1 ms per spawn (1/962 s ≈ **1.04 ms**). Aggregate spawn rate saturated at **880–962 EPS**. The agent’s token bucket was never approached — and **does not need to be** for a production-credible claim (§2.3.1).
 
-**Interpretation (do not over-read):** These runs validate **zero-drop correctness at low–moderate load only**. They do **not** validate behavior near the **500k/CPU** token-bucket ceiling. They also do **not** remain the generator ceiling after the OS-thread fix (§2.3.1).
+**Documented claim:** **tested to 962 EPS with zero drops**, comfortably above realistic node process-creation. Do **not** read this as “the kernel cannot go faster.” Do **not** read it as “we validated 100k or 500k.” The OS-thread generator fix is in the tree (§2.3.2); **post-fix EPS has not been re-measured**. Until a new live `average_eps` with zero drops exists, **962 remains the tested ceiling**. Raising it requires a paste-back run, not a larger advertised target.
 
-##### 2.3.1 Generator threading fix and 500k-EPS physics (2026-08-22)
+##### 2.3.1 Tested ceiling vs realistic Kubernetes process-creation (2026-08-22)
+
+**Final defensible figure: 962 EPS** (best of three live runs; band 880–962; `ebpf_events_dropped_total = 0`).
+
+**500k EPS is not a production-justified target.** It is a round BPF constant (`NS_PER_TOKEN = 2000` ns → 1e9/2000 = 500,000) that admits events into the RingBuf during a fork-bomb. Kubernetes does not publish an execve/s SLO. Comparable eBPF security tools (Falco, Tetragon) do not publish an execve-only EPS product ceiling either — so this claim is grounded in **our measurement** plus **Kubernetes’ own scale and probe docs**, not in a competitor bake-off.
+
+**Production execve on a worker node** (order of magnitude, from Kubernetes’ published envelope — not a vendor syscall trace):
+
+Kubernetes is designed for **≤ 110 pods per node** ([Considerations for large clusters](https://kubernetes.io/docs/setup/best-practices/cluster-large/)). An `exec` probe **forks a process on every check**; default `periodSeconds` is **10**, minimum **1**. Official docs warn that exec probes at high density / low period cost node CPU and recommend HTTP/TCP/gRPC instead ([Pod lifecycle](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/), [Configure probes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/)).
+
+| Node scenario | Execve/s (reasoned) | Headroom vs **962 EPS** |
+|---------------|---------------------|-------------------------|
+| Quiet long-running worker (HTTP/TCP probes; kubelet + containerd + rare app forks) | ~10–50 | **~19–96×** |
+| **Conservative typical (headline)** | **~50** | **~19×** (962 / 50) |
+| Max-density, one exec liveness probe, default 10 s period (110 × 1 / 10) | 11 | **~87×** |
+| Max-density, exec liveness **and** readiness, default 10 s (110 × 2 / 10) | 22 | **~44×** |
+| Pathological anti-pattern: 110 pods × 2 exec probes × 1 s period (Kubernetes warns against this) | 220 | **~4×** |
+| CI/builder bursts (shell, compilers) | hundreds–low thousands | ~1× to a few ×; **not** the typical-worker claim |
+
+**Headline for evaluators:** live-tested at **962 EPS** with zero drops — about **19×** a conservative typical production worker (~50 execve/s) and about **4×** even a pathological 110-pod exec-probe farm. Typical workers using HTTP/TCP probes sit in the tens of execve/s, so headroom is larger than 19×. CI builder nodes can approach the tested band in bursts; that is a different workload class and is **not** claimed as 19×.
+
+**Still unmeasured (and not required for the production claim above):** `perf stat` execve latency delta; full post-burst drain-to-idle; post-#160 generator EPS; whether the BPF token bucket drops when *synthetically* driven at its 500k/CPU constant. Those remain optional lab items, not procurement blockers.
+
+##### 2.3.2 Generator OS-thread fix ([PR #160](https://github.com/Neuromesh-Security/neuromesh/pull/160)) — physics, not a new product claim
 
 **What changed in code:** `apps/agent-ebpf-sensor/tests/execve_stress_test.rs` now runs **one OS thread per worker** (`std::thread`), each looping blocking `Command::status()`. The test is no longer `#[tokio::test]`. A per-syscall `tokio::task::spawn_blocking` wrapper was **rejected**: it would unblock the runtime but enqueue one blocking-pool job per exec (overhead at the EPS rate) and still share Tokio’s blocking pool. Dedicated threads overlap `wait` with the next spawn without that tax.
 
-**Post-fix ceiling on the existing 1-vCPU droplet: not yet measured.** Do not treat ~900 EPS as the current generator limit, and do not treat the 128/512 worker knobs as 100k/500k capability. Re-run on the **same** neuromesh-dev-lab class host:
+**Post-fix ceiling on the existing 1-vCPU droplet: not yet measured.** Do not treat 962 as the current *generator* limit, and do not treat the 128/512 worker knobs as 100k/500k capability. **Do** treat 962 as the documented *tested* ceiling until a new zero-drop `average_eps` is pasted back. Optional re-run on the same neuromesh-dev-lab class host:
 
 ```bash
-# 1) Worker sweep — new generator ceiling (15s/cell). Do this BEFORE resizing hardware.
+# 1) Worker sweep — this host’s generator ceiling (15s/cell). Optional; does not change the 962 claim until pasted back.
 EXECVE_STRESS_SWEEP=1 cargo test -p agent-ebpf-sensor --test execve_stress_test \
   worker_sweep_finds_generator_ceiling -- --ignored --nocapture
 
-# 2) Standard 30s burst at 128 OS threads (compare to historical ~880–962).
+# 2) Standard 30s burst at 128 OS threads (compare to historical 880–962).
 EXECVE_STRESS_TIER=standard cargo test -p agent-ebpf-sensor --test execve_stress_test \
   -- --ignored --nocapture
 ```
 
-Copy back every `SWEEP_ROW` / `SWEEP_BEST` line and the standard-tier `average_eps`. Until those numbers exist, high-EPS table rows stay TBD.
-
-**Is ~500k processes/second realistic from a single generator process?** **No — not with real `/bin/true` fork+exec+wait, and not by “fixing one thread.”**
+**Is ~500k processes/second realistic from a single generator process?** **No — not with real `/bin/true` fork+exec+wait, and not by “fixing one thread.”** That is why 500k is a BPF valve, not a test obligation.
 
 | Setup | What it can actually generate | Why |
 |-------|-------------------------------|-----|
 | 1 OS thread, full `fork`/`execve`/`wait` of `/bin/true` | ~900 EPS on this 1-vCPU class (**measured**) | Serial process lifetime ≈ 1 ms |
-| 1 process, many OS threads, **same** 1-vCPU host (this fix) | Higher than ~900, still **orders of magnitude below 500k**. Expect a new ceiling in the low thousands to low tens of thousands **until measured** — wait overlap helps; one core + page-table/`waitid`/ELF loader does not vanish | Threads hide `wait`, they do not create extra CPUs |
+| 1 process, many OS threads, **same** 1-vCPU host (#160) | Higher than ~900, still **orders of magnitude below 500k**, **until measured**. Wait overlap helps; one core + page-table/`waitid`/ELF loader does not vanish | Threads hide `wait`, they do not create extra CPUs |
 | 1 process, many OS threads, many-core **target** host | Scales with cores **until** fork/`pid`/dcache/`ld.so` saturate. Published spawn benches are typically **10k–50k/core** class for tiny binaries, not 500k/core | 500k EPS = **2 µs per process lifetime**. Dynamically linked `/bin/true` (ld.so + libc init + exit) is tens of µs **before** fork MM accounting |
 | “Distributed generator” on **other machines** | **Does not inject `execve` into the target kernel.** `execve` is a local syscall. Extra droplets cannot bombard this node’s tracepoint | To load **this** agent you must spawn **on this host**, stealing CPU from the agent |
 
-The kernel token bucket (~500k/CPU) is a **safety valve**, not a measured “we have driven 500k execves through the agent.” Hitting it likely needs a specialized generator (`posix_spawn`/`vfork`, static stub, maybe `execve` without a full wait pipeline) on a **many-core target**, not a second machine and not this 1-vCPU droplet.
+The kernel token bucket (~500k/CPU) is a **safety valve**, not a measured “we have driven 500k execves through the agent.” Hitting it would need a specialized generator (`posix_spawn`/`vfork`, static stub, maybe `execve` without a full wait pipeline) on a **many-core target** — and that experiment is **not** required to defend the 962 EPS production claim in §2.3.1. Extra machines and a bigger droplet are **not** the next procurement step.
 
-**Escalation ladder (do not skip steps; do not buy hardware on a guess):**
-
-1. **Fix the generator** (this change) — otherwise every bigger box still serializes on one Tokio thread.
-2. **Re-test on the existing small droplet** — worker sweep + one standard burst. That number is the **new real 1-vCPU ceiling**.
-3. **Decide from that data:** if the new ceiling is still ≪ 100k, a larger droplet is a **capacity multiplier** (roughly × nproc if CPU-bound), not a jump to 500k. If the sweep plateaus while CPU is idle, the bottleneck is spawn style (`wait`/`fork`), not core count — next step is a specialized generator, not a bigger VM.
-4. **Only then** size target hardware / multi-process-on-host generators to approach the token-bucket test. Multi-process still runs **on the target**.
-
-**Still genuinely untested:** post-fix generator EPS; extreme tier; kernel rate-limiter drop-by-design; any procurement claim that assumes sustained ≥100k EPS through the agent.
-
-> **Graph placeholder:** `docs/assets/perf-ringbuf-drop-rate.svg` — time-series of `ebpf_events_dropped_total` / (`processed` + `dropped`) during `execve_stress_test` standard and extreme tiers.
+> **Graph placeholder:** `docs/assets/perf-ringbuf-drop-rate.svg` — time-series of `ebpf_events_dropped_total` / (`processed` + `dropped`) during the tested ~900 EPS burst.
 
 ### 2.4 CPU utilization
 
@@ -269,14 +282,14 @@ EXECVE_STRESS_TIER=standard \
 | Immediately after burst (remainder of 60s window) | **~92–99.8%** total (`%wait` ~0%) | Near-saturated — consistent with draining a kernel-event backlog emitted during the burst, not idle | Measured |
 | Average across all 12 samples | **67.97%** `%usr` · **69.31%** total CPU | Window mixes burst + post-burst drain; do not treat as steady-state load | Measured |
 | Idle (no workload) | **0.400%** | Correlator-off baseline from Issue #100 (see §2.5); confirms RingBuf idle-spin fix (#103) remains stable vs pre-fix ~93–97% | Measured (single run) |
-| Extreme burst (500k EPS target) | _TBD_ | Untested — generator physics (§2.3.1), not only hardware size | Untested |
+| Extreme / token-bucket saturation | n/a | **Not a test target** — BPF fork-bomb valve, not a production rate (§2.3.1–§2.3.2) | Not pursued |
 | Full drain-to-idle after burst | _TBD_ | **Unknown beyond the 60s window** — sampling ended while agent was still near-saturated; full drain duration not captured | Follow-up |
 
 **Honest limitation:** Post-burst drain duration **beyond the 60s `pidstat` window is unknown**. If precise drain-to-idle figures are ever needed for procurement, re-run with a longer `pidstat` window (or until `%CPU` returns to idle baseline).
 
 DaemonSet resource defaults (`deploy/kubernetes/neuromesh-agent.yaml`): request **100m** CPU, limit **500m** CPU, limit **512Mi** memory.
 
-> **Graph placeholder:** `docs/assets/perf-cpu-utilization.svg` — agent CPU % vs generator EPS during standard/extreme tiers. Two-phase shape (moderate during burst → near-saturation during backlog drain) is the measured pattern at ~900 EPS.
+> **Graph placeholder:** `docs/assets/perf-cpu-utilization.svg` — agent CPU % vs generator EPS. Two-phase shape (moderate during burst → near-saturation during backlog drain) is the measured pattern at **~900 EPS**.
 
 ### 2.5 Slice 2b-ii Correlator Overhead
 
@@ -314,11 +327,11 @@ Isolates the Slice 2b-ii identity correlator tax (K8s pod watch + inotify + BPF 
 
 Defined in `apps/agent-ebpf-sensor/tests/common/stress_profile.rs`:
 
-| Tier | Env | Workers | Duration | Target EPS |
-|------|-----|---------|----------|------------|
-| Standard | `EXECVE_STRESS_TIER=standard` | 128 **OS threads** | 30s | **100,000** (target, not a measured capability) |
-| Extreme | `EXECVE_STRESS_TIER=extreme` | 512 **OS threads** | 60s | **500,000** (target; see §2.3.1 — not realistic as `/bin/true` fork+wait from one 1-vCPU process) |
-| Sweep | `EXECVE_STRESS_SWEEP=1` | 1, 8, 32, 128 | 15s/cell (override `EXECVE_STRESS_DURATION_SECS`) | Find **this host’s** generator ceiling |
+| Tier | Env | Workers | Duration | Meaning |
+|------|-----|---------|----------|---------|
+| Standard (what was actually run) | `EXECVE_STRESS_TIER=standard` | 128 **OS threads** | 30s | Live-tested result: **880–962 EPS**, zero drops — **this is the documented ceiling** |
+| Extreme (harness knob only) | `EXECVE_STRESS_TIER=extreme` | 512 **OS threads** | 60s | Historical 500k *knob* aligned with the BPF token-bucket constant. **Not a production target. Not a validated SLO.** |
+| Sweep (optional) | `EXECVE_STRESS_SWEEP=1` | 1, 8, 32, 128 | 15s/cell (override `EXECVE_STRESS_DURATION_SECS`) | Find **this host’s** generator ceiling. Does not change the 962 claim until a new zero-drop number is pasted back. |
 
 ### Execution
 
@@ -326,7 +339,7 @@ Defined in `apps/agent-ebpf-sensor/tests/common/stress_profile.rs`:
 # Terminal 1 — orchestrator
 cargo run -p agent-ebpf-sensor --features orchestrator --release
 
-# Terminal 2 — worker sweep (existing droplet; do this before resizing)
+# Terminal 2 — worker sweep (optional; does not change the 962 claim until pasted back)
 EXECVE_STRESS_SWEEP=1 cargo test -p agent-ebpf-sensor --test execve_stress_test \
   worker_sweep_finds_generator_ceiling -- --ignored --nocapture
 
@@ -334,7 +347,8 @@ EXECVE_STRESS_SWEEP=1 cargo test -p agent-ebpf-sensor --test execve_stress_test 
 EXECVE_STRESS_TIER=standard \
   cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
 
-# Terminal 2 — extreme tier (expect kernel rate-limit drops)
+# Terminal 2 — extreme tier (optional; exercises the BPF valve *if* the host can generate enough execve)
+# Do not treat a run that fails to reach 500k as a product defect.
 EXECVE_STRESS_TIER=extreme \
   cargo test -p agent-ebpf-sensor --test execve_stress_test -- --ignored --nocapture
 
@@ -446,10 +460,12 @@ Stress and live kernel benchmarks are **`#[ignore]`** — not executed in GitHub
 |----------|----------------------|
 | How much user-space tax per exec event? | **~1 µs** (benign LSM path) |
 | Can RuleEngine keep up with production? | **>8M evaluations/sec** per core (benign) |
-| What happens above 500k execve/sec? | Kernel token bucket drops; counted in Prometheus |
-| What is unmeasured today? | Syscall latency delta; full post-burst drain-to-idle; **post-fix generator EPS** (§2.3.1); high-EPS / kernel rate-limiter drops (extreme). Measured: zero drops @ ~880–962 EPS **pre-fix** (3 runs, §2.3); two-phase burst/drain CPU (§2.4); idle baseline **0.400%** + correlator idle/churn (§2.5, Issue #100, single run) |
-| Where are graphs? | Placeholders in Section 2; populate post-CI into `docs/assets/` |
+| **What execve rate is tested?** | **962 EPS** (band 880–962), **zero drops**, 3 independent runs on a 1-vCPU BPF-LSM host (pre-#160 generator) |
+| **How does that compare to production?** | **~19×** a conservative typical worker (~50 execve/s); **~4×** a pathological 110-pod exec-probe farm (~220/s). Typical HTTP-probe workers are tens/s, so headroom is larger. See §2.3.1. |
+| What is the 500k/CPU number? | In-kernel **fork-bomb safety valve** (`RATE_LIMIT_BUCKET`). Not a tested SLO and not a production-justified target. |
+| What is still unmeasured? | Syscall latency delta (`perf stat`); full post-burst drain-to-idle; **post-#160 generator EPS** (§2.3.2). **Not** “we still owe a 500k run.” 962 remains the claim until a new zero-drop number exists. |
+| Where are graphs? | Placeholders in Section 2; populate into `docs/assets/` |
 
 ---
 
-*User-space figures measured 2026-07-12 via Criterion. Live standard-tier load + pidstat measured 2026-08 (three independent droplet runs, ~880–962 EPS **pre-fix Tokio serialization**, zero drops, two-phase CPU). Generator OS-thread fix 2026-08-22 — **re-measure on the existing droplet before any hardware scale-up**. Slice 2b-ii correlator overhead measured 2026-08 (Issue #100, single EXIT=0 droplet run: baseline 0.400% / idle 0.617% / churn 3.850% CPU). 500k/CPU token-bucket saturation is not implied by either dataset.*
+*User-space figures measured 2026-07-12 via Criterion. Live standard-tier load + pidstat measured 2026-08 (three independent droplet runs, **best 962 EPS**, band 880–962, zero drops, two-phase CPU, **pre-#160 Tokio serialization**). OS-thread generator fix merged 2026-08-22 ([PR #160](https://github.com/Neuromesh-Security/neuromesh/pull/160)) — post-fix EPS not re-measured; 962 remains the documented ceiling. Production-headroom justification recorded 2026-08-22 (§2.3.1): **~19×** a conservative typical K8s worker (~50 execve/s). Slice 2b-ii correlator overhead measured 2026-08 (Issue #100, single EXIT=0 droplet run: baseline 0.400% / idle 0.617% / churn 3.850% CPU). The BPF 500k/CPU token bucket is a safety valve, not a tested or production-justified throughput.*
