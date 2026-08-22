@@ -2,7 +2,7 @@
 
 **Status:** Living document  
 **Release scope:** `v0.1.0-core`  
-**Last updated:** 2026-08-18  
+**Last updated:** 2026-08-22  
 **Component:** `apps/agent-ebpf-sensor` — kernel hooks, telemetry contracts, user-space detection pipeline
 
 ---
@@ -22,12 +22,26 @@
 - Slow Path GNN inference (`ai-threat-detector`)
 - Full argv/env dump from execve tracepoint context (capped argv: Issue #46; capped **allowlist** env values: Issue #140; full env dump remains out of scope)
 
+### Verified kernel and architecture support
+
+**Claimed support is only what has been live-tested.** Do not infer ARM64 or older LTS kernels from the 5.8+ feature floor, from `bpfel-unknown-none`, or from “Linux 5.3 allows bounded loops.”
+
+| Axis | Verified today | Explicitly unverified |
+|------|----------------|----------------------|
+| Architecture | **x86_64 only** | **ARM64 — unsupported / unverified.** No current infrastructure access to test (DigitalOcean droplets are x86_64-only; no ARM64 lab). |
+| Kernel | **~6.8 / ~6.17** — Ubuntu 24.04-class droplet with BPF LSM, plus CI `ubuntu-22.04 / ~6.8-azure` and `ubuntu-24.04 / ~6.17-azure` | **5.15 and 6.1 LTS.** No standard cloud image is currently available for honest live testing: Debian 12 (the stock 6.1 image) was deprecated by the provider; Ubuntu 22.04 cloud images default to HWE **6.8**, not GA **5.15**. |
+
+Closing the 5.15 / 6.1 gap requires a **different infrastructure provider** or a **custom-built older-kernel test environment**. It is a known, documented gap — **not** silently assumed to work. Issue [#52](https://github.com/Neuromesh-Security/neuromesh/issues/52) only fixed CI **labels**; it did not add real 5.15 / 6.1 coverage.
+
+**Why kernel version matters (specific finding, not a generic caveat):** At `PATH_DENY_KEY_BYTES` 16→32 (Issue [#134](https://github.com/Neuromesh-Security/neuromesh/issues/134) / PR [#135](https://github.com/Neuromesh-Security/neuromesh/pull/135)), LLVM stopped fully unrolling the inner prefix compare in `path_starts_with` and emitted a counted loop with a back-edge. The deny scan is nested: outer `i < PATH_DENY_MAX_ENTRIES` (64) with a runtime `i >= count` break; inner `j < 32` with `j >= len` break. Linux **5.3** made counted loops *legal*; that is **not** equivalent verifier maturity to ~6.8 / ~6.17. CI loaded this 32-byte object only on those two Azure HWE kernels. A real 5.15 LSM kernel has **never** loaded it. Static `llvm-objdump` instruction count (including `scripts/compare_path_deny_key_bytes_insns.sh`) is **not** verifier `insn_processed`. Tracked in [#157](https://github.com/Neuromesh-Security/neuromesh/issues/157).
+
 ### Assumptions
 
 - Attackers have unprivileged or compromised user-level access on Linux nodes.
 - Living-off-the-land (LotL) binaries (`bash`, `curl`, `python`, `sh`) are present and often whitelisted.
 - LSM eBPF is the synchronous enforcement plane; user-space logic must remain correct when tested offline without a kernel.
 - Operators monitor `ebpf_events_dropped_total` — unmonitored drops are treated as a production incident.
+- Production nodes in this threat model are **x86_64** on a **verified** kernel class (~6.8 / ~6.17). ARM64 and kernel 5.15 / 6.1 LTS are out of the verified envelope (see §1).
 
 ---
 
@@ -95,7 +109,7 @@ The `sys_enter_execve` tracepoint is the highest-volume syscall surface in the a
 | **Namespace escape context** | Container breakout before agent deploy | Agent must run on host PID namespace (`hostPID: true`) |
 | **BPF hook disable** | `CAP_BPF` + `CAP_SYS_ADMIN` attacker detaches programs | **Partial tamper-evidence (PR [#74](https://github.com/Neuromesh-Security/neuromesh/pull/74)/[#76](https://github.com/Neuromesh-Security/neuromesh/pull/76)), not a new gap.** Periodic integrity monitor detects LSM/deny-map **pin removal** and **agent binary replacement** within ≤60s (default 45s). Same residual as §7 **Agent tampering by root** / E-07: determined root who also controls the alert channel or re-signs with a stolen key is out of scope for open-source core. Does not re-hash loaded BPF bytecode or deny-map **contents**. |
 | **Verifier-minimal telemetry** | C tracepoint emits PID-only records | **Mitigated for argv ([#46](https://github.com/Neuromesh-Security/neuromesh/issues/46)) and allowlisted env ([#140](https://github.com/Neuromesh-Security/neuromesh/issues/140)):** `sys_enter_execve` / `execveat` capture pid/comm/filename/lineage, capped argv (8×32), and capped **allowlist** env values (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, `PATH`, `NODE_OPTIONS`, `PYTHONPATH`, `BASH_ENV`, `PROMPT_COMMAND`, `SSLKEYLOGFILE`) via the same `bpf_probe_read_user` + `bpf_probe_read_user_str` path as argv (`envp` = execve `args[2]` / execveat `args[3]` — not `mm_struct`). Non-allowlisted names/values are **omitted** (not name-only redacted). Userspace prefix-redacts allowlisted values matching `eyJ` / `AKIA` / `-----BEGIN` before SIEM/OTel. Full env dump remains out of scope. |
-| **BTF offset coverage gap** | Rust LSM reads `linux_binprm` / `task_struct` fields via BTF-resolved offsets injected at load time (hardcoded offsets removed in PR #49) | Offsets are fail-closed at agent startup when BTF resolution fails; residual risk is **unvalidated kernels** (see §7) — wrong or untested ABIs are not silently papered over with guessed constants, but CI has not proven every claimed LTS line |
+| **BTF offset coverage gap** | Rust LSM reads `linux_binprm` / `task_struct` fields via BTF-resolved offsets injected at load time (hardcoded offsets removed in PR #49) | Offsets are fail-closed at agent startup when BTF resolution fails. Residual is **unverified kernels / arches** (see §1 and §7 / [#157](https://github.com/Neuromesh-Security/neuromesh/issues/157)): live coverage is x86_64 ~6.8 / ~6.17 only. 5.15 / 6.1 LTS and ARM64 are not silently papered over with guessed constants, and they are **not** claimed as validated. Missing BTF is fail-closed; BTF present is not the same as BPF LSM active, and is not the same as verifier acceptance of the nested PATH_DENY=32 counted loop. |
 | **Kprobe offset drift** | `tcp_connect` socket field offsets from minimal `vmlinux.h` | Dest IP/port read failure on kernel ABI change |
 | **RingBuf loss under load** | Legitimate high exec rate exceeds 500k/sec/CPU | Events dropped by design — attacker can hide in noise |
 | **LSM bypass paths** | Execution paths not passing `bprm_check_security` | Kernel-dependent; no agent coverage claim for all exec variants |
@@ -166,12 +180,18 @@ userspace populates from zt-policy-engine. This matches the dual-hook split in
 decides synchronously in-kernel**; the control plane only governs *what* prefix set
 is enforced, out-of-band.
 
-**Prefix key width:** `PATH_DENY_KEY_BYTES` is **32** (Issue [#134](https://github.com/Neuromesh-Security/neuromesh/issues/134)) —
+**Prefix key width:** `PATH_DENY_KEY_BYTES` is **32** (Issue [#134](https://github.com/Neuromesh-Security/neuromesh/issues/134) /
+PR [#135](https://github.com/Neuromesh-Security/neuromesh/pull/135)) —
 proactive headroom above the historical 16-byte window. Bootstrap prefixes remain
 `/tmp/` (5), `/dev/shm/` (9), `/var/tmp/` (9). Over-length prefixes are
 **fail-closed rejected** at `PathDenyEntry::from_prefix` / bundle parse (never
 silently truncated). Map value ABI changes with this constant — upgrade requires
 reloading the enforcement object (unpin + reattach), not hot-patching an old map.
+
+**Verifier implication of the 16→32 widen:** LLVM stopped fully unrolling the
+inner compare and emitted a counted/bounded loop. That is why kernel version is
+a support-scope question, not a generic “5.8+ / 5.3 bounded-loop” footnote —
+see §1 (verified ~6.8 / ~6.17 only; 5.15 / 6.1 LTS unverified).
 
 #### Three planes (what is connected vs not)
 
@@ -348,7 +368,9 @@ Integration tests run via `cargo test -p neuromesh-integration-tests` **without*
 > remaining Medium-severity rows below are flagged as needing their own issues
 > (`Tracked in #TBD`) and are intentionally NOT assigned a real issue number or
 > a named owner here until those issues exist — do not treat `#TBD` as a real
-> reference.
+> reference. The verified kernel / architecture residual (5.15 / 6.1 LTS + ARM64)
+> is tracked in [#157](https://github.com/Neuromesh-Security/neuromesh/issues/157);
+> the LotL row below is the remaining `#TBD`.
 
 | Risk | Severity | Notes | Owner | Target |
 |------|----------|-------|-------|--------|
@@ -356,7 +378,7 @@ Integration tests run via `cargo test -p neuromesh-integration-tests` **without*
 | C execve env capture (secrets vs detection) | Medium → **Mitigated ([#140](https://github.com/Neuromesh-Security/neuromesh/issues/140))** | **Design:** compile-time name allowlist (`LD_PRELOAD`, `LD_AUDIT`, `LD_LIBRARY_PATH`, `PATH`, `NODE_OPTIONS`, `PYTHONPATH`, `BASH_ENV`, `PROMPT_COMMAND`, `SSLKEYLOGFILE`); copy ≤8×32 B `NAME=VALUE` slots; omit all other names and values; integer `env_ptr_count` (scan cap 16); userspace redact of `eyJ` / `AKIA` / `-----BEGIN` on allowlisted values; CI rejects allowlist names matching `*_KEY`/`*_TOKEN`/`*_SECRET`/`*_PASSWORD`/… **Telemetry-only** (`sys_exec.bpf.c`); LSM deny path unchanged (LSM `ExecEvent` records carry empty env slots because they share the schema). Schema v3 size **932 B** → ~1126 events in 1 MiB `PROCESS_EVENTS` (~2.3 ms fill at 500k EPS) — same class of depth cut as #46. **Residuals:** (1) E-03 TOCTOU, same as argv. (2) 32 B truncation — do not treat a filled slot as complete. (3) Allowlist *names* are not attacker-chosen for hijack (loader only honors these names) but **values are attacker-controlled** — `LD_PRELOAD=<secret>` can put up to 32 B into SIEM if prefix-redact misses; treat `PROCESS_EVENTS` as sensitive. (4) Scan cap: allowlisted vars past the first 16 env pointers missed (`ENV_FLAG_COUNT_TRUNCATED`; may flag when exactly 16 vars present with no trailing probe). (5) More than 8 unique allowlisted names → `ENV_FLAG_SLOTS_FULL`. **Not in scope:** name-only dump, DesiredPolicy allowlist, `mm_struct` env walk, proxy URLs with embedded credentials. | Dragan Flavius (@DraganFlavius) | Closed via [#140](https://github.com/Neuromesh-Security/neuromesh/issues/140) |
 | `neuromesh_exec_hook` not attached | Low → **Resolved ([PR #35](https://github.com/Neuromesh-Security/neuromesh/pull/35))** | Prototype Rust `sys_enter_execve` tracepoint **removed** in `dc06aeda` (not dormant, not a future attach). Production exec visibility is C `nm_proc_events` + `nm_execveat`. Not a residual gap. | Dragan Flavius (@DraganFlavius) | Closed via PR #35; docs corrected 2026-08-18 |
 | Per-CPU drop accounting | Low | `RATE_LIMIT_DROPS` summed across CPUs; NUMA hot spots may dominate | — | — |
-| BTF offset resolver — cross-kernel coverage (hardcoded offsets RESOLVED) | Medium | **Resolved (PR #49):** the Rust LSM no longer uses compile-time hardcoded `task_struct` / `linux_binprm` offsets; the orchestrator resolves them from live BTF and aborts startup on resolution failure (no guessed-offset fallback). **Labeling fixed ([#52](https://github.com/Neuromesh-Security/neuromesh/issues/52)):** CI matrix jobs are now honestly named `ubuntu-22.04 / ~6.8-azure` and `ubuntu-24.04 / ~6.17-azure` (duplicate aspirational `"5.15"`/`"6.1"` cells collapsed — real coverage unchanged at two Azure HWE kernels). **Still open (severity not reduced):** live validation still does **not** cover real 5.15 / 6.1 LTS (or true non-Azure 6.8). Unit tests + one WSL2 5.15.167 fixture are cross-checked against bpftool ground truth but do not substitute for those pre-release hardware checks before those lines are claimed as validated. | Unassigned | Tracked in #TBD — new issue needed (real LTS hardware validation); labeling accuracy closed via #52 |
+| Verified kernel / architecture support (BTF offsets + PATH_DENY=32 verifier) | Medium | **BTF offsets resolved (PR #49):** the Rust LSM no longer uses compile-time hardcoded `task_struct` / `linux_binprm` offsets; the orchestrator resolves them from live BTF and aborts startup on resolution failure (no guessed-offset fallback). **Labeling fixed ([#52](https://github.com/Neuromesh-Security/neuromesh/issues/52)):** CI jobs are honestly named `ubuntu-22.04 / ~6.8-azure` and `ubuntu-24.04 / ~6.17-azure` (aspirational `"5.15"`/`"6.1"` cells collapsed — real coverage unchanged). **Verified envelope (2026-08-22):** **x86_64 only**, live-tested on **~6.8 / ~6.17** (droplet + that CI matrix). **ARM64 is unsupported / unverified** — no current infrastructure access (provider has no ARM64 droplets). **5.15 / 6.1 LTS are unverified** — no standard cloud image for honest live testing (Debian 12 / 6.1 deprecated by the provider; Ubuntu 22.04 defaults to HWE 6.8, not GA 5.15). Closing either gap needs a different provider or a custom older-kernel lab — **not** silently assumed. **Why kernel version matters:** `PATH_DENY_KEY_BYTES` 16→32 ([#134](https://github.com/Neuromesh-Security/neuromesh/issues/134) / [#135](https://github.com/Neuromesh-Security/neuromesh/pull/135)) switched LLVM from full unroll to a counted loop with a back-edge (nested 64 × 32). Linux 5.3 made counted loops legal; that is not ~6.8 / ~6.17 verifier maturity. This 32-byte LSM object has never been loaded on a real 5.15 LSM kernel. Static insn count ≠ `insn_processed`. WSL2 5.15.167 is a BTF parser fixture only (cannot load LSM). See §1. | Unassigned | Tracked in [#157](https://github.com/Neuromesh-Security/neuromesh/issues/157); labeling accuracy closed via #52 |
 | `execveat` as enforcement bypass (clarified) | Medium → **Not a bypass** | **Clarified ([#46](https://github.com/Neuromesh-Security/neuromesh/issues/46)):** do **not** treat “no `execveat` hook” as an exploitable deny-list bypass. Enforcement/decision is covered by the shared LSM hook `bprm_check_security` (`neuromesh_lsm_exec_guard`). Kernel architecture on the CI matrix (~6.8 / ~6.17): `execve` and `execveat` both funnel through `do_execveat_common` → … → `security_bprm_check` → `bprm_check_security`. No second LSM attach is required for `execveat` enforcement. | — | Closed as enforcement concern via #46 investigation; docs updated |
 | C telemetry: no `sys_enter_execveat` | Low → **Closed ([#126](https://github.com/Neuromesh-Security/neuromesh/issues/126))** | **Observability gap closed; enforcement was never affected.** `sys_exec.bpf.c` adds `nm_execveat` on `SEC("tracepoint/syscalls/sys_enter_execveat")`, attached fail-closed in `process_monitor.rs` alongside the `execve` attach, so allowed `execveat`/`fexecve` now reach process-visibility/correlation. Both tracepoints share `emit_exec_event()` (identical capture semantics) and the same `RLIMIT_BUCKET` token bucket, so the aggregate admitted rate stays at the one ~500k EPS ceiling `PROCESS_EVENTS` was already sized against — no RingBuf resize was required. Variant is reported via `EXEC_FLAG_SYSCALL_EXECVEAT` in the previously-unused `ExecEvent::flags` header byte, so `struct_size` stays 668 and `is_valid()` is unchanged. No `fexecve`-specific attach exists or is needed: `fexecve(3)` has no syscall of its own and lowers either to `execveat`+`AT_EMPTY_PATH` (modern glibc/musl → `nm_execveat`) or, on pre-3.19 kernels, to `execve("/proc/self/fd/N", …)` (→ the pre-existing `nm_proc_events`). **Remaining sub-residual (Low):** under the `AT_EMPTY_PATH` lowering the syscall carries no path string, so the record is reported as `UNKNOWN` + `CAPTURE_FILENAME` + `EXEC_FLAG_PATH_FROM_FD` rather than path-resolved; pid/ppid/uid, container, and `argv` are still captured. dirfd→path resolution needs an fd-table walk and is out of scope. | Dragan Flavius (@DraganFlavius) | Closed via [#126](https://github.com/Neuromesh-Security/neuromesh/issues/126); superseded the [#46](https://github.com/Neuromesh-Security/neuromesh/issues/46) telemetry follow-up |
 | LotL single-shot from whitelisted path | Medium | Requires Slow Path / Wasm (future). Planned mitigation: Wasm policy engine + Slow Path GNN correlation (currently scaffold-only, see §3). | Unassigned | Tracked in #TBD — new issue needed |
