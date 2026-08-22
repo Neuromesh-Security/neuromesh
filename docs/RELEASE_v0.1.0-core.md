@@ -69,7 +69,7 @@ Details and reproduction: [`docs/performance-baseline.md`](performance-baseline.
 | `neuromesh-integration-tests` | RuleEngine, DataNormalizer, pipeline — no kernel |
 | `event_parser_fuzz_test` | 50k random-byte decode fuzz iterations |
 | `chaos_engineering_test` | MPSC saturation, 50k mock RingBuf drain |
-| `execve_stress_test` | Live-tested **962 EPS** (band 880–962, zero drops). Harness still has historical 100k/500k *knobs*; 500k is the BPF fork-bomb valve, not a product SLO. (`#[ignore]`) |
+| `execve_stress_test` | Post-#160: **`average_eps=816`** (30 s standard); sweep **`SWEEP_BEST workers=8 average_eps=738`**. Historical 962 (band 880–962). 500k is the BPF fork-bomb valve, not a product SLO. (`#[ignore]`) |
 | `verify-ebpf` + CI verifier matrix | `ubuntu-22.04 / ~6.8-azure`, `ubuntu-24.04 / ~6.17-azure` (two Azure HWE kernels; not real 5.15/6.1 LTS) |
 
 ### Demo and simulation
