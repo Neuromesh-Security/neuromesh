@@ -193,6 +193,44 @@ inner compare and emitted a counted/bounded loop. That is why kernel version is
 a support-scope question, not a generic “5.8+ / 5.3 bounded-loop” footnote —
 see §1 (verified ~6.8 / ~6.17 only; 5.15 / 6.1 LTS unverified).
 
+#### Matching and scan design — deliberate choices, not limitations
+
+These are **security-conscious design decisions** on the LSM allow/deny path.
+They are **not** missing features, not residual gaps, and not §7 items.
+
+**Current real usage vs capacity:** The shipped deny set is **three** literal
+prefixes — `/tmp/`, `/dev/shm/`, `/var/tmp/` — identical across
+`BOOTSTRAP_PATH_DENY_PREFIXES`, PE `BootstrapDenyPathPrefixes` /
+`FloorDenyPathPrefixes`, Helm `values.yaml`, and
+`deploy/kubernetes/neuromesh-desired-policy.yaml`. Map capacity is
+`PATH_DENY_MAX_ENTRIES` = **64**. That is **3/64 = 4.6875%** of capacity in use
+(~5%), **61 unused slots**, headroom **61/64 ≈ 95.3%** (capacity is ~21× current
+usage). DesiredPolicy *may* add operator prefixes up to 64; the live default
+and bootstrap remain those three. Do not treat the 64-slot array as evidence
+that we currently need 64 rules.
+
+**Exact-prefix-only matching (no regex / glob):** The LSM compare is byte-wise
+`starts_with` over a length-bounded prefix (`path_starts_with` in
+`ebpf/src/main.rs`; userspace `PathDenyEntry::matches` is the same contract).
+`/tmp/` matches `/tmp/foo`. The prefix bytes are compared exactly — there is
+no glob, no regex, no `*` / `?` / character class, no backtracking. This is
+**deliberate simplicity** on the single most security-critical code path in
+the project (the in-kernel allow/deny decision), not a missing feature. A
+regex/glob engine is very likely **infeasible** inside a BPF verifier-bounded
+program: no unbounded backtracking, no dynamic allocation. Even a tractable
+subset would meaningfully increase the complexity and attack surface of that
+decision path, for capability that is **not currently needed**.
+
+**Linear scan O(n), n ≤ 64:** Intentionally simple and verifier-friendly. The
+outer loop is compile-time-bounded (`while i < PATH_DENY_MAX_ENTRIES`) with a
+runtime `i >= count` early break, so the live set of 3 does not walk unused
+slots for matches. Cost today is O(3); worst case is O(64). We do **not**
+preemptively rewrite this to a hash, trie, or LPM map. **If** a genuine future
+need for **hundreds** of prefixes emerges, that would warrant its own dedicated
+design investigation matching the rigor of the dynamic-policy work (Phase 1
+maps, signed bundles, DesiredPolicy) — not a preemptive rewrite of proven,
+simple, hot-path code today.
+
 #### Three planes (what is connected vs not)
 
 | Plane | Role in Phase 1 | Hot-path network? |
