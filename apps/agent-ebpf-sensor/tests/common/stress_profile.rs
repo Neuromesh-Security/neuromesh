@@ -29,6 +29,8 @@ impl StressTier {
         }
     }
 
+    /// OS-thread pipelines (one blocking `fork`/`execve`/`wait` each).
+    /// These are **not** Tokio tasks — see `execve_stress_test.rs`.
     pub fn default_workers(&self) -> usize {
         match self {
             Self::Standard => 128,
