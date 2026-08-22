@@ -136,7 +136,7 @@ Neuromesh separates security into two layers with explicit latency contracts:
 
 ## Security Verification
 
-The following claims are from **internal engineering verification** on a real Ubuntu 24.04 Linux kernel with BPF LSM enabled. They are **not** a third-party security audit, certification, or external assessment.
+The following claims are from **internal engineering verification** on a real Ubuntu 24.04 **x86_64** Linux kernel (~6.8-class) with BPF LSM enabled. They are **not** a third-party security audit, certification, or external assessment. Verified kernel/architecture scope is **only x86_64 on ~6.8 / ~6.17** (droplet + CI) — see [Verified kernel / architecture support](#verified-kernel--architecture-support).
 
 Reproducible evidence lives in-repo:
 
@@ -159,6 +159,8 @@ Reproducible evidence lives in-repo:
 - These results are **operator-reproducible engineering checks**, not an external audit, certification, or multi-node production soak under real load.
 - They cover the specific failure modes exercised by the scripts above (pin survival after abrupt agent death; detection of post-start pin / on-disk path manipulation; identity auto-insert / delete / PE revoke on one k3s node). They do not imply complete coverage of every residual risk in [`docs/threat-model.md`](docs/threat-model.md).
 - Latency numbers above are **one droplet sample** each — recommend repeated runs before any SLA or procurement claim.
+- **Architecture:** x86_64 only. **ARM64 is unsupported / unverified** (no current infrastructure access to test).
+- **Kernels:** live-tested on **~6.8 / ~6.17** only. **5.15 and 6.1 LTS are unverified** — not silently assumed from the 5.8+ feature floor.
 
 ---
 
@@ -232,11 +234,22 @@ Neuromesh follows an **Open Core** strategy: the runtime sensor and deterministi
 
 | Requirement | Minimum | Notes |
 |-------------|---------|-------|
-| OS | Linux kernel **5.8+** | RingBuf, BPF map pinning, LSM eBPF |
-| Architecture | x86_64 | Primary target; ARM64 planned |
+| OS | Feature floor: Linux **5.8+** (`CONFIG_BPF_LSM`, RingBuf, BTF). **Verified live: ~6.8 / ~6.17 only.** | 5.8+ is a feature floor, not a support claim. See [Verified kernel / architecture support](#verified-kernel--architecture-support). |
+| Architecture | **x86_64 only** | **ARM64 is unsupported / unverified.** `bpfel-unknown-none` is not an ARM64 product claim. |
 | Rust | **nightly-2026-07-17** + `bpf-linker` **0.10.4** | Required for Rust eBPF enforcement object (pinned; see `apps/agent-ebpf-sensor/ebpf/rust-toolchain.toml`, Issue #53) |
 | Clang | 14+ | C visibility bytecode (`-target bpf`) |
 | Privileges | root or `CAP_BPF` + `CAP_PERFMON` + `CAP_SYS_ADMIN` | LSM attach requires BTF from `/sys/kernel/btf/vmlinux` |
+
+### Verified kernel / architecture support
+
+**Verified live today: x86_64 only, on ~6.8 / ~6.17.** That is the entire kernel/architecture support claim. Evidence: Ubuntu 24.04-class droplet with BPF LSM, plus CI `ubuntu-22.04 / ~6.8-azure` and `ubuntu-24.04 / ~6.17-azure`.
+
+**Explicitly unverified — do not silently assume these work:**
+
+- **ARM64** is unsupported. There is no current infrastructure access to test it (our cloud provider does not offer ARM64 droplets). Closing this needs a different provider (or equivalent ARM64 lab), not a compile-target inference.
+- **Kernel 5.15 and 6.1 LTS** are unverified. No standard cloud image is currently available for honest live testing: Debian 12 (the stock 6.1 image) was deprecated by the provider; Ubuntu 22.04 cloud images default to HWE **6.8**, not GA **5.15**. Closing this needs a different infrastructure provider or a custom-built older-kernel test environment.
+
+**Why kernel version matters here (not a generic caveat):** After `PATH_DENY_KEY_BYTES` went from 16 to 32 ([Issue #134](https://github.com/Neuromesh-Security/neuromesh/issues/134) / [PR #135](https://github.com/Neuromesh-Security/neuromesh/pull/135)), LLVM stopped fully unrolling the inner prefix compare and emitted a counted/bounded loop with a back-edge. The LSM deny scan is nested (`PATH_DENY_MAX_ENTRIES` 64 × inner 32-byte compare). Linux 5.3 made counted loops *legal*; that is **not** equivalent verifier maturity to the ~6.8 / ~6.17 kernels that actually loaded this object. CI accepted the 32-byte object only on those two Azure HWE kernels. A real 5.15 LSM kernel has never loaded it. Static `llvm-objdump` instruction count is not verifier `insn_processed`. Details: [`docs/threat-model.md`](docs/threat-model.md) §1 / §7 / [Issue #157](https://github.com/Neuromesh-Security/neuromesh/issues/157).
 
 ### Build and run (native Linux)
 
@@ -338,7 +351,7 @@ kubectl logs -n neuromesh-system -l app.kubernetes.io/name=neuromesh-agent -f
 
 #### Production checklist
 
-- [ ] Kernel ≥ 5.8 with `CONFIG_BPF_LSM=y` and BTF available at `/sys/kernel/btf/vmlinux`
+- [ ] Host is **x86_64** on a **verified** kernel class (~6.8 / ~6.17) with `CONFIG_BPF_LSM=y` and BTF at `/sys/kernel/btf/vmlinux`. Do **not** treat ARM64, 5.15, or 6.1 as supported. The 5.8+ feature floor is not a live-test claim — see [Verified kernel / architecture support](#verified-kernel--architecture-support).
 - [ ] Prometheus scraping `ebpf_events_processed_total` and `ebpf_events_dropped_total`
 - [ ] Alert on sustained drop rate > 0.1% of processed events (tune per workload)
 - [ ] Log shipping from agent stdout (JSON alerts) to SIEM
