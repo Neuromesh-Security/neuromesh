@@ -86,7 +86,7 @@ flowchart TB
 
 ### Performance summary
 
-Measured user-space detection latency (Criterion, Linux x86_64, release profile). **Live-tested execve throughput is 962 EPS with zero drops** (band 880–962, three independent runs) — see [`docs/performance-baseline.md`](docs/performance-baseline.md) §2.3. That is the documented ceiling, not 100k or 500k.
+Measured user-space detection latency (Criterion, Linux x86_64, release profile). **Live-tested execve throughput after [PR #160](https://github.com/Neuromesh-Security/neuromesh/pull/160) is `average_eps=816`** (30 s standard, 1 vCPU, generator-bound; sweep-best `average_eps=738` at 8 workers). Historical pre-#160: 962 (band 880–962, zero RingBuf drops). See [`docs/performance-baseline.md`](docs/performance-baseline.md) §2.3. That is the documented ceiling, not 100k or 500k.
 
 #### User-space detection (measured)
 
@@ -101,13 +101,13 @@ Measured user-space detection latency (Criterion, Linux x86_64, release profile)
 
 | Metric | Value | Status |
 |--------|-------|--------|
-| **Execve EPS (tested live, zero drops)** | **962/sec** (band 880–962, 3 runs) | Measured on 1-vCPU Ubuntu 24.04 BPF-LSM host |
-| **Headroom vs typical K8s worker** | **~19×** vs ~50 execve/s conservative typical | Derived from Kubernetes 110-pods/node envelope + probe defaults — [`performance-baseline.md`](docs/performance-baseline.md) §2.3.1 |
+| **Execve EPS (tested live, generator-bound)** | **`average_eps=816`** (post-#160 30 s standard); sweep-best **738** | 1 vCPU; `worker_model=std::thread`; `host_parallelism=1`. Historical pre-#160: 962 (3 runs, zero RingBuf drops) |
+| **Headroom vs typical K8s worker** | **~16×** vs ~50 execve/s at 816 | Derived from Kubernetes 110-pods/node envelope + probe defaults — [`performance-baseline.md`](docs/performance-baseline.md) §2.3.1 |
 | **Kernel token-bucket (fork-bomb valve)** | 500,000/sec per CPU (`RATE_LIMIT_BUCKET`) | Implemented BPF constant — **not a tested SLO**, not a production-justified target |
 | **RingBuf reserve drop counter** | `DROPPED_EVENTS` (network) | Kernel-side only |
-| **User-space MPSC backpressure** | Channel default 8192 | Implemented; kept up at tested 962 EPS |
-| **Syscall latency overhead (execve)** | _TBD_ | Optional `perf stat` delta — not required for the 962 EPS claim |
-| **RingBuf drop rate at tested load** | **0%** | Measured (3 runs) |
+| **User-space MPSC backpressure** | Channel default 8192 | Implemented; kept up at historical ~900 EPS (post-#160 drops not in paste-back) |
+| **Syscall latency overhead (execve)** | _TBD_ | Optional `perf stat` delta — not required for the 816 EPS claim |
+| **RingBuf drop rate at tested load** | **0%** (pre-#160 ~900 EPS, 3 runs) | Post-#160 Prometheus drops **not** in paste-back |
 | **Agent CPU utilization (idle)** | **0.400%** of 1 core | Measured (Issue #100) |
 | **Agent CPU utilization (tested burst)** | **~38–41%** of 1 core during burst | Measured (`pidstat`) |
 
