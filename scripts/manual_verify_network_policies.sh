@@ -31,6 +31,50 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; PASS_COUNT=$((PASS_COUNT + 1)); }
 info() { echo; echo "== $* =="; }
 
+# Dump probe diagnostics into THIS script's stdout/stderr before any delete so
+# a Ready wait timeout (or a re-run that deletes leftovers) cannot erase the
+# failure reason from the operator's log.
+dump_pod_diagnostics() {
+  local ns="$1" pod="$2"
+  echo
+  echo "---- diagnostics: ${ns}/pod/${pod} (before delete/fail) ----"
+  echo "---- kubectl -n ${ns} describe pod/${pod} ----"
+  kubectl -n "$ns" describe "pod/${pod}" 2>&1 || echo "(describe failed — pod may already be gone)"
+  echo "---- kubectl -n ${ns} get events --field-selector involvedObject.name=${pod} --sort-by=.lastTimestamp ----"
+  kubectl -n "$ns" get events \
+    --field-selector "involvedObject.name=${pod}" \
+    --sort-by=.lastTimestamp 2>&1 \
+    || echo "(events query failed)"
+  echo "---- end diagnostics: ${ns}/pod/${pod} ----"
+  echo
+}
+
+# Delete a probe pod, but if it still exists and is not Ready, print describe +
+# events first so cleanup never races away the evidence.
+delete_probe_pod() {
+  local ns="$1" pod="$2"
+  if ! kubectl -n "$ns" get "pod/${pod}" >/dev/null 2>&1; then
+    return 0
+  fi
+  local ready
+  ready="$(kubectl -n "$ns" get "pod/${pod}" \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+  if [[ "$ready" != "True" ]]; then
+    echo "NOTE: ${ns}/pod/${pod} exists and Ready!=True (ready=${ready:-<none>}) — dumping before delete"
+    dump_pod_diagnostics "$ns" "$pod"
+  fi
+  kubectl -n "$ns" delete "pod/${pod}" --ignore-not-found >/dev/null 2>&1 || true
+}
+
+wait_probe_ready() {
+  local ns="$1" pod="$2" timeout="${3:-60s}"
+  if kubectl -n "$ns" wait --for=condition=Ready "pod/${pod}" --timeout="$timeout"; then
+    return 0
+  fi
+  dump_pod_diagnostics "$ns" "$pod"
+  fail "${ns}/pod/${pod} not Ready within ${timeout} (describe + events dumped above)"
+}
+
 info "0) preflight"
 command -v kubectl >/dev/null || fail "kubectl required"
 command -v curl >/dev/null || fail "curl required"
@@ -111,23 +155,23 @@ if kubectl -n "$NS" exec "$AGENT_POD" -- sh -c "command -v curl >/dev/null" 2>/d
   kubectl -n "$NS" exec "$AGENT_POD" -- curl -fsS --max-time 5 "http://${PE_SVC}:${PE_PORT}/healthz" >/tmp/nm-pe-health.out
 else
   echo "agent image has no curl — spawning labeled probe pod in $NS"
-  kubectl -n "$NS" delete pod nm-netpol-agent-probe --ignore-not-found >/dev/null 2>&1 || true
+  delete_probe_pod "$NS" nm-netpol-agent-probe
   kubectl -n "$NS" run nm-netpol-agent-probe \
     --image=curlimages/curl:8.5.0 --restart=Never \
     --labels="app.kubernetes.io/name=neuromesh-agent,app.kubernetes.io/part-of=neuromesh" \
     --command -- sleep 120
-  kubectl -n "$NS" wait --for=condition=Ready pod/nm-netpol-agent-probe --timeout=60s
+  wait_probe_ready "$NS" nm-netpol-agent-probe 60s
   kubectl -n "$NS" exec nm-netpol-agent-probe -- curl -fsS --max-time 5 "http://${PE_SVC}:${PE_PORT}/healthz" >/tmp/nm-pe-health.out
 fi
 grep -q . /tmp/nm-pe-health.out || fail "empty PE healthz body"
 pass "agent-path client reached PE /healthz: $(tr -d '\n' </tmp/nm-pe-health.out | head -c 120)"
 
 info "4) DENY — foreign pod in default namespace must NOT reach PE"
-kubectl -n default delete pod nm-netpol-foreign-probe --ignore-not-found >/dev/null 2>&1 || true
+delete_probe_pod default nm-netpol-foreign-probe
 kubectl -n default run nm-netpol-foreign-probe \
   --image=curlimages/curl:8.5.0 --restart=Never \
   --command -- sleep 120
-kubectl -n default wait --for=condition=Ready pod/nm-netpol-foreign-probe --timeout=60s
+wait_probe_ready default nm-netpol-foreign-probe 60s
 set +e
 kubectl -n default exec nm-netpol-foreign-probe -- \
   curl -fsS --max-time 5 "http://${PE_SVC}:${PE_PORT}/healthz" >/tmp/nm-pe-foreign.out 2>/tmp/nm-pe-foreign.err
@@ -156,8 +200,8 @@ else
 fi
 
 info "6) cleanup probe pods"
-kubectl -n "$NS" delete pod nm-netpol-agent-probe --ignore-not-found >/dev/null 2>&1 || true
-kubectl -n default delete pod nm-netpol-foreign-probe --ignore-not-found >/dev/null 2>&1 || true
+delete_probe_pod "$NS" nm-netpol-agent-probe
+delete_probe_pod default nm-netpol-foreign-probe
 
 echo
 echo "ALL CHECKS PASSED ($PASS_COUNT). Paste this output to the Phase B PR."
