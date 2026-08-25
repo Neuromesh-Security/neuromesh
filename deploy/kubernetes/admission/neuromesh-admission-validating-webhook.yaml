@@ -1,7 +1,7 @@
 # Phase A ValidatingWebhookConfiguration (Issue #63).
 #
-# BEFORE applying: replace REPLACE_WITH_BASE64_CA_BUNDLE with the base64-encoded
-# PEM of the CA that signed the webhook TLS certificate (see README.md).
+# BEFORE applying: inject caBundle with scripts/inject_admission_cabundle.sh
+# (placeholder REPLACE_WITH_BASE64_CA_BUNDLE). cert-manager is Phase B.
 #
 # failurePolicy: Ignore — Phase A only. Graduate to Fail only after the operator
 # checklist in README.md is satisfied. Do not change selectors or timeoutSeconds
@@ -26,10 +26,11 @@ webhooks:
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["pods"]
+        resources: ["pods", "pods/ephemeralcontainers"]
     admissionReviewVersions: ["v1"]
     sideEffects: None
     failurePolicy: Ignore
+    matchPolicy: Equivalent
     timeoutSeconds: 15
     # Exclude control-plane namespaces so a webhook outage / misconfig cannot
     # brick kube-system (and related) admission.

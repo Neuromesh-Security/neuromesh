@@ -10,7 +10,7 @@ metadata:
     app.kubernetes.io/part-of: neuromesh
     app.kubernetes.io/version: "0.1.0"
 spec:
-  replicas: 1
+  replicas: {{ .Values.admissionWebhook.replicas }}
   selector:
     matchLabels:
       app.kubernetes.io/name: neuromesh-admission-webhook
@@ -22,6 +22,15 @@ spec:
         app.kubernetes.io/part-of: neuromesh
     spec:
       serviceAccountName: neuromesh-admission-webhook
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: neuromesh-admission-webhook
+                topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

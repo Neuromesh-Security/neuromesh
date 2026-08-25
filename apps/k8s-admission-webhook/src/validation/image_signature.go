@@ -172,6 +172,10 @@ func isPodSigned(pod *corev1.Pod) bool {
 // collectContainerImages returns every container image reference on the pod
 // spec (init containers, regular containers, and ephemeral debug containers)
 // that must be verified before the pod can be admitted.
+//
+// Callers must also register the webhook for `pods/ephemeralcontainers`
+// (not only `pods`). kubectl debug uses that subresource; a Pod CREATE/UPDATE
+// rule alone does not see those images.
 func collectContainerImages(pod *corev1.Pod) []string {
 	images := make([]string, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers)+len(pod.Spec.EphemeralContainers))
 

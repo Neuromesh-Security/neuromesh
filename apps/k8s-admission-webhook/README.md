@@ -65,3 +65,9 @@ webhooks:
 Shipped manifests, TLS/openssl runbook, install order, and Ignore→Fail graduation
 checklist live under [`deploy/kubernetes/admission/`](../../deploy/kubernetes/admission/README.md).
 Do not use the snippet above as the sole deploy source — use that directory.
+
+Phase A hardening (pre-Fail): `replicas: 2`, preferred hostname anti-affinity,
+PDB `minAvailable: 1`, explicit `matchPolicy: Equivalent`, VWC matches `pods`
+and `pods/ephemeralcontainers`. `/validate` verifies every image in
+`initContainers`, `containers`, and `ephemeralContainers`. `caBundle` stays a
+placeholder until `scripts/inject_admission_cabundle.sh` (cert-manager is Phase B).
