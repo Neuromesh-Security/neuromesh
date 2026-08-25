@@ -42,8 +42,13 @@ kubectl -n "$NS" get ds neuromesh-agent >/dev/null \
 
 info "1) discover k3s node / Flannel identity (authoritative for webhook CIDRs)"
 NODE_JSON="$(kubectl get nodes -o json)"
-printf '%s' "$NODE_JSON" | python3 -c '
-import json, sys
+# Temp .py — avoid python3 -c quote-nesting (backslash-escaped \" inside
+# f-strings breaks with SyntaxError under single-quoted -c bodies).
+_NODE_PARSE_PY="$(mktemp)" || fail "mktemp failed"
+cat >"$_NODE_PARSE_PY" <<'PY'
+import json
+import sys
+
 nodes = json.load(sys.stdin)["items"]
 if not nodes:
     raise SystemExit("no nodes")
@@ -51,11 +56,19 @@ for n in nodes:
     name = n["metadata"]["name"]
     addrs = {a["type"]: a["address"] for a in n["status"].get("addresses", [])}
     cidr = n["spec"].get("podCIDR", "")
-    print(f"node={name} InternalIP={addrs.get(\"InternalIP\",\"\")} ExternalIP={addrs.get(\"ExternalIP\",\"\")} podCIDR={cidr}")
+    print(
+        f"node={name} InternalIP={addrs.get('InternalIP', '')} "
+        f"ExternalIP={addrs.get('ExternalIP', '')} podCIDR={cidr}"
+    )
     if cidr and "/" in cidr:
         ip, _ = cidr.split("/", 1)
         print(f"suggested_webhook_ipBlock_cidr={ip}/32")
-' || fail "python3 required to parse node JSON"
+PY
+if ! printf '%s' "$NODE_JSON" | python3 "$_NODE_PARSE_PY"; then
+  rm -f "$_NODE_PARSE_PY"
+  fail "python3 required to parse node JSON"
+fi
+rm -f "$_NODE_PARSE_PY"
 
 if ip -4 addr show flannel.1 >/dev/null 2>&1; then
   FLANNEL_IP="$(ip -4 addr show flannel.1 | awk '/inet /{print $2}' | head -1)"
