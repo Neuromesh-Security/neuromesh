@@ -145,23 +145,46 @@ kubectl -n "$NS" get networkpolicy neuromesh-admission-webhook -o yaml | grep -E
 pass "both NetworkPolicies present with expected shape"
 
 info "3) ALLOW — curl PE /healthz from an agent pod"
-AGENT_POD="$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=neuromesh-agent -o jsonpath='{.items[0].metadata.name}')"
+# Prefer the DaemonSet-owned agent pod (ignore any leftover mislabeled probes).
+AGENT_POD="$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=neuromesh-agent \
+  -o json | python3 -c 'import json,sys
+items=json.load(sys.stdin).get("items") or []
+for p in items:
+  for o in (p.get("metadata") or {}).get("ownerReferences") or []:
+    if o.get("kind")=="DaemonSet" and (p.get("status") or {}).get("phase")=="Running":
+      print(p["metadata"]["name"]); raise SystemExit
+for p in items:
+  if (p.get("status") or {}).get("phase")=="Running":
+    print(p["metadata"]["name"]); raise SystemExit
+')"
 [[ -n "$AGENT_POD" ]] || fail "no agent pod"
-# Agent image may lack curl; use a short-lived debug container sharing the agent network namespace via kubectl run is wrong.
-# Prefer kubectl exec if curl/wget exists; else ephemeral pod with agent podSelector... use a curl pod that *impersonates* by running as same labels is hard.
-# Practical approach: kubectl run curl client WITH neuromesh-agent labels temporarily is wrong for production.
-# Use: kubectl exec into agent if shell+curl, else spin a Job/pod labeled as agent in neuromesh-system.
-if kubectl -n "$NS" exec "$AGENT_POD" -- sh -c "command -v curl >/dev/null" 2>/dev/null; then
-  kubectl -n "$NS" exec "$AGENT_POD" -- curl -fsS --max-time 5 "http://${PE_SVC}:${PE_PORT}/healthz" >/tmp/nm-pe-health.out
+# IMPORTANT: do NOT kubectl-run a second pod with
+# app.kubernetes.io/name=neuromesh-agent. That label is the DaemonSet selector;
+# on a node that already has the DS pod, the controller treats the probe as a
+# surplus matching pod and deletes it — Ready wait then times out even though
+# curlimages/curl pulls fine. PE NetworkPolicy identity must come from the
+# real agent pod (exec) or an ephemeral container sharing that pod's netns.
+AGENT_CONTAINER="${NEUROMESH_AGENT_CONTAINER:-agent}"
+PE_URL="http://${PE_SVC}:${PE_PORT}/healthz"
+rm -f /tmp/nm-pe-health.out
+if kubectl -n "$NS" exec "$AGENT_POD" -c "$AGENT_CONTAINER" -- \
+  sh -c "command -v curl >/dev/null" 2>/dev/null; then
+  kubectl -n "$NS" exec "$AGENT_POD" -c "$AGENT_CONTAINER" -- \
+    curl -fsS --max-time 5 "$PE_URL" >/tmp/nm-pe-health.out
+elif kubectl -n "$NS" exec "$AGENT_POD" -c "$AGENT_CONTAINER" -- \
+  sh -c "command -v wget >/dev/null" 2>/dev/null; then
+  kubectl -n "$NS" exec "$AGENT_POD" -c "$AGENT_CONTAINER" -- \
+    wget -qO- --timeout=5 "$PE_URL" >/tmp/nm-pe-health.out
 else
-  echo "agent image has no curl — spawning labeled probe pod in $NS"
-  delete_probe_pod "$NS" nm-netpol-agent-probe
-  kubectl -n "$NS" run nm-netpol-agent-probe \
-    --image=curlimages/curl:8.5.0 --restart=Never \
-    --labels="app.kubernetes.io/name=neuromesh-agent,app.kubernetes.io/part-of=neuromesh" \
-    --command -- sleep 120
-  wait_probe_ready "$NS" nm-netpol-agent-probe 60s
-  kubectl -n "$NS" exec nm-netpol-agent-probe -- curl -fsS --max-time 5 "http://${PE_SVC}:${PE_PORT}/healthz" >/tmp/nm-pe-health.out
+  echo "agent image has no curl/wget — ephemeral curl via kubectl debug on $AGENT_POD (same pod identity for NetworkPolicy; avoids DaemonSet surplus delete)"
+  if ! kubectl -n "$NS" debug "$AGENT_POD" \
+    --image=curlimages/curl:8.5.0 \
+    --target="$AGENT_CONTAINER" \
+    --profile=general \
+    --quiet \
+    -- curl -fsS --max-time 5 "$PE_URL" >/tmp/nm-pe-health.out; then
+    fail "could not probe PE as agent (no curl/wget in agent image; kubectl debug ephemeral curl failed). Do not spawn a standalone pod labeled neuromesh-agent — DaemonSet will delete it as surplus."
+  fi
 fi
 grep -q . /tmp/nm-pe-health.out || fail "empty PE healthz body"
 pass "agent-path client reached PE /healthz: $(tr -d '\n' </tmp/nm-pe-health.out | head -c 120)"
@@ -200,6 +223,8 @@ else
 fi
 
 info "6) cleanup probe pods"
+# Leftover from older script revisions that spawned a DS-selector-matching probe
+# (DaemonSet deletes those as surplus — still tidy if one is Terminating/stuck).
 delete_probe_pod "$NS" nm-netpol-agent-probe
 delete_probe_pod default nm-netpol-foreign-probe
 
