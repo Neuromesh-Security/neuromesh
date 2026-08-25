@@ -1,0 +1,25 @@
+{{- if and .Values.policyEngine.enabled .Values.networkPolicy.enabled .Values.networkPolicy.policyEngine.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: neuromesh-zt-policy-engine
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-zt-policy-engine
+    app.kubernetes.io/component: zt-policy-engine
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: neuromesh-zt-policy-engine
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: neuromesh-agent
+      ports:
+        - protocol: TCP
+          port: {{ .Values.policyEngine.env.port | int }}
+{{- end }}

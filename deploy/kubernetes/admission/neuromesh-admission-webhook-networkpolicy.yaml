@@ -1,0 +1,43 @@
+# Phase B part 1 — NetworkPolicy for admission webhook (Issue #163 follow-on).
+#
+# IMPORTANT: NetworkPolicy matches the *pod* port, not the Service port.
+# Service is 443 → targetPort https (container 8443). Restrict TCP/8443.
+#
+# k3s: kube-apiserver is embedded in the host-networked k3s server process —
+# there is no apiserver Pod to select. Ingress must use ipBlock CIDRs.
+#
+# Documented default for single-node k3s + Flannel: the server's PodCIDR
+# *network address* as a /32 host prefix (e.g. PodCIDR 10.42.0.0/24 →
+# 10.42.0.0/32). That is the flannel.1 bridge identity often seen as the
+# source when apiserver dials pod IPs. Do NOT use the entire 10.42.0.0/16
+# unless you accept every Flannel pod as a webhook client.
+#
+# On a single-node lab, Kubernetes also always allows host→local-pod traffic
+# (kubelet probes / same-node host paths). Multi-node: set the /32 (or /128)
+# for every control-plane node's PodCIDR network address. Discover with:
+#   scripts/manual_verify_network_policies.sh
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: neuromesh-admission-webhook
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: neuromesh-admission-webhook
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            # Default k3s Flannel server PodCIDR host-prefix (override if
+            # --cluster-cidr / node PodCIDR differs). Empty list is invalid
+            # YAML here — use Helm values to supply cluster-specific CIDRs.
+            cidr: 10.42.0.0/32
+      ports:
+        - protocol: TCP
+          port: 8443

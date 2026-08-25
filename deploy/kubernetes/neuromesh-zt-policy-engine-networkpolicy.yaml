@@ -1,0 +1,33 @@
+# Phase B part 1 — NetworkPolicy for zt-policy-engine (Issue #163 follow-on).
+#
+# Ingress on container/Service port 8080 only from neuromesh-agent DaemonSet
+# pods (app.kubernetes.io/name=neuromesh-agent) in this namespace.
+# Agent DaemonSet uses hostNetwork: false — podSelector is the correct
+# client identity (unlike the admission webhook / host-networked apiserver).
+#
+# Kubelet liveness/readiness probes from the *local* node are always allowed
+# by Kubernetes NetworkPolicy rules (host→local-pod), so probes stay healthy
+# without opening 8080 to the whole cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: neuromesh-zt-policy-engine
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-zt-policy-engine
+    app.kubernetes.io/component: zt-policy-engine
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: neuromesh-zt-policy-engine
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: neuromesh-agent
+      ports:
+        - protocol: TCP
+          port: 8080

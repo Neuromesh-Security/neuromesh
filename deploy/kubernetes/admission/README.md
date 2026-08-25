@@ -6,7 +6,7 @@ Cosign Pod image verification in `apps/k8s-admission-webhook`.
 | Phase A (this directory) | Not in this phase |
 |--------------------------|-------------------|
 | `failurePolicy: Ignore` | `failurePolicy: Fail` |
-| Manual TLS Secret + `caBundle` | cert-manager |
+| Manual TLS Secret + `caBundle` + NetworkPolicy | Full cert-manager automation |
 | Pods CREATE/UPDATE (`pods` + `pods/ephemeralcontainers`) | MutatingWebhookConfiguration / sidecar |
 | Static Cosign key verify | Keyless Cosign |
 
@@ -16,11 +16,12 @@ Do **not** apply the ValidatingWebhookConfiguration before the Deployment is Rea
 
 1. Ensure namespace `neuromesh-system` exists (created by `../neuromesh-agent.yaml` or `kubectl create namespace neuromesh-system`).
 2. Create Secrets (Cosign pubkey + webhook TLS) — commands below.
-3. Apply Deployment + Service + PDB:
+3. Apply Deployment + Service + PDB + NetworkPolicy:
    ```bash
    kubectl apply -f neuromesh-admission-webhook-deployment.yaml
    kubectl apply -f neuromesh-admission-webhook-service.yaml
    kubectl apply -f neuromesh-admission-webhook-pdb.yaml
+   kubectl apply -f neuromesh-admission-webhook-networkpolicy.yaml
    ```
 4. Wait until Ready:
    ```bash
@@ -169,6 +170,22 @@ $caBundle = [Convert]::ToBase64String([IO.File]::ReadAllBytes("ca.crt"))
 - **PodDisruptionBudget** `minAvailable: 1` — a drain/upgrade must not remove
   both pods. Do not set `replicas: 1` while this PDB is applied.
 
+## NetworkPolicy (Phase B part 1)
+
+File: `neuromesh-admission-webhook-networkpolicy.yaml`.
+
+- Matches **container port 8443** (not Service port 443). Service remains `443→https`.
+- k3s apiserver is **host-networked** — there is no apiserver Pod selector. Ingress
+  uses `ipBlock`. Default in-repo CIDR is `10.42.0.0/32` (Flannel server PodCIDR
+  network address as a `/32` host prefix). Discover the correct value on the
+  droplet with `scripts/manual_verify_network_policies.sh` before tightening or
+  widening. Do **not** default to `10.42.0.0/16` (that admits every Flannel pod).
+- On single-node k3s, Kubernetes always allows host→local-pod (kubelet / same-node
+  apiserver path). Multi-node: set a `/32` (or `/128`) per control-plane node’s
+  PodCIDR network address (same rule Longhorn documents for k3s webhooks).
+- PE has a sibling policy: `../neuromesh-zt-policy-engine-networkpolicy.yaml`
+  (agent pods only on `:8080`).
+
 ## Image pin
 
 The Deployment still references `…/neuromesh-k8s-admission-webhook:0.1.0`.
@@ -225,4 +242,5 @@ kubectl -n neuromesh-system logs -l app.kubernetes.io/name=neuromesh-admission-w
 | `neuromesh-admission-webhook-deployment.yaml` | Deployment + ServiceAccount (`replicas: 2`, preferred anti-affinity) |
 | `neuromesh-admission-webhook-service.yaml` | ClusterIP 443→8443 |
 | `neuromesh-admission-webhook-pdb.yaml` | PodDisruptionBudget `minAvailable: 1` |
+| `neuromesh-admission-webhook-networkpolicy.yaml` | Ingress NetworkPolicy (TCP/8443 from API-server CIDRs) |
 | `neuromesh-admission-validating-webhook.yaml` | ValidatingWebhookConfiguration (Phase A) |

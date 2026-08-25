@@ -1,0 +1,31 @@
+{{- if and .Values.admissionWebhook.enabled .Values.networkPolicy.enabled .Values.networkPolicy.admissionWebhook.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: neuromesh-admission-webhook
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: neuromesh-admission-webhook
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+{{- if .Values.networkPolicy.admissionWebhook.apiServerSourceCidrs }}
+{{- range .Values.networkPolicy.admissionWebhook.apiServerSourceCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+{{- end }}
+{{- else }}
+{{- fail "networkPolicy.admissionWebhook.apiServerSourceCidrs must be a non-empty list (k3s: PodCIDR network address /32 per control-plane node; see scripts/manual_verify_network_policies.sh)" }}
+{{- end }}
+      ports:
+        - protocol: TCP
+          # Container port (Service 443 → https/8443). Not Service port 443.
+          port: 8443
+{{- end }}
