@@ -14,6 +14,7 @@ Production Helm packaging of the existing manifests in `deploy/kubernetes/` and 
 - `admission/neuromesh-admission-webhook-networkpolicy.yaml` -> `templates/admission-webhook-networkpolicy.yaml`
 - `admission/neuromesh-admission-webhook-service.yaml` -> `templates/admission-webhook-service.yaml`
 - `admission/neuromesh-admission-validating-webhook.yaml` -> `templates/admission-validating-webhook.yaml`
+- `admission/neuromesh-admission-webhook-cert-manager.yaml` -> `templates/admission-webhook-cert-manager.yaml` (when `certManager.enabled`)
 - `neuromesh-zt-policy-engine-networkpolicy.yaml` -> `templates/policy-engine-networkpolicy.yaml`
 
 Associated Secrets are represented in `templates/secrets.yaml` (disabled by default to preserve current operational workflow).
@@ -82,16 +83,28 @@ kubectl -n neuromesh-system rollout status deploy/neuromesh-admission-webhook --
 kubectl -n neuromesh-system get endpoints neuromesh-admission-webhook
 ```
 
-### 7) Apply VWC (after setting caBundle)
+### 7) Apply VWC (after setting caBundle **or** enabling cert-manager)
 
 ```bash
-# Phase A: operator CA. cert-manager is Phase B.
+# Lab / Ignore — operator CA (openssl path):
 helm upgrade neuromesh-security deploy/kubernetes/charts/neuromesh-security \
   -n neuromesh-system \
   --set validatingWebhook.caBundle="$(openssl base64 -A -in /tmp/neuromesh-webhook-certs/ca.crt)"
+
+# Production leaf renewal (Issue #168) — requires cert-manager ≥ 1.19:
+helm upgrade neuromesh-security deploy/kubernetes/charts/neuromesh-security \
+  -n neuromesh-system \
+  --set certManager.enabled=true
+# Do not set validatingWebhook.caBundle when certManager.enabled=true
+# (cainjector owns caBundle via cert-manager.io/inject-ca-from).
 ```
 
-Raw-manifest equivalent: `bash scripts/inject_admission_cabundle.sh ca.crt - | kubectl apply -f -`.
+Raw openssl: `bash scripts/inject_admission_cabundle.sh ca.crt - | kubectl apply -f -`.  
+Raw cert-manager: apply `admission/neuromesh-admission-webhook-cert-manager.yaml` +
+`admission/neuromesh-admission-validating-webhook-cert-manager.yaml`.
+
+CA rotation is a **manual dual-trust runbook** (not Helm automation) — see
+`deploy/kubernetes/admission/README.md`.
 
 ## Validation
 

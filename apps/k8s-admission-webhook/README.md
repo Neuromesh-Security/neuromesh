@@ -25,7 +25,9 @@ Kubernetes requires webhooks over TLS. Mount certificates and configure:
 | `NEUROMESH_COSIGN_VERIFY_MODE` | `key` | Trust-root mode (`key` or `keyless`; keyless is scaffolded fail-closed) |
 | `NEUROMESH_COSIGN_REGISTRY_INSECURE` | unset / false | Exact value `true` enables plain-HTTP registry access (lab/kind only; loud `SECURITY WARNING` at startup; **never** set in `deploy/kubernetes/`) |
 
-Generate Phase A certs with `openssl` (see admission deploy README). cert-manager is a later Phase B item.
+Generate Phase A certs with `openssl` (see admission deploy README). Phase B
+part 2 (Issue #168) adds **opt-in** cert-manager leaf renewal; openssl remains
+valid for lab / `failurePolicy: Ignore`.
 
 ## Build & Test
 
@@ -35,7 +37,7 @@ go test ./...
 go build -o bin/k8s-admission-webhook ./src
 ```
 
-## Production deploy (Phase A + Phase B part 1)
+## Production deploy (Phase A + Phase B)
 
 Shipped manifests, TLS/openssl runbook, install order, Ignore→Fail graduation
 checklist, NetworkPolicy, and caBundle inject live under
@@ -47,7 +49,8 @@ Hardening already on `main` (Phase A / PR #164): `replicas: 2`, preferred hostna
 anti-affinity, PDB `minAvailable: 1`, `matchPolicy: Equivalent`, VWC matches
 `pods` + `pods/ephemeralcontainers`. Phase B part 1 adds ingress NetworkPolicy
 on container port **8443** (Service is `443→8443`) from k3s API-server source
-CIDRs.
+CIDRs. Phase B part 2 (Issue #168) adds **opt-in** cert-manager leaf renewal;
+openssl remains the lab / `failurePolicy: Ignore` path.
 
 ## Example ValidatingWebhookConfiguration (snippet only)
 

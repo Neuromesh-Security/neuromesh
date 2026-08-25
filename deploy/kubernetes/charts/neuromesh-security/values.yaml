@@ -105,11 +105,29 @@ validatingWebhook:
   # Operator CA (base64 PEM). Placeholder is intentional — do not commit a real
   # CA. Inject with scripts/inject_admission_cabundle.sh or:
   #   --set validatingWebhook.caBundle="$(openssl base64 -A -in ca.crt)"
-  # Full cert-manager automation remains a later Phase B item.
+  # Ignored when certManager.enabled=true (cainjector owns caBundle).
   caBundle: REPLACE_WITH_BASE64_CA_BUNDLE
   failurePolicy: Ignore
   matchPolicy: Equivalent
   timeoutSeconds: 15
+
+# Phase B part 2 (Issue #168) — opt-in cert-manager leaf renewal.
+# Default false preserves openssl/lab / failurePolicy:Ignore bootstrap.
+# Production / Fail graduation: set enabled=true (requires cert-manager ≥ 1.19).
+certManager:
+  enabled: false
+  # Minimum supported: 1.19 (CAInjectorMerging default). Prefer current stable.
+  ca:
+    duration: 87600h # ~3650d
+    renewBefore: 720h # 30d — plan CA runbook; do not blind-replace caBundle
+  leaf:
+    duration: 2160h # 90d
+    renewBefore: 360h # 15d
+    dnsNames:
+      - neuromesh-admission-webhook
+      - neuromesh-admission-webhook.neuromesh-system
+      - neuromesh-admission-webhook.neuromesh-system.svc
+      - neuromesh-admission-webhook.neuromesh-system.svc.cluster.local
 
 # Phase B part 1 — ingress NetworkPolicies (no new CNI deps; requires a CNI that
 # enforces NetworkPolicy — default k3s Flannel + netpol controller does).

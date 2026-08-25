@@ -1,0 +1,57 @@
+# Phase B part 2 — VWC for cert-manager path (Issue #168).
+#
+# Use THIS file instead of neuromesh-admission-validating-webhook.yaml when
+# cert-manager manages the webhook CA/leaf. Do not also apply the openssl
+# placeholder VWC (would fight over caBundle).
+#
+# cainjector fills caBundle from Secret neuromesh-admission-webhook-ca
+# (annotation cert-manager.io/inject-ca-from). Requires cert-manager ≥ 1.19
+# so CAInjectorMerging merges rather than replace-only on CA material change.
+#
+# caBundle starts empty; wait until cainjector patches it before relying on
+# admission under failurePolicy: Fail.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: neuromesh-validate-pods
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/part-of: neuromesh
+  annotations:
+    # namespace/name of the CA Certificate's Secret
+    cert-manager.io/inject-ca-from: neuromesh-system/neuromesh-admission-webhook-ca
+webhooks:
+  - name: neuromesh.security.validate-pods
+    clientConfig:
+      service:
+        name: neuromesh-admission-webhook
+        namespace: neuromesh-system
+        path: /validate
+        port: 443
+      # Filled by cainjector from the CA Secret. Do not hand-replace with a
+      # single new CA during CA rotation — see README dual-trust runbook.
+      caBundle: ""
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods", "pods/ephemeralcontainers"]
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    matchPolicy: Equivalent
+    timeoutSeconds: 15
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - kube-public
+            - kube-node-lease
+    objectSelector:
+      matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: NotIn
+          values:
+            - neuromesh-admission-webhook

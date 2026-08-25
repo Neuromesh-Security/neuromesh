@@ -6,6 +6,10 @@ metadata:
   labels:
     app.kubernetes.io/name: neuromesh-admission-webhook
     app.kubernetes.io/part-of: neuromesh
+{{- if .Values.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ printf "%s/neuromesh-admission-webhook-ca" (include "neuromesh.namespace" .) | quote }}
+{{- end }}
 webhooks:
   - name: neuromesh.security.validate-pods
     clientConfig:
@@ -14,7 +18,12 @@ webhooks:
         namespace: {{ include "neuromesh.namespace" . }}
         path: /validate
         port: {{ .Values.admissionWebhook.service.port }}
+{{- if .Values.certManager.enabled }}
+      # cainjector fills from CA Secret (merge behavior requires cert-manager ≥ 1.19).
+      caBundle: ""
+{{- else }}
       caBundle: {{ .Values.validatingWebhook.caBundle | quote }}
+{{- end }}
     rules:
       - apiGroups: [""]
         apiVersions: ["v1"]
