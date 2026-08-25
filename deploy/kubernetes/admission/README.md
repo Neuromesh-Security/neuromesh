@@ -7,7 +7,7 @@ Cosign Pod image verification in `apps/k8s-admission-webhook`.
 |--------------------------|-------------------|
 | `failurePolicy: Ignore` | `failurePolicy: Fail` |
 | Manual TLS Secret + `caBundle` | cert-manager |
-| Pods CREATE/UPDATE only | MutatingWebhookConfiguration / sidecar |
+| Pods CREATE/UPDATE (`pods` + `pods/ephemeralcontainers`) | MutatingWebhookConfiguration / sidecar |
 | Static Cosign key verify | Keyless Cosign |
 
 ## Install order (mandatory)
@@ -16,25 +16,33 @@ Do **not** apply the ValidatingWebhookConfiguration before the Deployment is Rea
 
 1. Ensure namespace `neuromesh-system` exists (created by `../neuromesh-agent.yaml` or `kubectl create namespace neuromesh-system`).
 2. Create Secrets (Cosign pubkey + webhook TLS) — commands below.
-3. Apply Deployment + Service:
+3. Apply Deployment + Service + PDB:
    ```bash
    kubectl apply -f neuromesh-admission-webhook-deployment.yaml
    kubectl apply -f neuromesh-admission-webhook-service.yaml
+   kubectl apply -f neuromesh-admission-webhook-pdb.yaml
    ```
 4. Wait until Ready:
    ```bash
    kubectl -n neuromesh-system rollout status deployment/neuromesh-admission-webhook
    kubectl -n neuromesh-system get endpoints neuromesh-admission-webhook
+   kubectl -n neuromesh-system get pdb neuromesh-admission-webhook
    ```
-5. Fill `caBundle` in `neuromesh-admission-validating-webhook.yaml`, then apply:
+5. Fill `caBundle` then apply the ValidatingWebhookConfiguration.
+   **Do not** hand-edit a one-off sed unless you must. From the **repository root**,
+   use the repo script:
    ```bash
-   kubectl apply -f neuromesh-admission-validating-webhook.yaml
+   bash scripts/inject_admission_cabundle.sh /tmp/neuromesh-webhook-certs/ca.crt - \
+     | kubectl apply -f -
    ```
+   Helm: `--set validatingWebhook.caBundle="$(openssl base64 -A -in ca.crt)"`.
+   cert-manager is **Phase B**, not this path.
 
-After step 5, Pod CREATE/UPDATE outside excluded namespaces (including
-`neuromesh-agent` in `neuromesh-system`) are sent to `/validate` when the webhook
-is reachable. Under Phase A `Ignore`, an unreachable webhook does **not** block
-admission — graduate to Fail only after the checklist below.
+After step 5, Pod CREATE/UPDATE (including `pods/ephemeralcontainers` / `kubectl debug`)
+outside excluded namespaces (including `neuromesh-agent` in `neuromesh-system`) are
+sent to `/validate` when the webhook is reachable. Under Phase A `Ignore`, an
+unreachable webhook does **not** block admission — graduate to Fail only after the
+checklist below.
 
 ## TLS: openssl SAN + Secrets + caBundle
 
@@ -107,12 +115,30 @@ This does **not** change `failurePolicy`, selectors, or `timeoutSeconds`.
 `caBundle` must be the **base64-encoded PEM of the CA** that signed `tls.crt`
 (here: `ca.crt`), not the server cert alone.
 
-```bash
-# Linux / macOS / Git Bash:
-CA_BUNDLE="$(openssl base64 -A -in ca.crt)"
-# Or: CA_BUNDLE="$(base64 -w0 ca.crt)"
+The in-repo YAML **keeps** the placeholder `REPLACE_WITH_BASE64_CA_BUNDLE`.
+That is correct for Phase A: the CA is operator-generated and must not be
+committed. **cert-manager is Phase B** — do not add it here.
 
-# Patch the placeholder in the manifest before apply, e.g.:
+Supported inject path (repo script, not improvised sed):
+
+```bash
+# From repo root. Writes patched YAML to stdout:
+bash scripts/inject_admission_cabundle.sh /tmp/neuromesh-webhook-certs/ca.crt - \
+  | kubectl apply -f -
+```
+
+Helm:
+
+```bash
+helm upgrade neuromesh-security deploy/kubernetes/charts/neuromesh-security \
+  -n neuromesh-system \
+  --set validatingWebhook.caBundle="$(openssl base64 -A -in /tmp/neuromesh-webhook-certs/ca.crt)"
+```
+
+Emergency one-liner (same substitution the script performs):
+
+```bash
+CA_BUNDLE="$(openssl base64 -A -in ca.crt)"
 sed "s/REPLACE_WITH_BASE64_CA_BUNDLE/${CA_BUNDLE}/" \
   neuromesh-admission-validating-webhook.yaml | kubectl apply -f -
 ```
@@ -131,21 +157,44 @@ $caBundle = [Convert]::ToBase64String([IO.File]::ReadAllBytes("ca.crt"))
 - **namespaceSelector:** exclude `kube-system`, `kube-public`, `kube-node-lease`.
 - **objectSelector:** exclude pods with `app.kubernetes.io/name=neuromesh-admission-webhook`.
 - **`neuromesh-system` is not excluded** — `neuromesh-agent` DaemonSet pods are gated.
+- **`matchPolicy: Equivalent`** — explicit (this is also the API default).
+- **resources:** `pods` **and** `pods/ephemeralcontainers`. `/validate` already
+  walks `initContainers` + `containers` + `ephemeralContainers` in code; without
+  the subresource rule, `kubectl debug` would bypass Cosign for debug images.
+
+## HA (Phase A pre-Fail)
+
+- **replicas: 2** with **preferred** `podAntiAffinity` on `kubernetes.io/hostname`.
+  Preferred (not required) so a single-node lab still schedules both replicas.
+- **PodDisruptionBudget** `minAvailable: 1` — a drain/upgrade must not remove
+  both pods. Do not set `replicas: 1` while this PDB is applied.
+
+## Image pin
+
+The Deployment still references `…/neuromesh-k8s-admission-webhook:0.1.0`.
+That tag is **not** published by CI (Production CI historically built only PE +
+agent). This hardening adds the webhook to the docker matrix. After the first
+`main` publish, pin `@sha256:…` the same way PE/agent are pinned. Do **not**
+invent a digest.
 
 ## Phase A → Fail graduation checklist (operator)
 
 Graduate `failurePolicy` from `Ignore` to `Fail` **only** when all of the following
 are true in the target cluster. Treat this as a gate, not aspirational guidance.
 
-- [ ] `deployment/neuromesh-admission-webhook` has been Ready continuously for a soak
+- [ ] `deployment/neuromesh-admission-webhook` has `replicas: 2` Ready continuously for a soak
       period you accept (recommended: ≥ 7 days in the target environment, or an
       equivalent load test with zero prolonged `/validate` timeouts).
+- [ ] PDB `neuromesh-admission-webhook` is present with `minAvailable: 1`.
+- [ ] Image is digest-pinned (`@sha256:…`), Cosign-signed, matching PE/agent convention.
 - [ ] Webhook logs show successful ALLOW for a known Cosign-signed image (e.g. a
       rolling update of `neuromesh-agent` with a signed `agent-ebpf-sensor` image).
 - [ ] Webhook logs show DENY for an intentionally **unsigned** test Pod while the
       webhook is healthy (create a Pod with an unsigned image in a non-excluded
       namespace; confirm DENY in webhook logs). Under `Ignore`, confirm the API
       server still received a deny response when the webhook was up.
+- [ ] Unsigned **initContainer** and unsigned **ephemeralContainer** (`kubectl debug`)
+      are denied while the webhook is healthy.
 - [ ] TLS/DNS/`caBundle` are correct: no sustained client TLS errors from the API
       server to `neuromesh-admission-webhook.neuromesh-system.svc`.
 - [ ] An operator explicitly changes `failurePolicy` to `Fail` (edit/overlay) and
@@ -173,6 +222,7 @@ kubectl -n neuromesh-system logs -l app.kubernetes.io/name=neuromesh-admission-w
 
 | File | Role |
 |------|------|
-| `neuromesh-admission-webhook-deployment.yaml` | Deployment + ServiceAccount |
+| `neuromesh-admission-webhook-deployment.yaml` | Deployment + ServiceAccount (`replicas: 2`, preferred anti-affinity) |
 | `neuromesh-admission-webhook-service.yaml` | ClusterIP 443→8443 |
+| `neuromesh-admission-webhook-pdb.yaml` | PodDisruptionBudget `minAvailable: 1` |
 | `neuromesh-admission-validating-webhook.yaml` | ValidatingWebhookConfiguration (Phase A) |

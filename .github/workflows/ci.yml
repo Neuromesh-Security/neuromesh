@@ -237,6 +237,16 @@ jobs:
       - name: Unit tests — datadog-forwarder (Kafka slow-path consumer)
         run: cargo test -p datadog-forwarder
 
+      - name: Set up Go (admission webhook tests)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/k8s-admission-webhook/go.mod
+          cache-dependency-path: apps/k8s-admission-webhook/go.sum
+
+      - name: Unit tests — k8s-admission-webhook
+        working-directory: apps/k8s-admission-webhook
+        run: go test ./...
+
       - name: Coverage gate (≥70% line coverage)
         run: |
           cargo llvm-cov \
@@ -469,6 +479,11 @@ jobs:
             context: .
             dockerfile: apps/agent-ebpf-sensor/Dockerfile
             needs_ebpf: true
+          # Admission webhook: required for digest-pin convention (same as PE/agent).
+          # Historically unpublished; :0.1.0 in deploy/ is not a live GHCR tag.
+          - image: neuromesh-k8s-admission-webhook
+            context: apps/k8s-admission-webhook
+            dockerfile: apps/k8s-admission-webhook/Dockerfile
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4

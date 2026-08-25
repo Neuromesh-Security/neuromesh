@@ -1,0 +1,16 @@
+# Phase A PDB (Issue #63 graduation / webhook hardening).
+# minAvailable: 1 with replicas: 2 — one pod may be disrupted; both must not.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: neuromesh-admission-webhook
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: neuromesh-admission-webhook

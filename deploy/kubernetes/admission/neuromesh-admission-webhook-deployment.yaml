@@ -3,9 +3,10 @@
 # Install order (do not reorder):
 #   1. Namespace neuromesh-system (see ../neuromesh-agent.yaml or create it)
 #   2. Secrets: Cosign pubkey + webhook TLS (see README.md in this directory)
-#   3. This Deployment + Service
-#   4. Wait until Ready
-#   5. Apply neuromesh-admission-validating-webhook.yaml (with caBundle filled in)
+#   3. This Deployment + Service + PDB
+#   4. Wait until Ready (2 replicas)
+#   5. Apply neuromesh-admission-validating-webhook.yaml (caBundle via
+#      scripts/inject_admission_cabundle.sh — not cert-manager)
 #
 # failurePolicy on the VWC is Ignore for Phase A — see README graduation checklist.
 apiVersion: apps/v1
@@ -19,7 +20,7 @@ metadata:
     app.kubernetes.io/part-of: neuromesh
     app.kubernetes.io/version: "0.1.0"
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: neuromesh-admission-webhook
@@ -31,6 +32,15 @@ spec:
         app.kubernetes.io/part-of: neuromesh
     spec:
       serviceAccountName: neuromesh-admission-webhook
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: neuromesh-admission-webhook
+                topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -39,6 +49,11 @@ spec:
           type: RuntimeDefault
       containers:
         - name: webhook
+          # Still a mutable tag. CI historically published only PE + agent;
+          # Production CI docker matrix now includes this image so the first
+          # main publish can produce a Cosign-signed digest. Pin @sha256:…
+          # (PE/agent convention) in a follow-up after that digest exists.
+          # :0.1.0 is NOT a CI-published tag — do not treat it as live GHCR.
           image: ghcr.io/neuromesh-security/neuromesh-k8s-admission-webhook:0.1.0
           imagePullPolicy: IfNotPresent
           ports:

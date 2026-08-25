@@ -223,6 +223,61 @@ func TestValidateAdmissionReview_DeniesWhenAnyContainerFailsVerification(t *test
 	}
 }
 
+func TestValidateAdmissionReview_DeniesUnsignedInitContainer(t *testing.T) {
+	t.Parallel()
+
+	verifier := &fakeVerifier{
+		results: map[string]VerificationResult{
+			"registry.example.com/app:v1": {ImageRef: "registry.example.com/app:v1", Verified: true, Mode: VerifyModeKey},
+		},
+	}
+	validator := NewValidator(verifier)
+
+	pod := corev1.Pod{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			InitContainers: []corev1.Container{{Name: "init", Image: "registry.example.com/init-unsigned:v1"}},
+			Containers:     []corev1.Container{{Name: "app", Image: "registry.example.com/app:v1"}},
+		},
+	}
+
+	resp := validator.ValidateAdmissionReview(context.Background(), admissionRequestForPod(t, pod, admissionv1.Create))
+	if resp.Allowed {
+		t.Fatal("expected unsigned initContainer image to deny the whole pod")
+	}
+}
+
+func TestValidateAdmissionReview_DeniesUnsignedEphemeralContainer(t *testing.T) {
+	t.Parallel()
+
+	verifier := &fakeVerifier{
+		results: map[string]VerificationResult{
+			"registry.example.com/app:v1": {ImageRef: "registry.example.com/app:v1", Verified: true, Mode: VerifyModeKey},
+		},
+	}
+	validator := NewValidator(verifier)
+
+	pod := corev1.Pod{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "app", Image: "registry.example.com/app:v1"}},
+			EphemeralContainers: []corev1.EphemeralContainer{
+				{EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+					Name:  "debug",
+					Image: "registry.example.com/debug-unsigned:v1",
+				}},
+			},
+		},
+	}
+
+	resp := validator.ValidateAdmissionReview(context.Background(), admissionRequestForPod(t, pod, admissionv1.Update))
+	if resp.Allowed {
+		t.Fatal("expected unsigned ephemeralContainer image to deny the whole pod")
+	}
+}
+
 func TestCollectContainerImages(t *testing.T) {
 	t.Parallel()
 

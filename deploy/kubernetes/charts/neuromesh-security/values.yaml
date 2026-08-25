@@ -14,6 +14,8 @@ images:
     digest: sha256:eceb694cc12409a935ca3d83a9ac856b0f3e4461131c63b193142aa828572255
     pullPolicy: IfNotPresent
   admissionWebhook:
+    # Mutable tag until the first main CI publish of this image (docker matrix
+    # now includes it). Pin digest (empty tag) after that, matching PE/agent.
     repository: ghcr.io/neuromesh-security/neuromesh-k8s-admission-webhook
     tag: "0.1.0"
     digest: ""
@@ -61,6 +63,9 @@ policyEngine:
 
 admissionWebhook:
   enabled: true
+  replicas: 2
+  pdb:
+    minAvailable: 1
   service:
     port: 443
     targetPort: https
@@ -97,8 +102,13 @@ desiredPolicy:
 
 validatingWebhook:
   enabled: true
+  # Operator CA (base64 PEM). Placeholder is intentional — do not commit a real
+  # CA. Inject with scripts/inject_admission_cabundle.sh or:
+  #   --set validatingWebhook.caBundle="$(openssl base64 -A -in ca.crt)"
+  # cert-manager is Phase B.
   caBundle: REPLACE_WITH_BASE64_CA_BUNDLE
   failurePolicy: Ignore
+  matchPolicy: Equivalent
   timeoutSeconds: 15
 
 secrets:

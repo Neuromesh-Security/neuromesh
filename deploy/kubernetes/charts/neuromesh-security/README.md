@@ -10,6 +10,7 @@ Production Helm packaging of the existing manifests in `deploy/kubernetes/` and 
 - `neuromesh-zt-policy-engine-service.yaml` -> `templates/policy-engine-service.yaml`
 - `neuromesh-desired-policy.yaml` -> `templates/desired-policy.yaml` (ConfigMap + Role + RoleBinding)
 - `admission/neuromesh-admission-webhook-deployment.yaml` -> `templates/admission-webhook-deployment.yaml` (Deployment + ServiceAccount)
+- `admission/neuromesh-admission-webhook-pdb.yaml` -> `templates/admission-webhook-pdb.yaml`
 - `admission/neuromesh-admission-webhook-service.yaml` -> `templates/admission-webhook-service.yaml`
 - `admission/neuromesh-admission-validating-webhook.yaml` -> `templates/admission-validating-webhook.yaml`
 
@@ -82,9 +83,13 @@ kubectl -n neuromesh-system get endpoints neuromesh-admission-webhook
 ### 7) Apply VWC (after setting caBundle)
 
 ```bash
+# Phase A: operator CA. cert-manager is Phase B.
 helm upgrade neuromesh-security deploy/kubernetes/charts/neuromesh-security \
-  -n neuromesh-system
+  -n neuromesh-system \
+  --set validatingWebhook.caBundle="$(openssl base64 -A -in /tmp/neuromesh-webhook-certs/ca.crt)"
 ```
+
+Raw-manifest equivalent: `bash scripts/inject_admission_cabundle.sh ca.crt - | kubectl apply -f -`.
 
 ## Validation
 

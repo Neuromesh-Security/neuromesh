@@ -19,10 +19,11 @@ webhooks:
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["pods"]
+        resources: ["pods", "pods/ephemeralcontainers"]
     admissionReviewVersions: ["v1"]
     sideEffects: None
     failurePolicy: {{ .Values.validatingWebhook.failurePolicy }}
+    matchPolicy: {{ .Values.validatingWebhook.matchPolicy }}
     timeoutSeconds: {{ .Values.validatingWebhook.timeoutSeconds }}
     namespaceSelector:
       matchExpressions:
