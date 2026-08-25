@@ -1,0 +1,81 @@
+{{- if and .Values.admissionWebhook.enabled .Values.certManager.enabled }}
+{{- /* Phase B part 2 (Issue #168): long-lived CA + short leaf. Leaf renew only. */}}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: neuromesh-admission-selfsigned
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook-tls
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: neuromesh-admission-webhook-ca
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook-tls
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  isCA: true
+  commonName: neuromesh-admission-ca
+  secretName: neuromesh-admission-webhook-ca
+  duration: {{ .Values.certManager.ca.duration | quote }}
+  renewBefore: {{ .Values.certManager.ca.renewBefore | quote }}
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 4096
+  issuerRef:
+    name: neuromesh-admission-selfsigned
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: neuromesh-admission-ca-issuer
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook-tls
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  ca:
+    secretName: neuromesh-admission-webhook-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: neuromesh-admission-webhook-tls
+  namespace: {{ include "neuromesh.namespace" . }}
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook-tls
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  secretName: {{ .Values.secrets.admissionWebhookTls.name }}
+  duration: {{ .Values.certManager.leaf.duration | quote }}
+  renewBefore: {{ .Values.certManager.leaf.renewBefore | quote }}
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 4096
+  usages:
+    - digital signature
+    - key encipherment
+    - server auth
+  dnsNames:
+{{- range .Values.certManager.leaf.dnsNames }}
+    - {{ . | quote }}
+{{- end }}
+  issuerRef:
+    name: neuromesh-admission-ca-issuer
+    kind: Issuer
+    group: cert-manager.io
+{{- end }}

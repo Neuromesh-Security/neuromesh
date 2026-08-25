@@ -6,7 +6,9 @@
 #   3. This Deployment + Service + PDB
 #   4. Wait until Ready (2 replicas)
 #   5. Apply neuromesh-admission-validating-webhook.yaml (caBundle via
-#      scripts/inject_admission_cabundle.sh — not cert-manager)
+#      scripts/inject_admission_cabundle.sh — openssl / lab path)
+#   OR Phase B part 2 (Issue #168): apply neuromesh-admission-webhook-cert-manager.yaml
+#      then neuromesh-admission-validating-webhook-cert-manager.yaml (cainjector).
 #
 # failurePolicy on the VWC is Ignore for Phase A — see README graduation checklist.
 apiVersion: apps/v1

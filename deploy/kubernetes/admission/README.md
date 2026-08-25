@@ -5,8 +5,8 @@ Cosign Pod image verification in `apps/k8s-admission-webhook`.
 
 | Phase A (this directory) | Not in this phase |
 |--------------------------|-------------------|
-| `failurePolicy: Ignore` | `failurePolicy: Fail` |
-| Manual TLS Secret + `caBundle` + NetworkPolicy | Full cert-manager automation |
+| `failurePolicy: Ignore` | `failurePolicy: Fail` (gated — see checklist) |
+| Manual openssl TLS Secret + `caBundle` **or** Phase B part 2 cert-manager | Blind CA auto-replace (forbidden) |
 | Pods CREATE/UPDATE (`pods` + `pods/ephemeralcontainers`) | MutatingWebhookConfiguration / sidecar |
 | Static Cosign key verify | Keyless Cosign |
 
@@ -37,7 +37,8 @@ Do **not** apply the ValidatingWebhookConfiguration before the Deployment is Rea
      | kubectl apply -f -
    ```
    Helm: `--set validatingWebhook.caBundle="$(openssl base64 -A -in ca.crt)"`.
-   cert-manager is **Phase B**, not this path.
+   **Lab / `failurePolicy: Ignore` default:** keep this openssl path.
+   **Production leaf renewal:** Phase B part 2 cert-manager path below (Issue #168).
 
 After step 5, Pod CREATE/UPDATE (including `pods/ephemeralcontainers` / `kubectl debug`)
 outside excluded namespaces (including `neuromesh-agent` in `neuromesh-system`) are
@@ -118,7 +119,8 @@ This does **not** change `failurePolicy`, selectors, or `timeoutSeconds`.
 
 The in-repo YAML **keeps** the placeholder `REPLACE_WITH_BASE64_CA_BUNDLE`.
 That is correct for Phase A: the CA is operator-generated and must not be
-committed. **cert-manager is Phase B** — do not add it here.
+committed. **cert-manager leaf renewal is Phase B part 2** (opt-in) — see below.
+Do not remove this openssl path; it remains the lab / Ignore bootstrap.
 
 Supported inject path (repo script, not improvised sed):
 
@@ -186,6 +188,96 @@ File: `neuromesh-admission-webhook-networkpolicy.yaml`.
 - PE has a sibling policy: `../neuromesh-zt-policy-engine-networkpolicy.yaml`
   (agent pods only on `:8080`).
 
+## TLS rotation — Phase B part 2 (Issue #168)
+
+**Gate:** do **not** graduate `failurePolicy` to `Fail` without a live rotation
+path (cert-manager below, or a platform-equivalent CA injector with the same
+dual-trust / fail-safe properties).
+
+### Two supported install modes
+
+| Mode | When | How |
+|------|------|-----|
+| **openssl / manual** | Lab, kind, `failurePolicy: Ignore` | README openssl section + `inject_admission_cabundle.sh` + openssl VWC |
+| **cert-manager** (opt-in) | Production leaf renewal / Fail prep | `neuromesh-admission-webhook-cert-manager.yaml` + `neuromesh-admission-validating-webhook-cert-manager.yaml` |
+
+Do **not** apply both VWC variants. Do **not** Helm-create the TLS Secret when
+`certManager.enabled=true` (the leaf `Certificate` owns
+`neuromesh-admission-webhook-tls`).
+
+### cert-manager path (leaf renew automated)
+
+**Requires cert-manager ≥ 1.19** (cainjector `CAInjectorMerging` default — merge
+new CA material into `caBundle` instead of replace-only).
+
+```bash
+# 1) cert-manager Issuers + CA Certificate + leaf Certificate
+kubectl apply -f neuromesh-admission-webhook-cert-manager.yaml
+kubectl -n neuromesh-system wait --for=condition=Ready certificate/neuromesh-admission-webhook-ca --timeout=120s
+kubectl -n neuromesh-system wait --for=condition=Ready certificate/neuromesh-admission-webhook-tls --timeout=120s
+
+# 2) Deployment/Service/PDB/NetworkPolicy (Secret is created by cert-manager)
+kubectl apply -f neuromesh-admission-webhook-deployment.yaml
+kubectl apply -f neuromesh-admission-webhook-service.yaml
+kubectl apply -f neuromesh-admission-webhook-pdb.yaml
+kubectl apply -f neuromesh-admission-webhook-networkpolicy.yaml
+kubectl -n neuromesh-system rollout status deployment/neuromesh-admission-webhook
+
+# 3) VWC with inject-ca-from (cainjector fills caBundle)
+kubectl apply -f neuromesh-admission-validating-webhook-cert-manager.yaml
+# Wait until caBundle is non-empty:
+kubectl get validatingwebhookconfiguration neuromesh-validate-pods \
+  -o jsonpath='{.webhooks[0].clientConfig.caBundle}' | wc -c
+```
+
+Helm:
+
+```bash
+helm upgrade --install neuromesh-security deploy/kubernetes/charts/neuromesh-security \
+  -n neuromesh-system \
+  --set certManager.enabled=true \
+  --set validatingWebhook.enabled=true
+# Do not set validatingWebhook.caBundle when certManager.enabled=true.
+```
+
+**Automated behavior:** short-lived leaf (90d, renewBefore 15d) signed by a
+long-lived CA. cert-manager updates the TLS Secret **in place** on successful
+renew. The webhook process loads TLS at start (`ListenAndServeTLS`) — after
+renew, run a **rolling restart** so pods pick up the new leaf (replicas ≥ 2 +
+PDB keep admission up). Same CA → `caBundle` unchanged.
+
+**Failure-mode locks (enforced by design / manifests / verify script):**
+
+- Never `kubectl delete secret neuromesh-admission-webhook-tls` as part of renew.
+- Never ship automation that blanks `caBundle` or writes `REPLACE_WITH_BASE64_CA_BUNDLE` over a live inject.
+- On renew error, the last successfully issued Secret contents remain — fix forward.
+- Helm `secrets.create` **skips** the TLS Secret when `certManager.enabled=true`
+  so values cannot overwrite/fight the Certificate-owned Secret.
+
+Live verify:
+
+```bash
+KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+  bash scripts/manual_verify_admission_tls_rotation.sh
+```
+
+### CA rotation runbook (manual — not blind automation)
+
+Use only for planned CA replace or compromise. **Sequence matters** (Fail-era).
+
+Preconditions: cert-manager ≥ 1.19 with cainjector merge behavior; webhook
+`replicas ≥ 2` + PDB; take a backup of current CA Secret + VWC `caBundle`.
+
+| Step | Action | Must NOT |
+|------|--------|----------|
+| 1 | Create **CA₁** (new CA Certificate / Issuer material). Leave **CA₀** and the current TLS Secret serving. | Delete CA₀ or wipe TLS Secret |
+| 2 | Patch VWC `caBundle` to **CA₀ ∥ CA₁** (both PEM). With `inject-ca-from` + `CAInjectorMerging`, cainjector **merges** new CA into the bundle rather than replace-only. Confirm **both** CA fingerprints appear in the decoded `caBundle` before continuing. | Set `caBundle` to **CA₁-only** while any Ready pod still serves a CA₀ leaf |
+| 3 | Issue leaf signed by **CA₁** into `neuromesh-admission-webhook-tls` (update in place after the new PEM exists). | Delete Secret before the new leaf is written |
+| 4 | `kubectl -n neuromesh-system rollout restart deployment/neuromesh-admission-webhook` and wait until **all** Ready replicas serve the CA₁ leaf (check mounted cert fingerprint / openssl against pod). | Skip soak / proceed with mixed trust assumptions undocumented |
+| 5 | Remove **CA₀** from `caBundle`; destroy CA₀ / old leaf key material. | Drop CA₀ before every Ready replica serves CA₁ |
+
+Break-glass: if step 2–4 fails, **stop**. Leave prior Secret + prior `caBundle` serving until hard expiry; fix forward. Do not “clean up” by deleting a still-valid cert.
+
 ## Image pin
 
 The Deployment still references `…/neuromesh-k8s-admission-webhook:0.1.0`.
@@ -214,6 +306,11 @@ are true in the target cluster. Treat this as a gate, not aspirational guidance.
       are denied while the webhook is healthy.
 - [ ] TLS/DNS/`caBundle` are correct: no sustained client TLS errors from the API
       server to `neuromesh-admission-webhook.neuromesh-system.svc`.
+- [ ] **TLS rotation path live:** cert-manager ≥ 1.19 path applied **or** an
+      equivalent platform CA injector with dual-trust CA-rotate semantics.
+      `scripts/manual_verify_admission_tls_rotation.sh` PASSes (leaf renew in
+      place + rollout healthz). openssl-only with no renew plan is **not**
+      sufficient for Fail.
 - [ ] An operator explicitly changes `failurePolicy` to `Fail` (edit/overlay) and
       re-applies the ValidatingWebhookConfiguration — do not flip this casually.
 
@@ -243,4 +340,6 @@ kubectl -n neuromesh-system logs -l app.kubernetes.io/name=neuromesh-admission-w
 | `neuromesh-admission-webhook-service.yaml` | ClusterIP 443→8443 |
 | `neuromesh-admission-webhook-pdb.yaml` | PodDisruptionBudget `minAvailable: 1` |
 | `neuromesh-admission-webhook-networkpolicy.yaml` | Ingress NetworkPolicy (TCP/8443 from API-server CIDRs) |
-| `neuromesh-admission-validating-webhook.yaml` | ValidatingWebhookConfiguration (Phase A) |
+| `neuromesh-admission-validating-webhook.yaml` | ValidatingWebhookConfiguration (openssl / Phase A caBundle inject) |
+| `neuromesh-admission-webhook-cert-manager.yaml` | Phase B part 2: Issuers + CA/leaf Certificates (Issue #168) |
+| `neuromesh-admission-validating-webhook-cert-manager.yaml` | VWC with `cert-manager.io/inject-ca-from` |

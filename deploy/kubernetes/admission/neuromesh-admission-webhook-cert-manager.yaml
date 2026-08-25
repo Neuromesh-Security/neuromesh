@@ -1,0 +1,100 @@
+# Phase B part 2 — cert-manager leaf renewal for admission webhook (Issue #168).
+#
+# Opt-in for production / Fail-graduation clusters. Lab and failurePolicy:Ignore
+# may keep the openssl path in README.md (Secret + inject_admission_cabundle.sh).
+#
+# Requires: cert-manager ≥ 1.19 (cainjector CAInjectorMerging default — merge new
+# CA into caBundle instead of replace-only; critical for any future CA change).
+#
+# Apply AFTER namespace neuromesh-system exists. Apply BEFORE or with the
+# cert-manager VWC variant so cainjector can fill caBundle from the CA Secret.
+#
+# Failure-mode locks (do not violate in automation or runbooks):
+#   - Never kubectl-delete the TLS Secret before a successful new leaf exists.
+#   - Never replace-only caBundle during CA change (use dual-trust runbook).
+#   - Never "clean up" by removing a still-valid cert on renew error.
+#
+# CA Certificate is long-lived; leaf Certificate is short + renewBefore.
+# Automated path = leaf renew only. CA rotation = MANUAL runbook in README.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: neuromesh-admission-selfsigned
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook-tls
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  selfSigned: {}
+---
+# Long-lived CA — leaf renewals chain to this Secret. Do not treat CA renew as
+# unattended replace; see README "CA rotation runbook".
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: neuromesh-admission-webhook-ca
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook-tls
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  isCA: true
+  commonName: neuromesh-admission-ca
+  secretName: neuromesh-admission-webhook-ca
+  duration: 87600h # 3650d — matches Phase A openssl CA lifetime class
+  renewBefore: 720h # 30d — alert/plan; CA replace is still a dual-trust runbook
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 4096
+  issuerRef:
+    name: neuromesh-admission-selfsigned
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: neuromesh-admission-ca-issuer
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook-tls
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  ca:
+    secretName: neuromesh-admission-webhook-ca
+---
+# Short-lived serving leaf — Secret name MUST match Deployment volume.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: neuromesh-admission-webhook-tls
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh-admission-webhook
+    app.kubernetes.io/component: admission-webhook-tls
+    app.kubernetes.io/part-of: neuromesh
+spec:
+  secretName: neuromesh-admission-webhook-tls
+  duration: 2160h # 90d
+  renewBefore: 360h # 15d
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 4096
+  usages:
+    - digital signature
+    - key encipherment
+    - server auth
+  dnsNames:
+    - neuromesh-admission-webhook
+    - neuromesh-admission-webhook.neuromesh-system
+    - neuromesh-admission-webhook.neuromesh-system.svc
+    - neuromesh-admission-webhook.neuromesh-system.svc.cluster.local
+  issuerRef:
+    name: neuromesh-admission-ca-issuer
+    kind: Issuer
+    group: cert-manager.io
