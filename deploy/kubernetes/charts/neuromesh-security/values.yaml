@@ -105,11 +105,27 @@ validatingWebhook:
   # Operator CA (base64 PEM). Placeholder is intentional — do not commit a real
   # CA. Inject with scripts/inject_admission_cabundle.sh or:
   #   --set validatingWebhook.caBundle="$(openssl base64 -A -in ca.crt)"
-  # cert-manager is Phase B.
+  # Full cert-manager automation remains a later Phase B item.
   caBundle: REPLACE_WITH_BASE64_CA_BUNDLE
   failurePolicy: Ignore
   matchPolicy: Equivalent
   timeoutSeconds: 15
+
+# Phase B part 1 — ingress NetworkPolicies (no new CNI deps; requires a CNI that
+# enforces NetworkPolicy — default k3s Flannel + netpol controller does).
+networkPolicy:
+  enabled: true
+  policyEngine:
+    enabled: true
+  admissionWebhook:
+    enabled: true
+    # k3s: apiserver is host-networked — use ipBlock, not a podSelector.
+    # Default = Flannel server PodCIDR network address as /32 (10.42.0.0/32 when
+    # node PodCIDR is 10.42.0.0/24). Discover/override via
+    # scripts/manual_verify_network_policies.sh. Do not widen to 10.42.0.0/16
+    # unless every Flannel pod is an accepted webhook client.
+    apiServerSourceCidrs:
+      - 10.42.0.0/32
 
 secrets:
   create: false

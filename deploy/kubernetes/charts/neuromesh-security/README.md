@@ -11,8 +11,10 @@ Production Helm packaging of the existing manifests in `deploy/kubernetes/` and 
 - `neuromesh-desired-policy.yaml` -> `templates/desired-policy.yaml` (ConfigMap + Role + RoleBinding)
 - `admission/neuromesh-admission-webhook-deployment.yaml` -> `templates/admission-webhook-deployment.yaml` (Deployment + ServiceAccount)
 - `admission/neuromesh-admission-webhook-pdb.yaml` -> `templates/admission-webhook-pdb.yaml`
+- `admission/neuromesh-admission-webhook-networkpolicy.yaml` -> `templates/admission-webhook-networkpolicy.yaml`
 - `admission/neuromesh-admission-webhook-service.yaml` -> `templates/admission-webhook-service.yaml`
 - `admission/neuromesh-admission-validating-webhook.yaml` -> `templates/admission-validating-webhook.yaml`
+- `neuromesh-zt-policy-engine-networkpolicy.yaml` -> `templates/policy-engine-networkpolicy.yaml`
 
 Associated Secrets are represented in `templates/secrets.yaml` (disabled by default to preserve current operational workflow).
 

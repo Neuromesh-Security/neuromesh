@@ -8,6 +8,7 @@
 | `neuromesh-agent-correlator-rbac.yaml` | Slice **2b-i** ClusterRole/Binding: pods `get/list/watch` only |
 | `neuromesh-zt-policy-engine-deployment.yaml` | zt-policy-engine Deployment + ServiceAccount (port 8080) |
 | `neuromesh-zt-policy-engine-service.yaml` | ClusterIP Service → agent sync DNS |
+| `neuromesh-zt-policy-engine-networkpolicy.yaml` | Ingress NetworkPolicy (TCP/8080 from agent pods only) |
 | `neuromesh-desired-policy.yaml` | Issue **#137 PR-1**: example DesiredPolicy ConfigMap + PE **get/watch-only** Role (OFF until Rego PR-2) |
 | `admission/` | Optional Cosign admission webhook (see `admission/README.md`) |
 
@@ -32,10 +33,18 @@ Do **not** reorder. Policy engine is fail-closed: missing Secrets → CrashLoopB
 # After Secrets exist:
 kubectl apply -f deploy/kubernetes/neuromesh-zt-policy-engine-deployment.yaml
 kubectl apply -f deploy/kubernetes/neuromesh-zt-policy-engine-service.yaml
+kubectl apply -f deploy/kubernetes/neuromesh-zt-policy-engine-networkpolicy.yaml
 kubectl -n neuromesh-system rollout status deploy/neuromesh-zt-policy-engine --timeout=120s
 
 kubectl apply -f deploy/kubernetes/neuromesh-agent-correlator-rbac.yaml
 kubectl apply -f deploy/kubernetes/neuromesh-agent.yaml
+```
+
+NetworkPolicy live gate (after PE + agent are Ready):
+
+```bash
+sudo -E bash scripts/manual_verify_network_policies.sh
+# Optional: APPLY=1 to apply the in-repo NetworkPolicy YAMLs first
 ```
 
 ### Exact Secret commands
