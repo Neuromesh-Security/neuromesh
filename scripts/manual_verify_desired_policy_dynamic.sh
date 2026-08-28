@@ -18,6 +18,13 @@
 #   export NEUROMESH_SPIFFE_CA_KEY=/tmp/neuromesh-k8s-keys/spiffe-lab-ca.key
 #   sudo -E bash scripts/manual_verify_desired_policy_dynamic.sh
 #
+# SAFETY (read before live run):
+#   - EXIT/INT/TERM trap ALWAYS restores floor-protected bootstrap ConfigMap on any
+#     failure or interruption (including mid-scenario-5), disables the gate, restarts
+#     PE + agent so LSM maps re-sync — not happy-path-only.
+#   - Scenario 3 polls agent logs for a NEW apply line with the step-2 bundle version
+#     (since-time bounded) — never a blind fixed sleep.
+#
 # Paste full stdout/stderr back to the PR. Do NOT merge until every scenario PASS.
 set -euo pipefail
 
@@ -47,6 +54,30 @@ GATE_ENABLED=0
 BOOTSTRAP_JSON_FILE=""
 RESTORE_CM=0
 CLEANUP_DONE=0
+FLOOR_UNSAFE=0
+
+# Restore floor-protected bootstrap CM + recycle PE/agent so kernel maps catch up.
+# CM-only restore is NOT enough: agent BPF deny maps lag until the next policy_sync.
+emergency_restore_floor_protection() {
+  if [[ ! -f "${BOOTSTRAP_JSON_FILE:-}" ]]; then
+    echo "EMERGENCY: bootstrap JSON file missing — cannot restore floors" >&2
+    return 1
+  fi
+  echo "EMERGENCY: restoring floor-protected bootstrap ConfigMap (/tmp/, /dev/shm/, /var/tmp/)..." >&2
+  apply_policy_json_file "$BOOTSTRAP_JSON_FILE" 2>/dev/null || true
+  if [[ "$GATE_ENABLED" == "1" ]]; then
+    kubectl -n "$NS" set env "deploy/${PE_DEPLOY}" \
+      NEUROMESH_DESIRED_POLICY_ENABLE- \
+      NEUROMESH_DESIRED_POLICY_CONFIGMAP- 2>/dev/null || true
+    kubectl -n "$NS" rollout restart "deploy/${PE_DEPLOY}" 2>/dev/null || true
+    kubectl -n "$NS" rollout status "deploy/${PE_DEPLOY}" --timeout=120s 2>/dev/null || true
+    GATE_ENABLED=0
+  fi
+  echo "EMERGENCY: restarting agent DaemonSet to force policy_sync + LSM map refresh..." >&2
+  kubectl -n "$NS" rollout restart ds/neuromesh-agent 2>/dev/null || true
+  kubectl -n "$NS" rollout status ds/neuromesh-agent --timeout=180s 2>/dev/null || true
+  FLOOR_UNSAFE=0
+}
 
 cleanup() {
   local ec=$?
@@ -58,23 +89,18 @@ cleanup() {
     wait "$PF_PID" 2>/dev/null || true
     PF_PID=""
   fi
-  if [[ "$RESTORE_CM" == "1" && -n "${BOOTSTRAP_JSON_FILE:-}" && -f "$BOOTSTRAP_JSON_FILE" ]]; then
-    info "cleanup trap: restore bootstrap ConfigMap + disable gate"
-    apply_policy_json_file "$BOOTSTRAP_JSON_FILE" 2>/dev/null || true
-    if [[ "$GATE_ENABLED" == "1" ]]; then
-      kubectl -n "$NS" set env "deploy/${PE_DEPLOY}" \
-        NEUROMESH_DESIRED_POLICY_ENABLE- \
-        NEUROMESH_DESIRED_POLICY_CONFIGMAP- 2>/dev/null || true
-      kubectl -n "$NS" rollout restart "deploy/${PE_DEPLOY}" 2>/dev/null || true
-    fi
+  # Fail-closed: any abort (set -e, fail(), SIGINT, SIGTERM) restores floors.
+  if [[ "$RESTORE_CM" == "1" || "$FLOOR_UNSAFE" == "1" ]]; then
+    info "cleanup trap: emergency floor restoration (exit=${ec}, floor_unsafe=${FLOOR_UNSAFE})"
+    emergency_restore_floor_protection || true
   fi
   rm -rf "${WORK_DIR}/payload" 2>/dev/null || true
   rm -rf /opt/neuromesh/dynamic-test 2>/dev/null || true
   if [[ "$ec" -ne 0 ]]; then
-    echo "FAIL: script exited with status $ec (partial cleanup attempted)" >&2
+    echo "FAIL: script exited with status $ec (floor-protected bootstrap CM restore attempted)" >&2
   fi
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 apply_policy_json_file() {
   local file="$1"
@@ -132,6 +158,32 @@ wait_agent_log() {
   done
   echo "---- agent logs (tail) ----" >&2
   kubectl -n "$NS" logs "$pod" --tail=250 2>/dev/null >&2 || true
+  return 1
+}
+
+# Poll for a NEW policy_sync apply after since_ts that carries the expected bundle version.
+# Avoids false positives from pre-change sync lines (not a fixed sleep).
+wait_agent_applied_bundle_since() {
+  local since_ts="$1"
+  local want_version="$2"
+  local timeout="${3:-$POLICY_SYNC_WAIT_SECS}"
+  local pod deadline logs
+  pod="$(agent_pod)"
+  [[ -n "$pod" ]] || return 1
+  [[ -n "$want_version" ]] || return 1
+  echo "waiting for agent apply of bundle version ${want_version} (logs since ${since_ts})..."
+  deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    logs="$(kubectl -n "$NS" logs "$pod" --since-time="$since_ts" 2>/dev/null || true)"
+    if echo "$logs" | grep -F "applied path-prefix deny list + identity validity" \
+      | grep -F "$want_version"; then
+      echo "agent confirmed apply of version ${want_version}"
+      return 0
+    fi
+    sleep 3
+  done
+  echo "---- agent logs since ${since_ts} ----" >&2
+  kubectl -n "$NS" logs "$pod" --since-time="$since_ts" 2>/dev/null >&2 || true
   return 1
 }
 
@@ -219,6 +271,14 @@ bundle_prefix_count() {
 import json, pathlib, sys
 doc = json.loads(pathlib.Path(sys.argv[1]).read_text())
 print(len(doc.get("deny_path_prefixes") or []))
+PY
+}
+
+bundle_version() {
+  python3 - "${WORK_DIR}/last_bundle.body" <<'PY'
+import json, pathlib, sys
+doc = json.loads(pathlib.Path(sys.argv[1]).read_text())
+print(doc.get("version") or "")
 PY
 }
 
@@ -496,6 +556,8 @@ post_evaluate "$EVAL_TMP_PATH" "${WORK_DIR}/dynamic_svid.pem" >/dev/null
 evaluate_denied || fail "pre-change evaluate: dynamic SPIFFE should be DENIED on /tmp/ path"
 pass "2-pre: evaluate denies dynamic SPIFFE before ConfigMap widen"
 
+STEP2_CM_APPLY_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "step-2 ConfigMap apply timestamp (agent log since-time): ${STEP2_CM_APPLY_TS}"
 apply_policy_json_inline "$STEP2_JSON"
 wait_pe_log 'desired_policy_accepted.*prefixes_added=.*/opt/neuromesh/dynamic-test/' \
   || fail "PE did not log desired_policy_accepted with dynamic prefix added"
@@ -508,6 +570,9 @@ fetch_policy_bundle
 verify_bundle_signature_and_temporal
 bundle_has_prefix "$DYNAMIC_PREFIX" || fail "bundle missing dynamic deny prefix after valid change"
 bundle_has_spiffe "$DYNAMIC_SPIFFE" || fail "bundle missing dynamic SPIFFE ID after valid change"
+STEP2_BUNDLE_VERSION="$(bundle_version)"
+[[ -n "$STEP2_BUNDLE_VERSION" ]] || fail "step-2 bundle missing version field"
+echo "step-2 bundle version=${STEP2_BUNDLE_VERSION}"
 pass "2b: GET /v1/policy-bundle includes new prefix + SPIFFE; signature + temporal OK"
 
 post_evaluate "$EVAL_TMP_PATH" "${WORK_DIR}/dynamic_svid.pem" >/dev/null
@@ -526,9 +591,9 @@ BASELINE_RC=$?
 set -e
 echo "pre-sync exec exit=${BASELINE_RC} (may be 0 if maps not yet updated)"
 
-wait_agent_log 'applied path-prefix deny list \+ identity validity|policy bundle unchanged \(identity TTL refreshed\)' \
-  || fail "agent did not show policy_sync apply after valid ConfigMap change"
-pass "3a: agent policy_sync picked up new bundle"
+wait_agent_applied_bundle_since "$STEP2_CM_APPLY_TS" "$STEP2_BUNDLE_VERSION" \
+  || fail "agent did not apply step-2 bundle version ${STEP2_BUNDLE_VERSION} within ${POLICY_SYNC_WAIT_SECS}s"
+pass "3a: agent policy_sync applied step-2 bundle (version-confirmed, not blind sleep)"
 
 expect_lsm_deny "3b: exec from ${DYNAMIC_PREFIX} rejected by LSM" "$PAYLOAD"
 
@@ -581,6 +646,8 @@ if pe_logs_since 60s | grep -q 'desired_policy_SAFETY_RAIL_OVERRIDE'; then
 fi
 pass "5-regression: /tmp/ floor removal without override rejected"
 
+FLOOR_UNSAFE=1
+echo "FLOOR_UNSAFE=1 — trap will restore bootstrap floors on any failure from here until scenario 7"
 read -r -d '' FLOOR_OVERRIDE_JSON <<JSON || true
 {
   "deny_path_prefixes": ["/dev/shm/", "/var/tmp/", "${DYNAMIC_PREFIX}"],
@@ -633,6 +700,7 @@ fetch_policy_bundle
 verify_bundle_signature_and_temporal
 bundle_has_prefix "/tmp/" || fail "post-cleanup bundle missing bootstrap /tmp/"
 [[ "$(bundle_prefix_count)" == "3" ]] || fail "post-cleanup bundle prefix count want 3 got $(bundle_prefix_count)"
+FLOOR_UNSAFE=0
 pass "7b: bootstrap-only bundle restored (3 floor prefixes)"
 
 # Successful end — skip trap restore (already cleaned).
