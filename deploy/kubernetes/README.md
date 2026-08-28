@@ -108,8 +108,9 @@ CI on `main` publishes **`:ci` / `:<fullsha>`** (and Cosign digests) — **not**
 |-----------|--------------------------------------------------------------------------------|
 | PE | `ghcr.io/neuromesh-security/neuromesh-zt-policy-engine@sha256:eceb694cc12409a935ca3d83a9ac856b0f3e4461131c63b193142aa828572255` |
 | Agent | `ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:413424ce5ec990e97b58014daa05ae8addab27de5afcac74904eb28fdcd5de2d` |
+| Admission webhook | `ghcr.io/neuromesh-security/neuromesh-k8s-admission-webhook@sha256:e3997b4c42763c2a2b488b3b0246e8bddaa071ba5d1328d6abd5ea118370e273` |
 
-Manifests on this branch pin those digests. Do **not** live-test with a stale `:0.1.0` pin.
+Manifests on this branch pin those digests. Do **not** live-test with a stale `:0.1.0` pin for the webhook (that tag is never published by CI).
 
 ## Agent behavior (accurate)
 

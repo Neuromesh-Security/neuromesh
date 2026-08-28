@@ -14,11 +14,9 @@ images:
     digest: sha256:eceb694cc12409a935ca3d83a9ac856b0f3e4461131c63b193142aa828572255
     pullPolicy: IfNotPresent
   admissionWebhook:
-    # Mutable tag until the first main CI publish of this image (docker matrix
-    # now includes it). Pin digest (empty tag) after that, matching PE/agent.
     repository: ghcr.io/neuromesh-security/neuromesh-k8s-admission-webhook
-    tag: "0.1.0"
-    digest: ""
+    tag: ""
+    digest: sha256:e3997b4c42763c2a2b488b3b0246e8bddaa071ba5d1328d6abd5ea118370e273
     pullPolicy: IfNotPresent
 
 agent:

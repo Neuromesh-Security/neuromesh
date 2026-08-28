@@ -51,12 +51,10 @@ spec:
           type: RuntimeDefault
       containers:
         - name: webhook
-          # Still a mutable tag. CI historically published only PE + agent;
-          # Production CI docker matrix now includes this image so the first
-          # main publish can produce a Cosign-signed digest. Pin @sha256:…
-          # (PE/agent convention) in a follow-up after that digest exists.
-          # :0.1.0 is NOT a CI-published tag — do not treat it as live GHCR.
-          image: ghcr.io/neuromesh-security/neuromesh-k8s-admission-webhook:0.1.0
+          # CI publishes :ci / :<fullsha> + Cosign digest (not :0.1.0).
+          # Digest from main CI run 32884718691 (SHA 1b8bda8, post-#169) —
+          # same image as runs 32847540570 (#164) and 32856893187 (#167).
+          image: ghcr.io/neuromesh-security/neuromesh-k8s-admission-webhook@sha256:e3997b4c42763c2a2b488b3b0246e8bddaa071ba5d1328d6abd5ea118370e273
           imagePullPolicy: IfNotPresent
           ports:
             - name: https

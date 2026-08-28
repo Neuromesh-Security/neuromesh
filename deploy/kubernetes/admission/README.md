@@ -280,11 +280,16 @@ Break-glass: if step 2–4 fails, **stop**. Leave prior Secret + prior `caBundle
 
 ## Image pin
 
-The Deployment still references `…/neuromesh-k8s-admission-webhook:0.1.0`.
-That tag is **not** published by CI (Production CI historically built only PE +
-agent). This hardening adds the webhook to the docker matrix. After the first
-`main` publish, pin `@sha256:…` the same way PE/agent are pinned. Do **not**
-invent a digest.
+Admission webhook image is digest-pinned in
+`neuromesh-admission-webhook-deployment.yaml` (same convention as PE/agent):
+
+`ghcr.io/neuromesh-security/neuromesh-k8s-admission-webhook@sha256:e3997b4c42763c2a2b488b3b0246e8bddaa071ba5d1328d6abd5ea118370e273`
+
+Source: main CI Cosign publish (runs `32847540570` / #164, `32856893187` / #167,
+`32884718691` / #169 — same signed digest; webhook app image unchanged since #164).
+CI publishes `:ci` / `:<fullsha>` only — **not** `:0.1.0`. After a future webhook
+code change, re-pin from the new main CI `containerimage.digest` + Cosign verify step.
+Do **not** invent a digest.
 
 ## Phase A → Fail graduation checklist (operator)
 
