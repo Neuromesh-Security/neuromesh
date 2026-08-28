@@ -161,36 +161,65 @@ wait_capture_count() {
 
 stop_pid() {
   local pid="${1:-}"
+  local label="${2:-process}"
   [[ -z "$pid" ]] && return 0
-  kill -TERM "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
+  local step_ec=0
+  if ! kill -TERM "$pid" 2>/dev/null; then
+    echo "CLEANUP: WARN — kill ${label} pid=${pid} failed (may already be gone)" >&2
+    step_ec=1
+  fi
+  if ! wait "$pid" 2>/dev/null; then
+    echo "CLEANUP: WARN — wait ${label} pid=${pid} failed" >&2
+    step_ec=1
+  fi
+  return "$step_ec"
 }
 
 cleanup() {
+  # Entire cleanup path runs with errexit OFF so no single kill/docker step
+  # can silently abort mid-cleanup (same class as c3513de / desired_policy).
   set +e
   local ec=$?
+  local cleanup_ec=0
   if [[ "$CLEANUP_DONE" == "1" ]]; then
     return 0
   fi
   CLEANUP_DONE=1
 
   info "cleanup trap (exit=${ec})"
-  stop_pid "${AGENT_PID:-}"
+  if ! stop_pid "${AGENT_PID:-}" "agent"; then
+    cleanup_ec=1
+  fi
   AGENT_PID=""
-  stop_pid "${SPLUNK_FWD_PID:-}"
+  if ! stop_pid "${SPLUNK_FWD_PID:-}" "splunk-forwarder"; then
+    cleanup_ec=1
+  fi
   SPLUNK_FWD_PID=""
-  stop_pid "${DD_FWD_PID:-}"
+  if ! stop_pid "${DD_FWD_PID:-}" "datadog-forwarder"; then
+    cleanup_ec=1
+  fi
   DD_FWD_PID=""
-  stop_pid "${MOCK_PID:-}"
+  if ! stop_pid "${MOCK_PID:-}" "mock-receivers"; then
+    cleanup_ec=1
+  fi
   MOCK_PID=""
 
   if [[ "$KAFKA_STARTED" == "1" ]] && command -v docker >/dev/null 2>&1; then
-    docker compose -f "${ROOT}/docker-compose.yml" exec -T kafka \
+    if ! docker compose -f "${ROOT}/docker-compose.yml" exec -T kafka \
       /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
-      --delete --topic "$KAFKA_TOPIC" >/dev/null 2>&1 || true
-    docker compose -f "${ROOT}/docker-compose.yml" stop kafka >/dev/null 2>&1 || true
+      --delete --topic "$KAFKA_TOPIC" >/dev/null 2>&1; then
+      echo "CLEANUP: WARN — kafka topic delete failed (topic=${KAFKA_TOPIC})" >&2
+      cleanup_ec=1
+    fi
+    if ! docker compose -f "${ROOT}/docker-compose.yml" stop kafka >/dev/null 2>&1; then
+      echo "CLEANUP: WARN — docker compose stop kafka failed" >&2
+      cleanup_ec=1
+    fi
   fi
 
+  if [[ "$cleanup_ec" -ne 0 ]]; then
+    echo "CLEANUP: completed with errors (see WARN lines above)" >&2
+  fi
   if [[ "$ec" -ne 0 ]]; then
     echo "FAIL: script exited with status $ec (cleanup attempted)" >&2
   fi
