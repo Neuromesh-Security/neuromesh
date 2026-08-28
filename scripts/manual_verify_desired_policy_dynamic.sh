@@ -58,47 +58,80 @@ FLOOR_UNSAFE=0
 
 # Restore floor-protected bootstrap CM + recycle PE/agent so kernel maps catch up.
 # CM-only restore is NOT enough: agent BPF deny maps lag until the next policy_sync.
+#
+# Must never abort mid-restore under set -e (same class as stop_agent in
+# manual_measure_correlator_overhead.sh: a function returning non-zero on a
+# benign path silently killed the caller before PHASE 2).
 emergency_restore_floor_protection() {
+  set +e
+  local step_ec=0
+
   if [[ ! -f "${BOOTSTRAP_JSON_FILE:-}" ]]; then
     echo "EMERGENCY: bootstrap JSON file missing — cannot restore floors" >&2
     return 1
   fi
   echo "EMERGENCY: restoring floor-protected bootstrap ConfigMap (/tmp/, /dev/shm/, /var/tmp/)..." >&2
-  apply_policy_json_file "$BOOTSTRAP_JSON_FILE" 2>/dev/null || true
+  if ! apply_policy_json_file "$BOOTSTRAP_JSON_FILE"; then
+    echo "EMERGENCY: WARN — bootstrap ConfigMap apply failed (continuing with PE/agent recycle)" >&2
+    step_ec=1
+  fi
   if [[ "$GATE_ENABLED" == "1" ]]; then
-    kubectl -n "$NS" set env "deploy/${PE_DEPLOY}" \
+    if ! kubectl -n "$NS" set env "deploy/${PE_DEPLOY}" \
       NEUROMESH_DESIRED_POLICY_ENABLE- \
-      NEUROMESH_DESIRED_POLICY_CONFIGMAP- 2>/dev/null || true
-    kubectl -n "$NS" rollout restart "deploy/${PE_DEPLOY}" 2>/dev/null || true
-    kubectl -n "$NS" rollout status "deploy/${PE_DEPLOY}" --timeout=120s 2>/dev/null || true
+      NEUROMESH_DESIRED_POLICY_CONFIGMAP-; then
+      echo "EMERGENCY: WARN — unset desired-policy env on PE failed" >&2
+      step_ec=1
+    fi
+    if ! kubectl -n "$NS" rollout restart "deploy/${PE_DEPLOY}"; then
+      echo "EMERGENCY: WARN — PE rollout restart failed" >&2
+      step_ec=1
+    fi
+    if ! kubectl -n "$NS" rollout status "deploy/${PE_DEPLOY}" --timeout=120s; then
+      echo "EMERGENCY: WARN — PE rollout status failed/timed out" >&2
+      step_ec=1
+    fi
     GATE_ENABLED=0
   fi
   echo "EMERGENCY: restarting agent DaemonSet to force policy_sync + LSM map refresh..." >&2
-  kubectl -n "$NS" rollout restart ds/neuromesh-agent 2>/dev/null || true
-  kubectl -n "$NS" rollout status ds/neuromesh-agent --timeout=180s 2>/dev/null || true
+  if ! kubectl -n "$NS" rollout restart ds/neuromesh-agent; then
+    echo "EMERGENCY: WARN — agent rollout restart failed" >&2
+    step_ec=1
+  fi
+  if ! kubectl -n "$NS" rollout status ds/neuromesh-agent --timeout=180s; then
+    echo "EMERGENCY: WARN — agent rollout status failed/timed out" >&2
+    step_ec=1
+  fi
   FLOOR_UNSAFE=0
+  return "$step_ec"
 }
 
 cleanup() {
+  # Entire cleanup path runs with errexit OFF so no single kubectl/grep/kill
+  # can silently abort mid-restore (stop_agent / set -e footgun class).
+  set +e
   local ec=$?
   if [[ "$CLEANUP_DONE" == "1" ]]; then
-    return
+    return 0
   fi
   if [[ -n "${PF_PID:-}" ]]; then
-    kill "$PF_PID" 2>/dev/null || true
-    wait "$PF_PID" 2>/dev/null || true
+    kill "$PF_PID" 2>/dev/null
+    wait "$PF_PID" 2>/dev/null
     PF_PID=""
   fi
-  # Fail-closed: any abort (set -e, fail(), SIGINT, SIGTERM) restores floors.
   if [[ "$RESTORE_CM" == "1" || "$FLOOR_UNSAFE" == "1" ]]; then
     info "cleanup trap: emergency floor restoration (exit=${ec}, floor_unsafe=${FLOOR_UNSAFE})"
-    emergency_restore_floor_protection || true
+    emergency_restore_floor_protection
+    local restore_ec=$?
+    if [[ "$restore_ec" -ne 0 ]]; then
+      echo "EMERGENCY: floor restoration completed with errors (exit=${restore_ec})" >&2
+    fi
   fi
-  rm -rf "${WORK_DIR}/payload" 2>/dev/null || true
-  rm -rf /opt/neuromesh/dynamic-test 2>/dev/null || true
+  rm -rf "${WORK_DIR}/payload" 2>/dev/null
+  rm -rf /opt/neuromesh/dynamic-test 2>/dev/null
   if [[ "$ec" -ne 0 ]]; then
     echo "FAIL: script exited with status $ec (floor-protected bootstrap CM restore attempted)" >&2
   fi
+  return 0
 }
 trap cleanup EXIT INT TERM
 
