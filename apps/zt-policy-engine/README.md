@@ -208,6 +208,7 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
 | `NEUROMESH_POLICY_BUNDLE_TOKEN_FILE` | — | Preferred: absolute path to token file (Kubernetes Secret mount) |
 | `NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH` | _(required)_ | **Fail-closed.** Absolute PKCS#8 PEM private key (ECDSA P-256 or Ed25519). Signs exact `GET /v1/policy-bundle` body; header `X-Neuromesh-Policy-Bundle-Signature`. Missing/unreadable/unsupported → PE **refuses to boot** (Issue #108). Never serves unsigned bundles. |
 | `NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS` | `300` | Whole-bundle `not_after - not_before` window (T-PB-04). Override for live short-window anti-replay tests only. |
+| `NEUROMESH_POLICY_BUNDLE_RATE_LIMIT_RPS` | `1000` | Issue **#176**. Coarse **aggregate** RPS circuit-breaker on `GET /v1/policy-bundle` only (not per-client — shared bearer). Default = 1000: 5000-node K8s large-cluster envelope ÷ 30s sync ≈ 167 RPS steady-state, ~6× headroom for post-outage bunching. Exceed → HTTP **429** + `Retry-After`. Set `0` to disable (lab only). **Admission webhook is not rate-limited.** |
 | `NEUROMESH_DESIRED_POLICY_ENABLE` | unset / false | Issue **#137**. Dual gate with ConfigMap name. **Default-off in production** — deliberate enablement required for dynamic policy on either plane. |
 | `NEUROMESH_DESIRED_POLICY_CONFIGMAP` | — | ConfigMap name to get/watch (`data.policy.json`). Required when enable=true. |
 | `NEUROMESH_DESIRED_POLICY_NAMESPACE` | SA namespace | Optional override; default in-cluster ServiceAccount namespace. |

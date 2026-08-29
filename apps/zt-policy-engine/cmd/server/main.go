@@ -81,7 +81,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("policy-bundle signing misconfigured: %v", err)
 	}
-	mux.HandleFunc("GET /v1/policy-bundle", policybundle.Handler(bundleToken, bundleSigner))
+	// Issue #176: coarse aggregate rate limit on /v1/policy-bundle only
+	// (shared-token → no per-client identity). Admission webhook is NOT limited.
+	bundleLimiter := middleware.NewPolicyBundleLimiterFromEnv()
+	mux.Handle(
+		"GET /v1/policy-bundle",
+		middleware.AggregateRateLimit(
+			bundleLimiter,
+			http.HandlerFunc(policybundle.Handler(bundleToken, bundleSigner)),
+		),
+	)
 	query.RegisterRoutes(mux)
 
 	// Issue #137 PR-1: DesiredPolicy ConfigMap watch is dual-gated and OFF by
