@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"neuromesh/zt-policy-engine/internal/desiredpolicy"
 	"neuromesh/zt-policy-engine/internal/evaluator"
 	"neuromesh/zt-policy-engine/internal/identity"
@@ -72,11 +74,18 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthHandler)
 	mux.HandleFunc("POST /v1/evaluate", evaluateHandler(opa, spiffe))
+	// Issue #179: fingerprint accept counters for dual-token soak confirmation.
+	mux.Handle("GET /metrics", promhttp.Handler())
 
-	bundleToken, err := policybundle.LoadTokenFromEnv()
+	bundleTokens, err := policybundle.LoadTokensFromEnv()
 	if err != nil {
-		log.Fatalf("policy-bundle authentication misconfigured (Issue #55): %v", err)
+		log.Fatalf("policy-bundle authentication misconfigured (Issue #55 / #179): %v", err)
 	}
+	log.Printf(
+		"policy-bundle auth: %d accepted token(s) loaded (fingerprints only logged): %v",
+		len(bundleTokens),
+		tokenFingerprints(bundleTokens),
+	)
 	bundleSigner, err := policybundle.LoadSignerFromEnv()
 	if err != nil {
 		log.Fatalf("policy-bundle signing misconfigured: %v", err)
@@ -88,7 +97,7 @@ func main() {
 		"GET /v1/policy-bundle",
 		middleware.AggregateRateLimit(
 			bundleLimiter,
-			http.HandlerFunc(policybundle.Handler(bundleToken, bundleSigner)),
+			http.HandlerFunc(policybundle.Handler(bundleTokens, bundleSigner)),
 		),
 	)
 	query.RegisterRoutes(mux)
@@ -133,6 +142,14 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("graceful shutdown failed: %v", err)
 	}
+}
+
+func tokenFingerprints(tokens []string) []string {
+	out := make([]string, len(tokens))
+	for i, t := range tokens {
+		out[i] = policybundle.TokenFingerprint(t)
+	}
+	return out
 }
 
 func parseListenPort(raw string) (int, error) {

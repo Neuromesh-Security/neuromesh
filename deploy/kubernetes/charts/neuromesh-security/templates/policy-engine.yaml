@@ -98,6 +98,8 @@ spec:
             items:
               - key: token
                 path: token
+              # Issue #179: during dual-accept, also project token-previous
+              # (see scripts/manual_verify_policy_bundle_token_rotation.sh).
         - name: policy-bundle-signing-key
           secret:
             secretName: {{ .Values.secrets.policyBundleSigningKey.name }}
