@@ -137,6 +137,12 @@ func LoadTokensFromEnv() ([]string, error) {
 }
 
 func readOptionalTokenFile(path string) (string, error) {
+	// filepath.Clean + absolute-path gate: same pattern as LoadTokensFromEnv /
+	// Cosign pubkey load — what gosec G304 recognizes for operator-configured paths.
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("token file path must be absolute, got %q", path)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
