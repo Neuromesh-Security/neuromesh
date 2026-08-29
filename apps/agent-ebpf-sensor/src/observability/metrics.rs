@@ -27,6 +27,9 @@ pub struct AgentMetrics {
     /// Slice 2b-i — labeled by `reason`
     /// (`inotify_overflow`|`startup`|`watch_error`).
     pub identity_resyncs: CounterVec,
+    /// Issue #176 — PE returned HTTP 429 on GET /v1/policy-bundle (throttled;
+    /// distinct from crypto/temporal sync failures).
+    pub policy_sync_throttled: Counter,
     userspace_drops: AtomicU64,
     started_at: Instant,
 }
@@ -80,6 +83,12 @@ impl AgentMetrics {
         )
         .context("failed to create identity_correlator_resync_total counter")?;
 
+        let policy_sync_throttled = Counter::with_opts(Opts::new(
+            "policy_sync_throttled_total",
+            "GET /v1/policy-bundle HTTP 429 from PE (Issue #176); throttled with backoff — not signature/temporal rejection",
+        ))
+        .context("failed to create policy_sync_throttled_total counter")?;
+
         registry
             .register(Box::new(events_processed.clone()))
             .context("failed to register ebpf_events_processed_total")?;
@@ -98,6 +107,9 @@ impl AgentMetrics {
         registry
             .register(Box::new(identity_resyncs.clone()))
             .context("failed to register identity_correlator_resync_total")?;
+        registry
+            .register(Box::new(policy_sync_throttled.clone()))
+            .context("failed to register policy_sync_throttled_total")?;
 
         Ok(Arc::new(Self {
             registry,
@@ -107,6 +119,7 @@ impl AgentMetrics {
             integrity_failures,
             identity_invalidations,
             identity_resyncs,
+            policy_sync_throttled,
             userspace_drops: AtomicU64::new(0),
             started_at: Instant::now(),
         }))
@@ -176,5 +189,13 @@ impl AgentMetrics {
 
     pub fn identity_resync_total(&self, reason: &str) -> f64 {
         self.identity_resyncs.with_label_values(&[reason]).get()
+    }
+
+    pub fn record_policy_sync_throttled(&self) {
+        self.policy_sync_throttled.inc();
+    }
+
+    pub fn policy_sync_throttled_total(&self) -> f64 {
+        self.policy_sync_throttled.get()
     }
 }

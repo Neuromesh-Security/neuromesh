@@ -12,6 +12,8 @@
 //! - Staleness (> [`path_deny::POLICY_STALE_AFTER`]) is logged/metric'd but never
 //!   disables path-deny enforcement.
 //! - Auth failure (Issue #55) is a sync failure: no unauthenticated retry.
+//! - HTTP 429 (Issue #176): distinct `rate_limited` path — Retry-After backoff,
+//!   `policy_sync_throttled_total`; NEVER `signature_*` / `bundle_*` rejection.
 
 use crate::identity_allow::{
     self, apply_identity_validity, invalidate_if_expired, IdentityAllowMaps,
@@ -24,6 +26,7 @@ use crate::path_deny::{
     apply_deny_entries, PathDenyMaps, PolicySyncState, POLICY_STALE_AFTER, POLICY_SYNC_INTERVAL,
 };
 use anyhow::{bail, Context, Result};
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -78,6 +81,47 @@ pub fn clock_skew_from_env() -> Duration {
         }
         Err(_) => BUNDLE_CLOCK_SKEW,
     }
+}
+
+/// Default backoff when PE returns 429 without a usable Retry-After (Issue #176).
+pub const DEFAULT_RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(1);
+
+/// PE returned HTTP 429 on GET /v1/policy-bundle (Issue #176).
+///
+/// Structurally distinct from `signature_invalid` / `bundle_expired`: those are
+/// produced only inside `verify_bundle_*` after HTTP 200. This error is returned
+/// from `fetch_policy_bundle` before any body / signature / temporal work.
+#[derive(Debug, Clone)]
+pub struct RateLimitedError {
+    pub url: String,
+    pub retry_after: Option<Duration>,
+}
+
+impl fmt::Display for RateLimitedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.retry_after {
+            Some(d) => write!(
+                f,
+                "GET {} rate_limited (HTTP 429, Retry-After={d:?}) — backing off, retaining last-known-good (not a security rejection)",
+                self.url
+            ),
+            None => write!(
+                f,
+                "GET {} rate_limited (HTTP 429) — backing off, retaining last-known-good (not a security rejection)",
+                self.url
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RateLimitedError {}
+
+/// Parse HTTP Retry-After: integer seconds only (HTTP-date form ignored → None).
+pub fn parse_retry_after_secs(raw: Option<&str>) -> Option<Duration> {
+    let s = raw?.trim();
+    let secs: u64 = s.parse().ok()?;
+    // Cap absurd values so a broken PE cannot stall the agent for days.
+    Some(Duration::from_secs(secs.min(300)))
 }
 
 /// Load the shared policy-bundle bearer token from file (preferred) or env.
@@ -269,6 +313,18 @@ pub async fn fetch_policy_bundle(
         .with_context(|| format!("GET {url} failed"))?;
 
     let status = response.status();
+    if status.as_u16() == 429 {
+        let retry_raw = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok());
+        let retry_after = parse_retry_after_secs(retry_raw);
+        return Err(RateLimitedError {
+            url: url.clone(),
+            retry_after,
+        }
+        .into());
+    }
     if status.as_u16() == 401 || status.as_u16() == 403 {
         bail!(
             "GET {url} authentication rejected (HTTP {status}) — retaining last-known-good              (no unauthenticated retry)"
@@ -622,28 +678,62 @@ pub fn spawn_policy_sync(
                         {
                             Ok(identity) => Some(identity),
                             Err(error) => {
-                                state_guard.refresh_stale_flag();
-                                let _ = invalidate_if_expired(
-                                    &mut id_guard,
-                                    identity_expires_at,
-                                    SystemTime::now(),
-                                );
-                                if state_guard.stale {
+                                if let Some(rl) = error.downcast_ref::<RateLimitedError>() {
+                                    // Issue #176: distinct from signature/temporal/generic sync fail.
+                                    state_guard.refresh_stale_flag();
+                                    let _ = invalidate_if_expired(
+                                        &mut id_guard,
+                                        identity_expires_at,
+                                        SystemTime::now(),
+                                    );
+                                    #[cfg(feature = "orchestrator")]
+                                    if let Some(ref h) = hooks {
+                                        if let Some(ref m) = h.metrics {
+                                            m.record_policy_sync_throttled();
+                                        }
+                                    }
                                     tracing::warn!(
                                         target: "neuromesh::policy_sync",
-                                        %error,
+                                        url = %rl.url,
+                                        retry_after = ?rl.retry_after,
                                         last_version = %state_guard.last_version,
-                                        "policy sync failed; deny list STALE — continuing with last-known-good"
+                                        "policy sync throttled — backing off, retaining last-known-good"
                                     );
+                                    let backoff = rl
+                                        .retry_after
+                                        .unwrap_or(DEFAULT_RATE_LIMIT_BACKOFF);
+                                    drop(state_guard);
+                                    drop(id_guard);
+                                    drop(deny_guard);
+                                    tokio::select! {
+                                        _ = shutdown.cancelled() => return,
+                                        _ = tokio::time::sleep(backoff) => {}
+                                    }
+                                    None
                                 } else {
-                                    tracing::warn!(
-                                        target: "neuromesh::policy_sync",
-                                        %error,
-                                        last_version = %state_guard.last_version,
-                                        "policy sync failed — retaining last-known-good deny list"
+                                    state_guard.refresh_stale_flag();
+                                    let _ = invalidate_if_expired(
+                                        &mut id_guard,
+                                        identity_expires_at,
+                                        SystemTime::now(),
                                     );
+                                    if state_guard.stale {
+                                        tracing::warn!(
+                                            target: "neuromesh::policy_sync",
+                                            %error,
+                                            last_version = %state_guard.last_version,
+                                            "policy sync failed; deny list STALE — continuing with last-known-good"
+                                        );
+                                    } else {
+                                        tracing::warn!(
+                                            target: "neuromesh::policy_sync",
+                                            %error,
+                                            last_version = %state_guard.last_version,
+                                            "policy sync failed — retaining last-known-good deny list"
+                                        );
+                                    }
+                                    None
                                 }
-                                None
                             }
                         }
                     };
@@ -718,6 +808,16 @@ mod tests {
         body: &'static str,
         signature_b64: Option<String>,
     ) -> (String, thread::JoinHandle<()>) {
+        spawn_stub_with_extra_headers(expect_bearer, status_line, body, signature_b64, "")
+    }
+
+    fn spawn_stub_with_extra_headers(
+        expect_bearer: Option<&'static str>,
+        status_line: &'static str,
+        body: &'static str,
+        signature_b64: Option<String>,
+        extra_headers: &'static str,
+    ) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
@@ -738,7 +838,7 @@ mod tests {
                 None => String::new(),
             };
             let resp = format!(
-                "{status_line}\r\nContent-Type: application/json\r\n{sig_hdr}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "{status_line}\r\nContent-Type: application/json\r\n{sig_hdr}{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             let _ = stream.write_all(resp.as_bytes());
@@ -1083,5 +1183,88 @@ mod tests {
         // fetch itself stays Ok so callers can dump response_header_names via the
         // tracing::error! diagnostic on the None path.
         join.join().unwrap();
+    }
+
+    #[test]
+    fn parse_retry_after_secs_integer_and_cap() {
+        assert_eq!(
+            parse_retry_after_secs(Some("3")),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            parse_retry_after_secs(Some("9999")),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(parse_retry_after_secs(Some("Wed, 21 Oct 2015")), None);
+        assert_eq!(parse_retry_after_secs(None), None);
+    }
+
+    #[tokio::test]
+    async fn fetch_429_is_rate_limited_not_signature_or_temporal() {
+        let (base, join) = spawn_stub_with_extra_headers(
+            Some("good-token"),
+            "HTTP/1.1 429 Too Many Requests",
+            "rate limit exceeded",
+            None,
+            "Retry-After: 2\r\n",
+        );
+        let client = reqwest::Client::new();
+        let err = fetch_policy_bundle(&client, &base, "good-token")
+            .await
+            .expect_err("429");
+        let rl = err
+            .downcast_ref::<RateLimitedError>()
+            .unwrap_or_else(|| panic!("expected RateLimitedError, got {err:#}"));
+        assert_eq!(rl.retry_after, Some(Duration::from_secs(2)));
+        let msg = err.to_string();
+        assert!(msg.contains("rate_limited"), "got {msg}");
+        assert!(msg.contains("not a security rejection"), "got {msg}");
+        assert!(!msg.contains("signature_invalid"), "got {msg}");
+        assert!(!msg.contains("bundle_expired"), "got {msg}");
+        assert!(!msg.contains("authentication rejected"), "got {msg}");
+        join.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_once_429_short_circuits_before_signature_verify() {
+        // sync_once calls fetch_policy_bundle first; a 429 must never reach
+        // verify_bundle_signature (would need a real pubkey + body).
+        let (base, join) = spawn_stub_with_extra_headers(
+            Some("tok"),
+            "HTTP/1.1 429 Too Many Requests",
+            "throttled",
+            None,
+            "Retry-After: 1\r\n",
+        );
+        let client = reqwest::Client::new();
+        let err = fetch_policy_bundle(&client, &base, "tok")
+            .await
+            .expect_err("429");
+        assert!(
+            err.downcast_ref::<RateLimitedError>().is_some(),
+            "got {err:#}"
+        );
+        // Public API used by sync_once: RateLimitedError is not signature/temporal.
+        let msg = err.to_string();
+        assert!(!msg.contains("signature_"));
+        assert!(!msg.contains("bundle_expired"));
+        assert!(!msg.contains("bundle_not_yet"));
+        join.join().unwrap();
+    }
+
+    #[cfg(feature = "orchestrator")]
+    #[test]
+    fn policy_sync_throttled_metric_is_distinct() {
+        let metrics = crate::observability::AgentMetrics::new().expect("metrics");
+        assert_eq!(metrics.policy_sync_throttled_total(), 0.0);
+        metrics.record_policy_sync_throttled();
+        assert_eq!(metrics.policy_sync_throttled_total(), 1.0);
+        // Gathered registry must expose the dedicated name (not a generic sync_fail).
+        let families = metrics.registry.gather();
+        let names: Vec<&str> = families.iter().map(|f| f.name()).collect();
+        assert!(
+            names.contains(&"policy_sync_throttled_total"),
+            "metric names: {names:?}"
+        );
     }
 }
