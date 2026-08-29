@@ -8,8 +8,22 @@
 #   NEUROMESH_DESIRED_POLICY_CONFIGMAP=neuromesh-desired-policy
 # Enabling without Rego PR-2 creates dynamic-bundle + static-Rego drift — forbidden.
 #
-# PE ServiceAccount: get + watch ONLY on this ConfigMap (no create/update/patch/delete).
-# Operators / GitOps mutate the ConfigMap; PE never writes policy.
+# PE ServiceAccount READ scope (least privilege — already namespaced Role, not ClusterRole):
+#   verbs: get, watch
+#   resources: configmaps
+#   resourceNames: [neuromesh-desired-policy]
+# Forbidden for PE: list (namespace-wide), create, update, patch, delete.
+# There is NO broader ConfigMap Role/ClusterRole on neuromesh-zt-policy-engine —
+# this Role is the sole ConfigMap grant for that ServiceAccount.
+#
+# WRITE principals (NOT granted to PE — operators own mutations):
+#   - Human operators via kubectl (cluster-admin / namespace admin RoleBindings)
+#   - GitOps controllers (Argo CD / Flux / similar) using their own deploy SA
+#   - CI/CD apply jobs that target this ConfigMap only
+# PE never writes DesiredPolicy; narrowing PE READ does not restrict legitimate WRITE.
+#
+# Live RBAC regression: scripts/manual_verify_desired_policy_dynamic.sh scenario 2
+# (valid ConfigMap change → both planes move). If get/watch is broken, that scenario fails.
 ---
 apiVersion: v1
 kind: ConfigMap

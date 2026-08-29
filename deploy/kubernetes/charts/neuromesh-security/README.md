@@ -8,7 +8,7 @@ Production Helm packaging of the existing manifests in `deploy/kubernetes/` and 
 - `neuromesh-agent-correlator-rbac.yaml` -> `templates/agent-correlator-rbac.yaml`
 - `neuromesh-zt-policy-engine-deployment.yaml` -> `templates/policy-engine.yaml` (Deployment + ServiceAccount)
 - `neuromesh-zt-policy-engine-service.yaml` -> `templates/policy-engine-service.yaml`
-- `neuromesh-desired-policy.yaml` -> `templates/desired-policy.yaml` (ConfigMap + Role + RoleBinding)
+- `neuromesh-desired-policy.yaml` -> `templates/desired-policy.yaml` (ConfigMap + Role + RoleBinding; PE `get`/`watch` only on `resourceNames` — see `deploy/kubernetes/README.md` § DesiredPolicy ConfigMap RBAC)
 - `admission/neuromesh-admission-webhook-deployment.yaml` -> `templates/admission-webhook-deployment.yaml` (Deployment + ServiceAccount)
 - `admission/neuromesh-admission-webhook-pdb.yaml` -> `templates/admission-webhook-pdb.yaml`
 - `admission/neuromesh-admission-webhook-networkpolicy.yaml` -> `templates/admission-webhook-networkpolicy.yaml`

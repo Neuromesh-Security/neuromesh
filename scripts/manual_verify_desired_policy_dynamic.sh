@@ -5,6 +5,10 @@
 # scripts/manual_verify_k8s_policy_engine.sh or equivalent):
 #   1) ENABLE gate — watch starts, initial reconcile against bootstrap-equivalent CM
 #   2) VALID CHANGE — bundle + Rego planes move together (prefix + SPIFFE ID)
+#      ★ Also the RBAC regression gate for PE ConfigMap least privilege
+#        (Role neuromesh-zt-policy-engine-desired-policy: get/watch on
+#        resourceNames only). If get/watch is broken or over-narrowed, this
+#        scenario fails when PE cannot read/watch the ConfigMap.
 #   3) DOWNSTREAM — agent policy_sync → LSM rejects new dynamic deny prefix
 #   4) REJECTION — invalid CM retains last-known-good (step-2 state)
 #   5) SAFETY RAIL — floor removal override vs regression without flag
@@ -13,7 +17,7 @@
 #
 # Usage (droplet — root/sudo, kubectl configured):
 #   cd /path/to/neuromesh
-#   git checkout feat/issue-137-desired-policy-live-verify
+#   git checkout <branch-with-this-script>   # e.g. main after #171
 #   export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 #   export NEUROMESH_SPIFFE_CA_KEY=/tmp/neuromesh-k8s-keys/spiffe-lab-ca.key
 #   sudo -E bash scripts/manual_verify_desired_policy_dynamic.sh

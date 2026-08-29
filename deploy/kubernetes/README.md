@@ -9,7 +9,7 @@
 | `neuromesh-zt-policy-engine-deployment.yaml` | zt-policy-engine Deployment + ServiceAccount (port 8080) |
 | `neuromesh-zt-policy-engine-service.yaml` | ClusterIP Service → agent sync DNS |
 | `neuromesh-zt-policy-engine-networkpolicy.yaml` | Ingress NetworkPolicy (TCP/8080 from agent pods only) |
-| `neuromesh-desired-policy.yaml` | Issue **#137 PR-1**: example DesiredPolicy ConfigMap + PE **get/watch-only** Role (OFF until Rego PR-2) |
+| `neuromesh-desired-policy.yaml` | Issue **#137**: example DesiredPolicy ConfigMap + PE **namespaced Role** `neuromesh-zt-policy-engine-desired-policy`: `get`/`watch` **only** on `resourceNames: [neuromesh-desired-policy]` (no `list`, no writes; no ClusterRole; sole ConfigMap grant for PE SA) |
 | `admission/` | Optional Cosign admission webhook (see `admission/README.md`; Phase B part 2 TLS rotation Issue #168) |
 
 Agent sync DNS:
@@ -46,6 +46,44 @@ NetworkPolicy live gate (after PE + agent are Ready):
 sudo -E bash scripts/manual_verify_network_policies.sh
 # Optional: APPLY=1 to apply the in-repo NetworkPolicy YAMLs first
 ```
+
+## DesiredPolicy ConfigMap RBAC (least privilege)
+
+**Current state (audit):** PE ServiceAccount `neuromesh-zt-policy-engine` has **no**
+namespace-wide ConfigMap `get`/`list`/`watch`. The only ConfigMap grant is the
+namespaced Role `neuromesh-zt-policy-engine-desired-policy` in
+`neuromesh-desired-policy.yaml` (Helm: `templates/desired-policy.yaml`):
+
+| Verb | Scope |
+|------|--------|
+| `get`, `watch` | `configmaps` named `neuromesh-desired-policy` via `resourceNames` |
+| `list` / `create` / `update` / `patch` / `delete` | **not granted** |
+
+There is no separate ClusterRole for ConfigMaps on that SA, and no broader
+ConfigMap Role to narrow further — the dedicated Role **is** the least-privilege
+grant (shipped with Issue #137 PR-1).
+
+**Who writes the ConfigMap (intentionally outside PE):**
+
+| Principal | How |
+|-----------|-----|
+| Human operators | `kubectl apply` / edit with cluster-admin or namespace-admin RoleBindings |
+| GitOps (Argo CD, Flux, …) | Their deploy ServiceAccount with write on this object (or namespace) |
+| CI/CD apply jobs | Pipeline identity that targets this ConfigMap |
+
+PE is read-only on DesiredPolicy. Narrowing PE READ does **not** restrict those
+WRITE paths.
+
+**Live regression (required before treating RBAC as proven on a cluster):**
+
+```bash
+# Scenario 2 of the DesiredPolicy live harness — valid ConfigMap change must
+# move both planes. Broken get/watch fails this scenario clearly.
+sudo -E bash scripts/manual_verify_desired_policy_dynamic.sh
+```
+
+Paste full script output; do not merge RBAC-related PRs without that paste-back
+when the change touches Role/RoleBinding or watch wiring.
 
 ### Exact Secret commands
 
