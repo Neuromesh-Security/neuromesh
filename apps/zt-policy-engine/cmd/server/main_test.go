@@ -55,7 +55,7 @@ func TestDesiredPolicyMutationMovesBundleAndRegoPlanes(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/policy-bundle", policybundle.Handler(token, signer))
+	mux.HandleFunc("GET /v1/policy-bundle", policybundle.Handler([]string{token}, signer))
 	mux.HandleFunc("POST /v1/evaluate", evaluateHandler(opa, spiffe))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

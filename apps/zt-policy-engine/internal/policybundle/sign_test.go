@@ -124,7 +124,7 @@ func TestHandlerSignsExactBodyBytes(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/policy-bundle", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rr := httptest.NewRecorder()
-	Handler(token, s).ServeHTTP(rr, req)
+	Handler([]string{token}, s).ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status %d body=%q", rr.Code, rr.Body.String())
 	}
