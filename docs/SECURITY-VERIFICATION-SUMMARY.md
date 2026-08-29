@@ -173,17 +173,18 @@ Workflows in-repo: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (**
 
 ### 3.3 CodeQL — real finding (not TBD)
 
-**CodeQL security code scanning is not configured.** GitHub API `GET …/code-scanning/default-setup` returns `state: not-configured`. Across all code-scanning analyses and alerts, the only tools present are **gosec** (`Golang security checks by gosec`) and **Trivy** — **zero** analyses with tool name CodeQL.
+**CodeQL runs in this repo for Code Quality (maintainability/reliability), NOT the security query suite — all security-relevant static analysis coverage comes from gosec, Semgrep, cargo-audit/cargo-deny, and Trivy. Adding CodeQL's security suite was evaluated and deemed low marginal value given existing coverage.**
 
-What exists instead:
+Supporting evidence:
 
 | Observation | Accurate interpretation |
 |-------------|-------------------------|
+| Code scanning default setup | GitHub API `GET …/code-scanning/default-setup` → `state: not-configured`. |
+| Security tab / code-scanning analyses & alerts | Only tools present: **gosec** and **Trivy** — **zero** analyses with tool name CodeQL. |
 | In-repo workflows use `github/codeql-action/upload-sarif@v3` | SARIF **upload helper only** for gosec + Trivy ([`security-scan-pipeline.yml`](../.github/workflows/security-scan-pipeline.yml), [`experimental-ci.yml`](../.github/workflows/experimental-ci.yml)). No `github/codeql-action/init` / `analyze` in any of the four in-repo workflow files. |
-| Security tab / code-scanning alerts | Originate from **gosec** and **Trivy** SARIF uploads, not from CodeQL security queries. |
-| PR checks `Analyze (go)`, `Analyze (javascript-typescript)`, `Analyze (python)` under workflow name **CodeQL** | Genuine CodeQL **engine** runs, but they are **GitHub Code Quality** (`dynamic/github-code-quality/codeql`, run titles like `Code Quality: PR #…`) — maintainability/reliability queries, **not** the code-scanning security query suite. |
+| PR checks `Analyze (go)`, `Analyze (javascript-typescript)`, `Analyze (python)` under workflow name **CodeQL** | Genuine CodeQL **engine** runs via **GitHub Code Quality** (`dynamic/github-code-quality/codeql`, run titles like `Code Quality: PR #…`) — maintainability/reliability only. |
 
-**Follow-up assessment (do not add reflexively):** Enabling CodeQL **security** default/advanced setup would add Go dataflow/taint coverage that gosec’s rule set and Semgrep do not fully duplicate; that is a modest, optional complement — not a missing critical control given existing gosec + Semgrep + Trivy + cargo-audit/deny + clippy. Rust gains little from CodeQL today relative to cargo-audit/deny/clippy. Treat as a nice-to-have auditor-branding / Security-tab completeness item, not a coverage emergency.
+Security SAST that *does* run: gosec (Go), Semgrep `p/ci`, cargo-audit + cargo-deny (Rust), Trivy (FS/image), plus clippy on the lint path. CodeQL security default/advanced setup was considered as a Go dataflow/taint complement and rejected as low marginal value for this stack — not a coverage emergency.
 
 ### 3.4 Every PR vs main-only
 
@@ -209,7 +210,7 @@ Pre-commit (local): [#156](https://github.com/Neuromesh-Security/neuromesh/pull/
 | **AI / GNN Slow Path — scaffold only** | [`README.md`](../README.md) roadmap: rule-based edge-growth heuristic on `networkx`; no ML/GNN model/training/inference framework; [`docs/threat-model.md`](threat-model.md) out-of-scope Slow Path GNN |
 | **Wasm policy hot-path — deferred scaffold** | [`wasm_policy.rs`](../apps/agent-ebpf-sensor/src/) scaffold; labeled intentional deferred work ([#153](https://github.com/Neuromesh-Security/neuromesh/pull/153); threat-model out-of-scope) |
 | **LotL detection — partial** | Allowlisted exec **env-hijack** signals only (`LD_PRELOAD`, `LD_LIBRARY_PATH`, …) via [#140](https://github.com/Neuromesh-Security/neuromesh/issues/140) / [#141](https://github.com/Neuromesh-Security/neuromesh/pull/141); **not** comprehensive LotL / T1218 coverage ([`docs/threat-model.md`](threat-model.md) LotL residual `#TBD`) |
-| **CodeQL security code scanning not configured** | Default setup `not-configured`; Security-tab code-scanning findings are **gosec + Trivy** SARIF only. PR “CodeQL / Analyze (*)” checks are **Code Quality** (maintainability), not security SAST. See §3.3. Optional Go dataflow complement only — not a coverage emergency given gosec + Semgrep `p/ci` + cargo-audit/deny + clippy. |
+| **CodeQL security suite not configured (evaluated, deferred)** | CodeQL here = Code Quality only; security SAST = gosec + Semgrep + cargo-audit/deny + Trivy. Security suite deemed **low marginal value** — see §3.3. |
 
 ---
 
