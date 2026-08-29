@@ -122,15 +122,22 @@ spec:
               cpu: 500m
               memory: 256Mi
       volumes:
-        # Shared with agent:
+        # Issue #179 dual-trust rotation:
         #   kubectl -n neuromesh-system create secret generic neuromesh-policy-bundle-token \
         #     --from-literal=token="$(openssl rand -hex 32)"
+        # During N∥N+1 window, ALSO set key token-previous=<N or N+1 per runbook>
+        # and project it beside token (same volume dir). PE auto-loads sibling
+        # token-previous. Agents MUST keep items: token only (single presenter).
+        # See scripts/manual_verify_policy_bundle_token_rotation.sh
         - name: policy-bundle-token
           secret:
             secretName: neuromesh-policy-bundle-token
             items:
               - key: token
                 path: token
+              # Uncomment during dual-accept window (Issue #179 runbook step 1):
+              # - key: token-previous
+              #   path: token-previous
         # PKCS#8 PEM private key (Ed25519 or ECDSA P-256):
         #   kubectl -n neuromesh-system create secret generic neuromesh-policy-bundle-signing-key \
         #     --from-file=signing.pem=./policy-bundle-signing.pem

@@ -4,6 +4,7 @@ go 1.26.6
 
 require (
 	github.com/open-policy-agent/opa v1.4.0
+	github.com/prometheus/client_golang v1.21.1
 	github.com/spiffe/go-spiffe/v2 v2.8.1
 )
 
@@ -19,8 +20,9 @@ require (
 	github.com/gobwas/glob v0.2.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
+	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/prometheus/client_golang v1.21.1 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect

@@ -162,15 +162,16 @@ func contentVersion(prefixes, spiffeIDs []string, scope string) string {
 
 // Handler serves GET /v1/policy-bundle and requires a valid Bearer token plus a
 // Cosign-compatible detached signature over the exact response body bytes.
-// expectedToken must be non-empty (LoadTokenFromEnv). signer must be non-nil
-// (LoadSignerFromEnv); a nil signer returns 503 (fail-closed, never unsigned).
-func Handler(expectedToken string, signer Signer) http.HandlerFunc {
+// accepted must be a non-empty token set (LoadTokensFromEnv) — dual-accept
+// during Issue #179 rotation. signer must be non-nil (LoadSignerFromEnv);
+// a nil signer returns 503 (fail-closed, never unsigned).
+func Handler(accepted []string, signer Signer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if expectedToken == "" {
+		if len(accepted) == 0 {
 			http.Error(w, "policy-bundle authentication not configured", http.StatusServiceUnavailable)
 			return
 		}
@@ -178,7 +179,7 @@ func Handler(expectedToken string, signer Signer) http.HandlerFunc {
 			http.Error(w, "policy-bundle signing not configured", http.StatusServiceUnavailable)
 			return
 		}
-		if !authorizeBearer(r, expectedToken) {
+		if !authorizeBearer(r, accepted) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="neuromesh-policy-bundle"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

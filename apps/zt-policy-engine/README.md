@@ -204,8 +204,9 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
 | `NEUROMESH_SPIFFE_WORKLOAD_API_ADDR` | — | Optional Workload API socket override |
 | `NEUROMESH_SPIFFE_EXPECTED_ID_PATTERN` | — | Optional regexp on SPIFFE ID path |
 | `NEUROMESH_INSECURE_MOCK_IDENTITY` | unset / false | Exact value `true` enables insecure mock bypass |
-| `NEUROMESH_POLICY_BUNDLE_TOKEN` | _(required)_ | Shared Bearer token for `GET /v1/policy-bundle` transport auth (Issue #55). Missing → PE fatal at startup. |
-| `NEUROMESH_POLICY_BUNDLE_TOKEN_FILE` | — | Preferred: absolute path to token file (Kubernetes Secret mount) |
+| `NEUROMESH_POLICY_BUNDLE_TOKEN` | _(required)_ | Shared Bearer token for `GET /v1/policy-bundle` transport auth (Issue #55). Missing → PE fatal at startup. Lab single-token only. |
+| `NEUROMESH_POLICY_BUNDLE_TOKEN_FILE` | — | Preferred: absolute path to accepted-token file (Kubernetes Secret mount). **Newline-separated** list = dual-accept set (Issue **#179**). |
+| `NEUROMESH_POLICY_BUNDLE_TOKEN_PREVIOUS_FILE` | — | Optional second accepted-token file. If unset and `TOKEN_FILE` basename is `token`/`accepted`, PE also loads sibling `token-previous` when present. |
 | `NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH` | _(required)_ | **Fail-closed.** Absolute PKCS#8 PEM private key (ECDSA P-256 or Ed25519). Signs exact `GET /v1/policy-bundle` body; header `X-Neuromesh-Policy-Bundle-Signature`. Missing/unreadable/unsupported → PE **refuses to boot** (Issue #108). Never serves unsigned bundles. |
 | `NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS` | `300` | Whole-bundle `not_after - not_before` window (T-PB-04). Override for live short-window anti-replay tests only. |
 | `NEUROMESH_POLICY_BUNDLE_RATE_LIMIT_RPS` | `1000` | Issue **#176**. Coarse **aggregate** RPS circuit-breaker on `GET /v1/policy-bundle` only (not per-client — shared bearer). Default = 1000: 5000-node K8s large-cluster envelope ÷ 30s sync ≈ 167 RPS steady-state, ~6× headroom for post-outage bunching. Exceed → HTTP **429** + `Retry-After`. Set `0` to disable (lab only). **Admission webhook is not rate-limited.** |
@@ -243,8 +244,12 @@ export NEUROMESH_INSECURE_MOCK_IDENTITY=true
   (`X-Neuromesh-Policy-Bundle-Signature` over exact body bytes — Issue #108,
   content integrity), plus schema_version **3** temporal fields
   (`not_before`/`not_after` — T-PB-04). PE **refuses to boot** without
-  `NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH`. SPIFFE mTLS was not chosen for
-  Slice 0 because this repo does not yet deploy SPIRE on nodes. Live proof:
+  `NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH`. Issue **#179** adds dual-accept
+  (N∥N+1) rotation: PE loads an accepted **set**; `GET /metrics` exposes
+  `policy_bundle_auth_accept_total{fp=...}` (truncated SHA-256 hex only).
+  Runbook: `scripts/manual_verify_policy_bundle_token_rotation.sh`. SPIFFE mTLS
+  was not chosen for Slice 0 because this repo does not yet deploy SPIRE on
+  nodes. Live proof for signing:
   `scripts/manual_verify_policy_bundle_signature.sh` (includes capture→replay).
 - The insecure mock bypass still exists as an explicit env opt-in for local
   testing — it is fail-open for identity by design when enabled; treat enablement

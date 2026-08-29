@@ -105,6 +105,16 @@ kubectl -n neuromesh-system create secret generic neuromesh-policy-bundle-token 
   --from-literal=token="$(openssl rand -hex 32)"
 ```
 
+**Token rotation (Issue #179 — dual-trust N∥N+1):** never hard-swap the shared
+Bearer. PE accepts a set (`token` + optional Secret key `token-previous`);
+agents present only `token`. Soak gate uses
+`policy_bundle_auth_accept_total{fp="<truncated-sha256-hex>"}` on PE `GET /metrics`
+(fingerprints only — never raw tokens). Human-gated retire of N:
+
+```bash
+sudo -E bash scripts/manual_verify_policy_bundle_token_rotation.sh
+```
+
 2. **PE signing private key** (PKCS#8 PEM):
 
 ```bash
