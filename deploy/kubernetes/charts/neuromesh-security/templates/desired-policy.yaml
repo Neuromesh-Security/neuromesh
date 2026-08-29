@@ -1,4 +1,13 @@
 {{- if .Values.desiredPolicy.enabled }}
+{{/*
+DesiredPolicy ConfigMap + PE watch-only RBAC (parity with neuromesh-desired-policy.yaml).
+
+PE ServiceAccount READ (sole ConfigMap grant for neuromesh-zt-policy-engine):
+  get+watch on resourceNames=[.Values.desiredPolicy.name] — no list, no writes.
+WRITE stays with operators / GitOps / CI apply jobs (cluster or namespace admin
+bindings), not this Role. Live gate: manual_verify_desired_policy_dynamic.sh
+scenario 2.
+*/}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

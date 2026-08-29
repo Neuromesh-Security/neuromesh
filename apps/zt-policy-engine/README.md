@@ -44,6 +44,14 @@ DesiredPolicy ConfigMap (Issue #137 PR-1 — bundle plane only)
         feeds policybundle.CurrentAt (sign+timestamp cycle unchanged).
         Rego (/v1/evaluate) is NOT updated (PR-2). Do NOT enable in production
         until PR-2 — ship rule against dynamic bundle + static Rego.
+
+        RBAC (deploy/kubernetes/neuromesh-desired-policy.yaml + Helm
+        templates/desired-policy.yaml): namespaced Role
+        neuromesh-zt-policy-engine-desired-policy grants get+watch ONLY on
+        resourceNames=[neuromesh-desired-policy]. No list. No writes. No
+        ClusterRole. No other ConfigMap Role on SA neuromesh-zt-policy-engine.
+        WRITE is operators / GitOps / CI — not PE. Live RBAC gate: scenario 2 of
+        scripts/manual_verify_desired_policy_dynamic.sh.
 ```
 
 ### Operator note — agent sync (Phase 1)
