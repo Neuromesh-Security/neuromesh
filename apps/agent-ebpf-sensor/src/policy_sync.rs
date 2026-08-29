@@ -699,9 +699,8 @@ pub fn spawn_policy_sync(
                                         last_version = %state_guard.last_version,
                                         "policy sync throttled — backing off, retaining last-known-good"
                                     );
-                                    let backoff = rl
-                                        .retry_after
-                                        .unwrap_or(DEFAULT_RATE_LIMIT_BACKOFF);
+                                    let backoff =
+                                        rl.retry_after.unwrap_or(DEFAULT_RATE_LIMIT_BACKOFF);
                                     drop(state_guard);
                                     drop(id_guard);
                                     drop(deny_guard);
@@ -1227,8 +1226,6 @@ mod tests {
 
     #[tokio::test]
     async fn sync_once_429_short_circuits_before_signature_verify() {
-        // sync_once calls fetch_policy_bundle first; a 429 must never reach
-        // verify_bundle_signature (would need a real pubkey + body).
         let (base, join) = spawn_stub_with_extra_headers(
             Some("tok"),
             "HTTP/1.1 429 Too Many Requests",
@@ -1244,7 +1241,6 @@ mod tests {
             err.downcast_ref::<RateLimitedError>().is_some(),
             "got {err:#}"
         );
-        // Public API used by sync_once: RateLimitedError is not signature/temporal.
         let msg = err.to_string();
         assert!(!msg.contains("signature_"));
         assert!(!msg.contains("bundle_expired"));
@@ -1259,7 +1255,6 @@ mod tests {
         assert_eq!(metrics.policy_sync_throttled_total(), 0.0);
         metrics.record_policy_sync_throttled();
         assert_eq!(metrics.policy_sync_throttled_total(), 1.0);
-        // Gathered registry must expose the dedicated name (not a generic sync_fail).
         let families = metrics.registry.gather();
         let names: Vec<&str> = families.iter().map(|f| f.name()).collect();
         assert!(
