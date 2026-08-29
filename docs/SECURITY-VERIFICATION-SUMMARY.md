@@ -65,14 +65,14 @@ Current engineering-grade milestone is **`v0.1.0-core`**. The project is **solo-
 | **Temporal / anti-replay** | [#111](https://github.com/Neuromesh-Security/neuromesh/pull/111) (2026-08-12) — T-PB-04; schema_version **3** with `not_before` / `not_after` inside signed JSON; default window **300s** (10 × 30s sync) |
 | **Live method** | [`scripts/manual_verify_policy_bundle_signature.sh`](../scripts/manual_verify_policy_bundle_signature.sh) — sign/verify path plus **capture → wait → replay** of exact body bytes ([`docs/threat-model.md`](threat-model.md) T-PB-02 / T-PB-04 rows) |
 
-### 2.6 Dynamic DesiredPolicy — live end-to-end (ConfigMap → both planes → kernel)
+### 2.6 Dynamic DesiredPolicy — ConfigMap → both planes → kernel
 
 | | |
 |--|--|
 | **PR / issue** | Live script [#171](https://github.com/Neuromesh-Security/neuromesh/pull/171) (merged 2026-08-28); foundation [#138](https://github.com/Neuromesh-Security/neuromesh/pull/138) / Rego [#139](https://github.com/Neuromesh-Security/neuromesh/pull/139); RBAC audit [#175](https://github.com/Neuromesh-Security/neuromesh/pull/175) |
 | **Script** | [`scripts/manual_verify_desired_policy_dynamic.sh`](../scripts/manual_verify_desired_policy_dynamic.sh) |
-| **Scenarios (must all PASS)** | (1) ENABLE gate + initial reconcile; (2) VALID CHANGE — prefix + SPIFFE on **both** planes; (3) DOWNSTREAM — agent sync + **LSM deny** on dynamic prefix; (4) REJECTION — invalid CM retains LKG; (5) SAFETY RAIL — floor removal override vs regression; (6) RESTART SELF-HEAL — PE restart re-reads live ConfigMap; (7) cleanup / restore |
-| **Paste-back** | Script requires full stdout/stderr paste to the PR before merge ([script header](../scripts/manual_verify_desired_policy_dynamic.sh)). Exact PASS line dump from a named droplet run: **TBD — verify** against operator paste-back on [#171](https://github.com/Neuromesh-Security/neuromesh/pull/171) if an auditor needs transcript-level timestamps. |
+| **Scenario contract (in-repo, 7 scenarios)** | (1) ENABLE gate + initial reconcile; (2) VALID CHANGE — prefix + SPIFFE on **both** planes; (3) DOWNSTREAM — agent sync + **LSM deny** on dynamic prefix; (4) REJECTION — invalid CM retains LKG; (5) SAFETY RAIL — floor removal override vs regression; (6) RESTART SELF-HEAL — PE restart re-reads live ConfigMap; (7) cleanup / restore |
+| **Citable claim level** | **Scenario contract verified in-repo (7 scenarios).** Live execution transcript (exact `PASS:` lines / wall-clock paste-back from a droplet run) is **not** recoverable from [#171](https://github.com/Neuromesh-Security/neuromesh/pull/171) PR body/comments or saved chat logs at document refresh time — **TBD — verify**. Do not read this section as “droplet paste-back attached here.” |
 
 ### 2.7 TLS rotation — zero-downtime class
 
@@ -127,6 +127,19 @@ Current engineering-grade milestone is **`v0.1.0-core`**. The project is **solo-
 Sources: [`deploy/kubernetes/README.md`](../deploy/kubernetes/README.md), [`deploy/kubernetes/charts/neuromesh-security/values.yaml`](../deploy/kubernetes/charts/neuromesh-security/values.yaml), admission README Cosign pin note.  
 **Publish / Cosign sign:** Production CI `Build Docker (*)` pushes and Cosign-signs **only** on `push` to `main` (`should_publish=true` in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)); PR builds are build+load only. Trust root for GHCR agent bytecode: [`deploy/kubernetes/ci-cosign.pub`](../deploy/kubernetes/ci-cosign.pub) (Issue [#114](https://github.com/Neuromesh-Security/neuromesh/issues/114) class).
 
+### 2.13 Performance & reliability evidence
+
+**Source of record:** [`docs/performance-baseline.md`](performance-baseline.md) (not marketing copy). Figures below are copied from that document’s measured claims.
+
+| Claim | Exact figure | Citation |
+|-------|--------------|----------|
+| Idle agent CPU **pre** RingBuf/AsyncFd fix | ~**93–97%** of one core (busy-spin) | Issue [#103](https://github.com/Neuromesh-Security/neuromesh/issues/103); [`performance-baseline.md`](performance-baseline.md) §2.4 / §2.5; code comment in [`apps/agent-ebpf-sensor/src/monitoring/ringbuf_async_io.rs`](../apps/agent-ebpf-sensor/src/monitoring/ringbuf_async_io.rs) |
+| Idle agent CPU **post** fix | **`0.400%`** of 1 core (correlator-off baseline) | PR [#104](https://github.com/Neuromesh-Security/neuromesh/pull/104) (fix); Issue [#100](https://github.com/Neuromesh-Security/neuromesh/issues/100) / [`performance-baseline.md`](performance-baseline.md) §2.5 table (`0.400`); also [`README.md`](../README.md) idle CPU row. **Do not use `0.3833%`** — that figure is not in the source of record. |
+| Historical execve stress (pre-[#160](https://github.com/Neuromesh-Security/neuromesh/pull/160)) | Band **880–962 EPS**; best **`average_eps=962`**; **three** independent 30 s runs; **zero** RingBuf/MPSC drops | [`performance-baseline.md`](performance-baseline.md) §2.3 / historical table; example `spawned=28868`, `failed=0`, `elapsed=30.00s`, `average_eps=962` |
+| Post-[#160](https://github.com/Neuromesh-Security/neuromesh/pull/160) apples-to-apples re-measure | **`average_eps=816`** (`spawned=24860`, `failed=0`, `elapsed=30.48s`, `workers=128`, `worker_model=std::thread`, `host_parallelism=1`) | [`performance-baseline.md`](performance-baseline.md) §2.3 / §2.3.2; docs PRs [#161](https://github.com/Neuromesh-Security/neuromesh/pull/161) / [#162](https://github.com/Neuromesh-Security/neuromesh/pull/162) |
+
+**Honest finding (do not smooth):** **`816 < 962`.** The OS-thread generator fix ([#160](https://github.com/Neuromesh-Security/neuromesh/pull/160)) was **architecturally correct** (workers no longer serialize on one Tokio runtime thread) but did **not** raise the measured ceiling on this specific **1-vCPU** box; both post-#160 and historical runs are still **generator-bound**, not agent-bound ([`performance-baseline.md`](performance-baseline.md) §2.3.2: “OS threads did **not** raise the 1-vCPU generator above historical 962; 816 < 962 is expected when 128 threads fight one core”). Related (do not collapse into 816): sweep-best **`average_eps=738`** at 8 workers / 15 s is a different protocol.
+
 ---
 
 ## 3. CI/CD security pipeline
@@ -160,7 +173,7 @@ Workflows in-repo: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (**
 
 ### 3.3 CodeQL
 
-PR check rollups historically show **CodeQL** jobs `Analyze (go)`, `Analyze (javascript-typescript)`, `Analyze (python)`. There is **no** `codeql*.yml` under [`.github/workflows/`](../.github/workflows/) in this repository snapshot — treat CodeQL as **org/GitHub code-scanning configuration** and **TBD — verify** the exact workflow file location with repo admins if auditors require the YAML path.
+PR check rollups show **CodeQL** jobs `Analyze (go)`, `Analyze (javascript-typescript)`, `Analyze (python)`. Repository search of [`.github/workflows/`](../.github/workflows/) finds only `ci.yml`, `security-scan-pipeline.yml`, `ai-model-promotion.yml`, and `experimental-ci.yml` — **no** in-repo workflow whose filename or primary `name:` is CodeQL (gosec/Trivy use `github/codeql-action/upload-sarif` for SARIF upload only; that is not the CodeQL analyze workflow). Exact CodeQL workflow path: **TBD — verify** (likely GitHub.org / default code-scanning config outside this tree).
 
 ### 3.4 Every PR vs main-only
 
@@ -204,7 +217,7 @@ This is **context for evaluators**, not an apology: it explains how evidence is 
 | `scripts/manual_verify_lsm_pin.sh` | LSM survives `kill -9` |
 | `scripts/manual_verify_runtime_integrity.sh` | Pin / binary tamper evidence |
 | `scripts/manual_verify_policy_bundle_signature.sh` | Bundle Cosign + temporal replay |
-| `scripts/manual_verify_desired_policy_dynamic.sh` | Dynamic DesiredPolicy E2E |
+| `scripts/manual_verify_desired_policy_dynamic.sh` | DesiredPolicy E2E scenario contract (7); live transcript TBD |
 | `scripts/manual_verify_admission_tls_rotation.sh` | Webhook TLS renew + rollout health |
 | `scripts/manual_verify_policy_bundle_token_rotation.sh` | Bearer N∥N+1 rotation |
 | `scripts/manual_verify_network_policies.sh` | NetworkPolicy ALLOW/DENY |
