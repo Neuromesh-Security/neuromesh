@@ -227,6 +227,8 @@ On `host_parallelism=1`, 128 OS threads are **oversubscribed**. A 15 s cell at 8
 
 **Documented claim:** post-#160, still **generator-bound on 1 vCPU** — **`average_eps=816`** (30 s standard) and **`average_eps=738`** (sweep-best). Comfortably above realistic node process-creation (§2.3.1). Do **not** read this as “the kernel cannot go faster.” Do **not** read it as “we validated 100k or 500k.” OS threads did **not** raise the 1-vCPU generator above historical 962; 816 < 962 is expected when 128 threads fight one core.
 
+**Single-sample caveat (still true until §2.3.3 paste-back):** the post-#160 **816** figure and the pre-#160 **962** best-of-three band are **not** p50/p90 distributions. Historical pre-#160 used **three** independent runs (band only). Use [`scripts/measure_perf_distributions.sh`](../scripts/measure_perf_distributions.sh) for a real multi-run EPS distribution (§2.3.3).
+
 ##### 2.3.1 Tested ceiling vs realistic Kubernetes process-creation (2026-08-22)
 
 **Current defensible figure (post-#160, 1 vCPU, generator-bound):** **`average_eps=816`** from the 30 s standard-tier line (apples-to-apples with historical 962). Sweep-best **`average_eps=738`** at 8 workers / 15 s is also measured — see §2.3.2; do not collapse them. Historical pre-#160: **962 EPS** (best of three 30 s runs; `ebpf_events_dropped_total = 0`).
@@ -284,6 +286,32 @@ EXECVE_STRESS_TIER=standard cargo test -p agent-ebpf-sensor --test execve_stress
 | “Distributed generator” on **other machines** | **Does not inject `execve` into the target kernel.** `execve` is a local syscall. Extra droplets cannot bombard this node’s tracepoint | To load **this** agent you must spawn **on this host**, stealing CPU from the agent |
 
 The kernel token bucket (~500k/CPU) is a **safety valve**, not a measured “we have driven 500k execves through the agent.” Hitting it would need a specialized generator on a **many-core target** — **not** required to defend the 816 EPS production claim in §2.3.1. Extra machines and a bigger droplet are **not** the next procurement step.
+
+##### 2.3.3 Multi-run distributions — methodology (single-node)
+
+**Harness:** [`scripts/measure_perf_distributions.sh`](../scripts/measure_perf_distributions.sh) — wraps existing mechanisms only (does **not** reimplement timing):
+
+| Metric family | Underlying tool | Default N | Est. wall-clock (1-vCPU lab) |
+|---------------|-----------------|-----------|------------------------------|
+| Identity insert / delete invalidation / PE revoke latency | [`manual_verify_identity_2bii_correlation.sh`](../scripts/manual_verify_identity_2bii_correlation.sh) full EXIT=0 trials | **15** | ~45–90 min (revoke sync-bound) |
+| Execve `average_eps` (standard tier, 30 s, 128 OS threads) | `EXECVE_STRESS_TIER=standard` `standard_tier` ([PR #160](https://github.com/Neuromesh-Security/neuromesh/pull/160) generator) | **30** | ~20–25 min (+ one-time compile) |
+
+**Sample-size reasoning (not arbitrary):**
+
+- **EPS N=30:** each sample costs ~30 s of burst. N=30 ≈ 10× the historical three-run band, enough for a stable **p50** and a usable exploratory **p90** (~3 observations in the upper decile). Wall-clock stays under ~half an hour of measurement.
+- **Identity N=15:** each sample is a full 2b-ii-C gate (agent start + insert + delete + recreate + PE revoke). Threat-model already asked for “5–10×” repeats; **15** sits just above that for a credible **p50** without a multi-hour session. Revoke latency is dominated by `POLICY_SYNC_INTERVAL` (~30 s), so N≫15 has poor cost/benefit on this droplet.
+- **p99:** with N=15 or N=30, an empirical “p99” is essentially **max / near-max** — it does **not** estimate the 99th percentile of the process. The harness reports p99 only when **n≥100**; otherwise the summary marks **`insufficient_sample_size`**. Report **min / p50 / p90 / max / mean** as the honest ceiling.
+
+**Envelope:** **single-node k3s only.** Multi-node distribution would differ and is infrastructure-blocked / out of scope for this harness.
+
+**Live results:** _PENDING paste-back_ — replace the placeholder table below after a successful droplet run (`SUMMARY_MD` / `SUMMARY_JSON` from the harness). Until then, keep citing single-sample **816** / 2b-ii-C latencies as **one-shot** figures, not percentiles.
+
+| Metric | n | min | p50 | p90 | p99 | max | mean | wall-clock |
+|--------|---|-----|-----|-----|-----|-----|------|------------|
+| `execve_standard_average_eps` | 30 | _TBD_ | _TBD_ | _TBD_ | insufficient N | _TBD_ | _TBD_ | _TBD_ |
+| `identity_insert_latency_ms` | 15 | _TBD_ | _TBD_ | _TBD_ | insufficient N | _TBD_ | _TBD_ | _TBD_ |
+| `identity_delete_invalidation_latency_ms` | 15 | _TBD_ | _TBD_ | _TBD_ | insufficient N | _TBD_ | _TBD_ | _TBD_ |
+| `identity_revoke_latency_ms` | 15 | _TBD_ | _TBD_ | _TBD_ | insufficient N | _TBD_ | _TBD_ | _TBD_ |
 
 > **Graph placeholder:** `docs/assets/perf-ringbuf-drop-rate.svg` — time-series of `ebpf_events_dropped_total` / (`processed` + `dropped`) during the tested ~900 EPS burst.
 

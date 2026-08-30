@@ -307,7 +307,7 @@ identity exceptions without a matching signature.
 | Delete invalidation | `reason=pod_delete` (and/or teardown race) | **~0.9 s** (`terminationGracePeriodSeconds: 0`) |
 | PE revoke while pod **Running** | `reason=pe_allowlist_revoke` | **~11.8 s** (gated by `POLICY_SYNC_INTERVAL` ≈ 30 s — **by design**, not watch lag) |
 
-These are **single-sample** numbers from one droplet run. Do **not** treat them as p50/p99 or an SLA. Recommend repeating 5–10× (and broader environments) before any procurement/SLA claim. This verification is **single-node k3s**, not multi-node / multi-tenant production under real load, and does **not** replace a full production soak or external audit.
+These are **single-sample** numbers from one droplet run. Do **not** treat them as p50/p99 or an SLA. Multi-run **p50/p90** (and explicitly **not** p99 at the chosen N) are collected by [`scripts/measure_perf_distributions.sh`](../scripts/measure_perf_distributions.sh) — see [`docs/performance-baseline.md`](performance-baseline.md) §2.3.3 (defaults: identity **N=15**, EPS **N=30**; single-node only). This verification remains **single-node k3s**, not multi-node / multi-tenant production under real load, and does **not** replace a full production soak or external audit.
 
 Agent behavior (`apps/agent-ebpf-sensor/src/policy_sync.rs`, `path_deny.rs`, `identity_allow.rs`):
 
