@@ -43,6 +43,8 @@ STUB_LOG="${TEST_ROOT}/identity-2biic-stub.log"
 SPIFFE_FILE="${TEST_ROOT}/spiffe_allow.json"
 POD_NAME="${NEUROMESH_2BIIC_POD_NAME:-nm-2biic-corr}"
 POD_NS="${NEUROMESH_2BIIC_POD_NS:-default}"
+# Override when admission webhook Cosign-DENYs unsigned busybox (Ignore ≠ allow-on-deny).
+POD_IMAGE="${NEUROMESH_2BIIC_POD_IMAGE:-busybox:1.36}"
 NODE_NAME="${NEUROMESH_NODE_NAME:-neuromesh-dev-lab}"
 KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 export KUBECONFIG
@@ -55,26 +57,58 @@ METRICS_URL="${NEUROMESH_METRICS_URL:-http://127.0.0.1:9090/metrics}"
 REVOKE_WAIT_SECS="${NEUROMESH_2BIIC_REVOKE_WAIT_SECS:-100}"
 INSERT_WAIT_SECS="${NEUROMESH_2BIIC_INSERT_WAIT_SECS:-120}"
 DELETE_WAIT_SECS="${NEUROMESH_2BIIC_DELETE_WAIT_SECS:-60}"
+KEY_DIR="${TEST_ROOT}/bundle-keys"
+PRIV_KEY="${KEY_DIR}/bundle_signing.pem"
+PUB_KEY="${KEY_DIR}/bundle.pub"
+# Bundle temporal window must cover insert+delete+revoke (revoke wait alone ≤100s).
+BUNDLE_VALIDITY_SECS="${NEUROMESH_2BIIC_BUNDLE_VALIDITY_SECS:-600}"
 
 PASS_COUNT=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; PASS_COUNT=$((PASS_COUNT + 1)); }
 
 echo "== Slice 2b-ii-C preflight =="
-test "$(id -u)" -eq 0 || fail "must run as root"
-test -x "$AGENT_BIN" || fail "AGENT_BIN not executable: $AGENT_BIN"
-test -f /sys/kernel/btf/vmlinux || fail "BTF missing"
-command -v bpftool >/dev/null || fail "bpftool required"
-command -v python3 >/dev/null || fail "python3 required"
-command -v kubectl >/dev/null || fail "kubectl required"
-test -f /sys/fs/cgroup/cgroup.controllers || fail "cgroup v2 required"
+test "$(id -u)" -eq 0 || fail "must run as root (uid=$(id -u))"
+# Resolve AGENT_BIN to absolute so cwd changes cannot break the child path.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RBAC_YAML="${REPO_ROOT}/deploy/kubernetes/neuromesh-agent-correlator-rbac.yaml"
+if [[ "$AGENT_BIN" != /* ]]; then
+  AGENT_BIN="$REPO_ROOT/${AGENT_BIN#./}"
+fi
+test -e "$AGENT_BIN" || fail "AGENT_BIN does not exist: $AGENT_BIN (from $REPO_ROOT run: cargo build -p agent-ebpf-sensor --release)"
+test -x "$AGENT_BIN" || fail "AGENT_BIN not executable: $AGENT_BIN (mode $(stat -c %a "$AGENT_BIN" 2>/dev/null || echo '?'))"
+test -f "$RBAC_YAML" || fail "correlator RBAC manifest missing: $RBAC_YAML"
+test -f /sys/kernel/btf/vmlinux || fail "BTF missing: /sys/kernel/btf/vmlinux"
+command -v bpftool >/dev/null || fail "bpftool required on PATH"
+command -v python3 >/dev/null || fail "python3 required on PATH"
+command -v kubectl >/dev/null || fail "kubectl required on PATH"
+test -f /sys/fs/cgroup/cgroup.controllers || fail "cgroup v2 required (/sys/fs/cgroup/cgroup.controllers)"
 test -f "$KUBECONFIG" || fail "KUBECONFIG missing: $KUBECONFIG"
 test -f "$K8S_CA_FILE" || fail "NEUROMESH_K8S_CA_FILE missing: $K8S_CA_FILE"
+python3 -c "import cryptography" >/dev/null 2>&1 \
+  || fail "python3 cryptography package required (Ed25519 PE stub signing) — pip install cryptography"
 # Fail closed if someone left a manual seed in the environment.
 if [[ -n "${NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS:-}" ]]; then
   fail "NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS is set — unset it (this gate proves auto-correlation, not lab seed)"
 fi
-mkdir -p "$PIN_ROOT" "$TEST_ROOT"
+mkdir -p "$PIN_ROOT" "$TEST_ROOT" "$KEY_DIR"
+
+# Bytecode attestation paths (host agent — same contract as measure_perf_distributions preflight).
+COSIGN_PUB="${NEUROMESH_COSIGN_PUBLIC_KEY_PATH:-/etc/neuromesh/cosign/cosign.pub}"
+MANIFEST="${NEUROMESH_BYTECODE_MANIFEST_PATH:-/etc/neuromesh/bytecode-manifest.json}"
+MANIFEST_SIG="${NEUROMESH_BYTECODE_MANIFEST_SIG_PATH:-/etc/neuromesh/bytecode-manifest.sig}"
+test -s "$COSIGN_PUB" \
+  || fail "Cosign public key missing/empty: $COSIGN_PUB (set NEUROMESH_COSIGN_PUBLIC_KEY_PATH)"
+test -s "$MANIFEST" \
+  || fail "bytecode manifest missing/empty: $MANIFEST (set NEUROMESH_BYTECODE_MANIFEST_PATH)"
+test -s "$MANIFEST_SIG" \
+  || fail "bytecode manifest sig missing/empty: $MANIFEST_SIG (set NEUROMESH_BYTECODE_MANIFEST_SIG_PATH)"
+export NEUROMESH_COSIGN_PUBLIC_KEY_PATH="$COSIGN_PUB"
+export NEUROMESH_BYTECODE_MANIFEST_PATH="$MANIFEST"
+export NEUROMESH_BYTECODE_MANIFEST_SIG_PATH="$MANIFEST_SIG"
+echo "AGENT_BIN=$AGENT_BIN"
+echo "POD_IMAGE=$POD_IMAGE"
+echo "attestation pub=$COSIGN_PUB manifest=$MANIFEST sig=$MANIFEST_SIG"
 
 # Confirm SPIFFE path-form matches Slice 2a lock (construct_spiffe_id).
 echo "EXPECTED_SPIFFE=$EXPECTED_SPIFFE"
@@ -316,9 +350,7 @@ metadata:
   labels:
     app.kubernetes.io/name: neuromesh-agent
 EOF
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RBAC_YAML="${REPO_ROOT}/deploy/kubernetes/neuromesh-agent-correlator-rbac.yaml"
-test -f "$RBAC_YAML" || fail "missing $RBAC_YAML"
+test -f "$RBAC_YAML" || fail "missing correlator RBAC manifest: $RBAC_YAML"
 kubectl apply -f "$RBAC_YAML"
 pass "scenario 1: RBAC + SA applied (no k3s-specific changes)"
 
@@ -327,37 +359,71 @@ BEARER_TOKEN="$(kubectl -n neuromesh-system create token neuromesh-agent --durat
 test -n "$BEARER_TOKEN" || fail "failed to mint neuromesh-agent SA token"
 echo "NEUROMESH_K8S_API_URL=$K8S_API_URL (token minted; CA=$K8S_CA_FILE)"
 
-# --- scenario 2: mutable PE stub with identity_allow_exceptions ---
-echo "== scenario 2: start PE stub (schema_version 3, SPIFFE=$EXPECTED_SPIFFE) =="
+# --- scenario 2: mutable PE stub with Cosign-compatible Ed25519 signatures ---
+echo "== scenario 2: generate Ed25519 keypair + start signed PE stub (SPIFFE=$EXPECTED_SPIFFE) =="
+export KEY_DIR
+python3 - <<'PY' || fail "failed to generate Ed25519 PE signing keypair in $KEY_DIR"
+import os, pathlib
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+key_dir = pathlib.Path(os.environ["KEY_DIR"])
+key_dir.mkdir(parents=True, exist_ok=True)
+priv = Ed25519PrivateKey.generate()
+(key_dir / "bundle_signing.pem").write_bytes(
+    priv.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+)
+(key_dir / "bundle.pub").write_bytes(
+    priv.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+)
+print("keys ready in", key_dir)
+PY
+test -s "$PRIV_KEY" && test -s "$PUB_KEY" || fail "keypair missing after generation (expected $PRIV_KEY and $PUB_KEY)"
+
 write_spiffe_allow "[\"${EXPECTED_SPIFFE}\"]"
 cat >"${TEST_ROOT}/stub_pe_2biic.py" <<'PY'
-import json, os, time
+import base64, hashlib, json, os, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 TOKEN = os.environ.get("NEUROMESH_POLICY_BUNDLE_TOKEN", "slice2biic-manual-verify-token")
 SPIFFE_FILE = os.environ["SPIFFE_ALLOW_FILE"]
 PORT = int(os.environ["PE_PORT"])
+PRIV_PATH = os.environ["NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH"]
+VALIDITY = int(os.environ.get("NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS", "600"))
+
+with open(PRIV_PATH, "rb") as f:
+    PRIV = load_pem_private_key(f.read(), password=None)
+
+
+def rfc3339(ts: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
 
 
 def bundle():
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    exp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600))
+    now = time.time()
     with open(SPIFFE_FILE, "r", encoding="utf-8") as f:
         spiffe_ids = json.load(f)
-    # Bump version whenever allowlist changes so operators can grep Fresh applies;
-    # allowlist cache refresh also happens on unchanged-version TTL sync.
-    version = "sha256:slice2biic-" + str(abs(hash(json.dumps(spiffe_ids, sort_keys=True))) % (10**12))
+    version = "sha256:slice2biic-" + hashlib.sha256(
+        json.dumps(spiffe_ids, sort_keys=True).encode()
+    ).hexdigest()[:16]
     return {
         "schema_version": 3,
         "version": version,
-        "not_before": now,
-        "not_after": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 300)),
+        "not_before": rfc3339(now - 5),
+        "not_after": rfc3339(now + VALIDITY),
         "deny_path_prefixes": ["/tmp/", "/dev/shm/", "/var/tmp/"],
         "identity_allow_exceptions": {
             "scope_path_prefix": "/tmp/",
             "spiffe_ids": spiffe_ids,
-            "issued_at": now,
-            "expires_at": exp,
+            "issued_at": rfc3339(now),
+            "expires_at": rfc3339(now + 90),
         },
     }
 
@@ -373,9 +439,12 @@ class H(BaseHTTPRequestHandler):
             self.send_response(401)
             self.end_headers()
             return
-        body = json.dumps(bundle()).encode()
+        # Cosign sign-blob wire format: signature over exact body bytes.
+        body = (json.dumps(bundle(), separators=(",", ":")) + "\n").encode()
+        sig = base64.b64encode(PRIV.sign(body)).decode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("X-Neuromesh-Policy-Bundle-Signature", sig)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -387,18 +456,24 @@ class H(BaseHTTPRequestHandler):
 HTTPServer(("127.0.0.1", PORT), H).serve_forever()
 PY
 
-export PE_PORT BUNDLE_TOKEN
+export PE_PORT BUNDLE_TOKEN BUNDLE_VALIDITY_SECS
 NEUROMESH_POLICY_BUNDLE_TOKEN="$BUNDLE_TOKEN" PE_PORT="$PE_PORT" \
   SPIFFE_ALLOW_FILE="$SPIFFE_FILE" \
+  NEUROMESH_POLICY_BUNDLE_SIGNING_KEY_PATH="$PRIV_KEY" \
+  NEUROMESH_POLICY_BUNDLE_VALIDITY_SECS="$BUNDLE_VALIDITY_SECS" \
   python3 "${TEST_ROOT}/stub_pe_2biic.py" >"$STUB_LOG" 2>&1 &
 STUB_PID=$!
 sleep 0.5
 kill -0 "$STUB_PID" || fail "PE stub failed to start (see $STUB_LOG)"
 
 export EXPECTED_SPIFFE
-STUB_BODY="$(curl -sf -H "Authorization: Bearer ${BUNDLE_TOKEN}" \
+STUB_HEADERS="$(mktemp)"
+STUB_BODY="$(curl -sf -D "$STUB_HEADERS" -H "Authorization: Bearer ${BUNDLE_TOKEN}" \
   "http://127.0.0.1:${PE_PORT}/v1/policy-bundle")" \
-  || fail "stub GET /v1/policy-bundle failed"
+  || fail "stub GET /v1/policy-bundle failed (is PE_PORT=$PE_PORT free? see $STUB_LOG)"
+grep -qi '^X-Neuromesh-Policy-Bundle-Signature:' "$STUB_HEADERS" \
+  || fail "stub response missing X-Neuromesh-Policy-Bundle-Signature header (unsigned stub cannot pass agent Cosign verify)"
+rm -f "$STUB_HEADERS"
 echo "$STUB_BODY" | python3 -c '
 import json,sys,os
 b=json.load(sys.stdin)
@@ -406,9 +481,9 @@ assert b["schema_version"]==3, b
 assert b.get("not_before") and b.get("not_after"), b
 want=os.environ["EXPECTED_SPIFFE"]
 assert want in b["identity_allow_exceptions"]["spiffe_ids"], (want, b)
-print("stub ok spiffe=", want)
+print("stub ok signed spiffe=", want)
 '
-pass "scenario 2: schema_version 3 stub serves EXPECTED_SPIFFE"
+pass "scenario 2: schema_version 3 Cosign-signed stub serves EXPECTED_SPIFFE"
 
 AGENT_PID=""
 POD_CREATED=0
@@ -441,9 +516,13 @@ export NEUROMESH_K8S_BEARER_TOKEN="$BEARER_TOKEN"
 export NEUROMESH_K8S_CA_FILE="$K8S_CA_FILE"
 export NEUROMESH_ZT_POLICY_ENGINE_URL="http://127.0.0.1:${PE_PORT}"
 export NEUROMESH_POLICY_BUNDLE_TOKEN="$BUNDLE_TOKEN"
+# Verification pubkey for Cosign-signed stub (distinct from bytecode Cosign key).
+export NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH="$PUB_KEY"
 export NEUROMESH_BPF_PIN_ROOT="$PIN_ROOT"
 export NEUROMESH_INTEGRITY_EXIT_ON_FAILURE="${NEUROMESH_INTEGRITY_EXIT_ON_FAILURE:-false}"
 export RUST_LOG="${RUST_LOG:-info,neuromesh::identity_correlator=info,neuromesh::policy_sync=info}"
+test -s "$NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH" \
+  || fail "PE verify pubkey missing: $NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH"
 
 # Line-buffer agent logs so invalidation lines are visible as soon as map deletes
 # happen (fully-buffered stdout/stderr when redirected to a file otherwise races
@@ -465,20 +544,24 @@ if grep -q "SECURITY WARNING: NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS" "$AGENT_LOG";
   fail "manual seed warning present — NEUROMESH_IDENTITY_ALLOW_CGROUP_IDS must stay unset"
 fi
 # Wait for first successful policy sync (allowlist cache warm).
+# Require a real PE Cosign apply — NOT cold bootstrap ("Path-prefix deny list: cold bootstrap").
 synced=0
 for _ in $(seq 1 60); do
-  if grep -qE 'applied path-prefix deny list|policy bundle unchanged' "$AGENT_LOG"; then
+  if grep -q 'applied path-prefix deny list + identity validity from zt-policy-engine' "$AGENT_LOG"; then
     synced=1
     break
   fi
   sleep 0.5
 done
 test "$synced" -eq 1 || {
-  echo "---- agent log ----"
+  echo "---- agent log (tail 160) ----"
   tail -n 160 "$AGENT_LOG" || true
-  fail "agent never synced policy bundle (PE allowlist cold)"
+  if grep -q 'signature_missing\|signature_invalid\|public key unavailable' "$AGENT_LOG"; then
+    fail "agent never applied a Cosign-valid PE bundle (see signature_* / public key lines above). Stub must send X-Neuromesh-Policy-Bundle-Signature; agent needs NEUROMESH_POLICY_BUNDLE_PUBLIC_KEY_PATH=$PUB_KEY"
+  fi
+  fail "agent never synced policy bundle (PE allowlist cold) — expected log: applied path-prefix deny list + identity validity from zt-policy-engine"
 }
-pass "scenario 3: agent up with correlator; no manual seed; PE synced"
+pass "scenario 3: agent up with correlator; no manual seed; PE Cosign-synced"
 
 # --- scenario 4+5: multi-container pod + auto-insert all container cgroup_ids ---
 echo "== scenario 4: create multi-container pod (main + 2 sidecars) =="
@@ -500,23 +583,24 @@ spec:
   nodeName: ${NODE_NAME}
   containers:
     - name: main
-      image: busybox:1.36
+      image: ${POD_IMAGE}
       command: ["sleep", "3600"]
     - name: sidecar-a
-      image: busybox:1.36
+      image: ${POD_IMAGE}
       command: ["sleep", "3600"]
     - name: sidecar-b
-      image: busybox:1.36
+      image: ${POD_IMAGE}
       command: ["sleep", "3600"]
 EOF
 POD_CREATED=1
-pass "scenario 4: 3-container pod applied (ns=${POD_NS}/sa=default → ${EXPECTED_SPIFFE})"
+pass "scenario 4: 3-container pod applied (image=${POD_IMAGE}; ns=${POD_NS}/sa=default → ${EXPECTED_SPIFFE})"
 
 echo "== wait for Pod Ready =="
 kubectl -n "$POD_NS" wait --for=condition=Ready "pod/${POD_NAME}" --timeout=120s \
   || {
     kubectl -n "$POD_NS" describe "pod/${POD_NAME}" || true
-    fail "pod never became Ready"
+    echo "HINT: if admission Cosign DENY / ImagePullBackOff — export NEUROMESH_2BIIC_POD_IMAGE to a Cosign-signed image with /bin/sleep" >&2
+    fail "pod never became Ready (image=${POD_IMAGE} nodeName=${NODE_NAME})"
   }
 READY_NS="$(date +%s%N)"
 POD_UID="$(kubectl -n "$POD_NS" get "pod/${POD_NAME}" -o jsonpath='{.metadata.uid}')"
@@ -646,13 +730,13 @@ spec:
   nodeName: ${NODE_NAME}
   containers:
     - name: main
-      image: busybox:1.36
+      image: ${POD_IMAGE}
       command: ["sleep", "3600"]
     - name: sidecar-a
-      image: busybox:1.36
+      image: ${POD_IMAGE}
       command: ["sleep", "3600"]
     - name: sidecar-b
-      image: busybox:1.36
+      image: ${POD_IMAGE}
       command: ["sleep", "3600"]
 EOF
 POD_CREATED=1
