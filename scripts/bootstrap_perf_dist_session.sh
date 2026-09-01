@@ -289,11 +289,15 @@ measurement_running() {
 }
 
 start_tmux_session() {
-  if tmux has-session -t "$SESSION" 2>/dev/null; then
-    if measurement_running; then
-      log "tmux session ${SESSION} already running measure_perf_distributions.sh — reusing"
-      return 0
+  if measurement_running; then
+    log "measure_perf_distributions.sh already running — not starting a duplicate"
+    if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+      log "note: measurement is running outside tmux session ${SESSION}"
     fi
+    return 0
+  fi
+
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
     log "tmux session ${SESSION} exists but measurement not running — replacing session"
     tmux kill-session -t "$SESSION" 2>/dev/null || true
   fi
