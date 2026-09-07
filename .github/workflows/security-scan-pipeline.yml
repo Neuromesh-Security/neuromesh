@@ -190,8 +190,25 @@ jobs:
           go mod download
           go mod verify
 
+      # go install verifies the module against sum.golang.org. That checksum DB
+      # can fail with an HTTP/2 INTERNAL_ERROR while fetching a tile, e.g.:
+      #   verifying module: ... reading https://sum.golang.org/tile/...:
+      #   stream error: stream ID N; INTERNAL_ERROR; received from peer
+      # That is a checksum-db / network flake — not a gosec finding or a Go
+      # module conflict. One automatic retry absorbs the common single-failure
+      # case (PR #189 investigation after main merge).
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@${{ env.GOSEC_VERSION }}
+        run: |
+          set +e
+          go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::gosec install failed (rc=${rc}); retrying once (sum.golang.org/network flake)"
+            go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+            rc=$?
+          fi
+          set -e
+          exit "$rc"
 
       - name: Run gosec
         working-directory: ${{ matrix.module }}
