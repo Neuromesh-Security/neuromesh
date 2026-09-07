@@ -211,6 +211,7 @@ Pre-commit (local): [#156](https://github.com/Neuromesh-Security/neuromesh/pull/
 | **Wasm policy hot-path — deferred scaffold** | [`wasm_policy.rs`](../apps/agent-ebpf-sensor/src/) scaffold; labeled intentional deferred work ([#153](https://github.com/Neuromesh-Security/neuromesh/pull/153); threat-model out-of-scope) |
 | **LotL detection — partial** | Allowlisted exec **env-hijack** signals only (`LD_PRELOAD`, `LD_LIBRARY_PATH`, …) via [#140](https://github.com/Neuromesh-Security/neuromesh/issues/140) / [#141](https://github.com/Neuromesh-Security/neuromesh/pull/141); **not** comprehensive LotL / T1218 coverage ([`docs/threat-model.md`](threat-model.md) LotL residual `#TBD`) |
 | **CodeQL security suite not configured (evaluated, deferred)** | CodeQL here = Code Quality only; security SAST = gosec + Semgrep + cargo-audit/deny + Trivy. Security suite deemed **low marginal value** — see §3.3. |
+| **Agent image PCRE2 Trivy Notes (base library, not product code)** | `libpcre2-8-0` on `debian:bookworm-slim` (transitive; agent ENTRYPOINT is Rust and never calls PCRE2). **#138/#139** are 32-bit-only → **N/A** (published images are x86_64/amd64 only). **#135/#137/#140** require attacker-controlled regex / invalid-UTF match APIs we do not invoke — accepted as base-image residual; Dockerfile explicitly upgrades `libpcre2-8-0` from bookworm security on rebuild (Debian `10.42-1+deb12u1` for CVE-2026-86145). Tracking: [#190](https://github.com/Neuromesh-Security/neuromesh/issues/190). |
 
 ---
 
