@@ -54,8 +54,12 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/agent-ebpf-sensor"]
           env:
+            # Issue #193: global warn keeps dependency crates quiet; raise only
+            # neuromesh::policy_sync so PE sync diagnostics (incl. HTTP 429
+            # throttle warn + apply/armed info) stay visible without a live
+            # RUST_LOG override. EnvFilter: target=info includes warn/error.
             - name: RUST_LOG
-              value: info
+              value: "warn,neuromesh::policy_sync=info"
             - name: NEUROMESH_NODE_NAME
               valueFrom:
                 fieldRef:

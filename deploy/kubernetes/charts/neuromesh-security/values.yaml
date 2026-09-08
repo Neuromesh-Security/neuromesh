@@ -29,7 +29,8 @@ agent:
       cpu: 500m
       memory: 512Mi
   env:
-    rustLog: info
+    # Issue #193 — keep in sync with deploy/kubernetes/neuromesh-agent.yaml
+    rustLog: "warn,neuromesh::policy_sync=info"
     policyEngineUrl: http://neuromesh-zt-policy-engine.neuromesh-system.svc.cluster.local:8080
     policyBundleTokenFile: /etc/neuromesh/policy-bundle/token
     policyBundlePublicKeyPath: /etc/neuromesh/policy-bundle-pubkey/bundle.pub
