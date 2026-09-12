@@ -195,18 +195,27 @@ jobs:
       #   verifying module: ... reading https://sum.golang.org/tile/...:
       #   stream error: stream ID N; INTERNAL_ERROR; received from peer
       # That is a checksum-db / network flake — not a gosec finding or a Go
-      # module conflict. One automatic retry absorbs the common single-failure
-      # case (PR #189 investigation after main merge).
+      # module conflict (Issue #197 / historical run 34125820469 on 9e4348e).
+      # Note: tip 20a0d707 Security Scan failures were Trivy FS (Next.js), not
+      # gosec — gosec already succeeded there after the single-retry land.
+      # Three attempts + backoff absorb rare double flakes without masking
+      # persistent install breakage.
       - name: Install gosec
         run: |
           set +e
-          go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
-          rc=$?
-          if [ "$rc" -ne 0 ]; then
-            echo "::warning::gosec install failed (rc=${rc}); retrying once (sum.golang.org/network flake)"
+          attempts=3
+          rc=1
+          for i in $(seq 1 "$attempts"); do
             go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
             rc=$?
-          fi
+            if [ "$rc" -eq 0 ]; then
+              break
+            fi
+            if [ "$i" -lt "$attempts" ]; then
+              echo "::warning::gosec install failed (attempt=${i}/${attempts} rc=${rc}); retrying after backoff (sum.golang.org/network flake)"
+              sleep $((i * 5))
+            fi
+          done
           set -e
           exit "$rc"
 
