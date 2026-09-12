@@ -19,6 +19,11 @@ FROM python:3.12-slim-bookworm
 # Runtime stage also inherits vulnerable pip from the base image; upgrade in
 # place so the final image does not ship pip 25.0.1 even if /usr/local/bin
 # copy order changes later.
+#
+# Trivy #146/#147/#148 (msgpack / setuptools under target "Python"): these are
+# packages vendored inside pip itself (pip/_vendor/vendor.txt), NOT app deps
+# from requirements.txt. Same residual class as agent PCRE2 — not independently
+# bumpable until a pip release vendors patched trees. See Issue #201.
 RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends librdkafka1 \
