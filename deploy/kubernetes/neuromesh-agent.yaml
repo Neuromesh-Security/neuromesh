@@ -49,8 +49,9 @@ spec:
       containers:
         - name: agent
           # CI publishes neuromesh-agent-ebpf-sensor (:ci / :<sha>), not agent-ebpf-sensor:0.1.0.
-          # Digest from main CI run 31609003980 (SHA 62062bbd — includes #109+#111 agent sync).
-          image: ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:413424ce5ec990e97b58014daa05ae8addab27de5afcac74904eb28fdcd5de2d
+          # Digest from main CI after #191 (SHA 3e462e3 / run 34152176424) — Cosign-signed
+          # linux/amd64. Issue #192 refreshes stale @sha256:413424ce… pin.
+          image: ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:b46687a2ca36fae234429507a5c7c7d4c6f8af33974609c7691b5ee3574bcd48
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/agent-ebpf-sensor"]
           env:
