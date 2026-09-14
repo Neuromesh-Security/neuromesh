@@ -157,6 +157,35 @@ bytecode-manifest.sig omitted; agent will fail-closed at startup"; \
     fi
 
 # ------------------------------------------------------------------------------
+# attestation-gate — fail the image build if signed manifest digests do not
+# match include_bytes! payloads (CI verify-blob alone does not catch this).
+# Skipped when .sig is absent (unsigned PR/fork builds).
+# ------------------------------------------------------------------------------
+FROM attestation AS attestation-gate
+
+COPY deploy/kubernetes/ci-cosign.pub /etc/neuromesh/cosign/cosign.pub
+RUN mkdir -p /etc/neuromesh \
+    && cp -a /attestation/bytecode-manifest.json /etc/neuromesh/bytecode-manifest.json \
+    && if [ -f /attestation/bytecode-manifest.sig ]; then \
+         cp -a /attestation/bytecode-manifest.sig /etc/neuromesh/bytecode-manifest.sig; \
+       fi
+
+ENV RUST_LOG=info \
+    NEUROMESH_ATTESTATION_ONLY=1 \
+    NEUROMESH_BYTECODE_MANIFEST_PATH=/etc/neuromesh/bytecode-manifest.json \
+    NEUROMESH_BYTECODE_MANIFEST_SIG_PATH=/etc/neuromesh/bytecode-manifest.sig \
+    NEUROMESH_COSIGN_PUBLIC_KEY_PATH=/etc/neuromesh/cosign/cosign.pub
+
+RUN set -eu; \
+    if [ -s /etc/neuromesh/bytecode-manifest.sig ]; then \
+      /build/target/release/agent-ebpf-sensor; \
+      echo "attestation-gate: embedded digests match signed manifest"; \
+    else \
+      echo "attestation-gate: no .sig (non-publish build) — skip embedded-digest self-check"; \
+    fi; \
+    touch /attestation-gate.ok
+
+# ------------------------------------------------------------------------------
 # runtime — debian:bookworm-slim matches builder glibc (2.36)
 # ------------------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
@@ -172,6 +201,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libelf1 libpcre2-8-0 \
     && rm -rf /var/lib/apt/lists/*
 
+# Depend on attestation-gate so signed builds cannot skip the digest self-check.
+COPY --from=attestation-gate /attestation-gate.ok /attestation-gate.ok
+
 COPY --from=agent-builder \
     /build/target/release/agent-ebpf-sensor \
     /usr/local/bin/agent-ebpf-sensor
@@ -180,6 +212,8 @@ COPY --from=agent-builder \
 COPY --from=attestation /attestation/ /etc/neuromesh/
 
 # Public key is mounted at runtime (see deploy/kubernetes/neuromesh-agent.yaml).
+# Manifest/sig paths come from this image ENV — DaemonSet must not override them
+# with host/ConfigMap paths (stale-override class of digest mismatch).
 ENV RUST_LOG=info \
     NEUROMESH_BYTECODE_MANIFEST_PATH=/etc/neuromesh/bytecode-manifest.json \
     NEUROMESH_BYTECODE_MANIFEST_SIG_PATH=/etc/neuromesh/bytecode-manifest.sig \

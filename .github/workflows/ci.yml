@@ -664,6 +664,14 @@ jobs:
             --insecure-ignore-tlog=true \
             ./bytecode-manifest.json
           echo "bytecode-manifest.json Cosign verify-blob OK"
+          # Fail-closed: digests in the signed manifest must match include_bytes!
+          # payloads inside the binary (verify-blob alone does not check this).
+          docker run --rm --entrypoint /usr/local/bin/agent-ebpf-sensor \
+            -e NEUROMESH_ATTESTATION_ONLY=1 \
+            -e RUST_LOG=info \
+            -v "${{ github.workspace }}/deploy/kubernetes/ci-cosign.pub:/etc/neuromesh/cosign/cosign.pub:ro" \
+            "${IMAGE}"
+          echo "bytecode embedded-digest self-check OK (NEUROMESH_ATTESTATION_ONLY=1)"
 
   # ---------------------------------------------------------------------------
   # Required-check gates (branch protection points here)

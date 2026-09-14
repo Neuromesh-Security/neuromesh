@@ -82,16 +82,13 @@ pub struct EnforcementArmed {
     pub _correlator: Option<tokio::task::JoinHandle<()>>,
 }
 
-pub async fn attest_and_load_enforcement(
-    shutdown: CancellationToken,
-) -> Result<EnforcementLoaded, anyhow::Error> {
+/// Verify Cosign-signed bytecode manifest against `include_bytes!` payloads only.
+///
+/// Used by `NEUROMESH_ATTESTATION_ONLY=1` (Dockerfile/CI self-check) so a published
+/// image cannot ship a verify-blob-OK manifest whose digests do not match the
+/// embedded enforcement ELF — the failure mode seen live on `@sha256:b46687a2…`.
+pub fn attest_bytecode_only() -> Result<(), anyhow::Error> {
     let enforcement_bpf_data = include_bytes!(env!("NEUROMESH_EBPF_ENFORCEMENT_BYTECODE"));
-
-    // Issue #44 Phase 1: Cosign-signed bytecode manifest verification.
-    // Gates the *entire* BPF load sequence (C objects + LSM enforcement ELF).
-    // Must run before any EbpfLoader::load / Ebpf::load / load_with_map_pinning.
-    // Tamper-evidence only — see bytecode_attestation module docs. Fail-closed:
-    // no skip flag, no partial load, no unverified fallback.
     bytecode_attestation::verify_startup(&[
         EmbeddedArtifact {
             name: "sys_exec.bpf.o",
@@ -111,6 +108,20 @@ pub async fn attest_and_load_enforcement(
          see error for specific artifact/check that failed",
     )?;
     startup_sequence::log_attestation_ok();
+    Ok(())
+}
+
+pub async fn attest_and_load_enforcement(
+    shutdown: CancellationToken,
+) -> Result<EnforcementLoaded, anyhow::Error> {
+    // Issue #44 Phase 1: Cosign-signed bytecode manifest verification.
+    // Gates the *entire* BPF load sequence (C objects + LSM enforcement ELF).
+    // Must run before any EbpfLoader::load / Ebpf::load / load_with_map_pinning.
+    // Tamper-evidence only — see bytecode_attestation module docs. Fail-closed:
+    // no skip flag, no partial load, no unverified fallback.
+    attest_bytecode_only()?;
+
+    let enforcement_bpf_data = include_bytes!(env!("NEUROMESH_EBPF_ENFORCEMENT_BYTECODE"));
 
     // BTF is fetched once and used for two purposes: (1) resolving the three
     // kernel-specific struct field offsets the LSM enforcement hook needs
