@@ -139,14 +139,26 @@ kubectl -n neuromesh-system create secret generic neuromesh-spiffe-trust-bundle 
 
 5. **Cosign pubkey** (agent bytecode + GHCR image attestation):
 
-Use **`deploy/kubernetes/ci-cosign.pub`** — the CI static key (`secrets.COSIGN_PUBLIC_KEY`)
-that signed the GHCR agent bytecode manifest. **Not** `~/neuromesh-attest-lab/cosign/cosign.pub`
-(that key is for locally-built binaries only; the agent correctly fail-closes on a mismatch).
+`deploy/kubernetes/neuromesh-agent.yaml` now **includes** Secret
+`neuromesh-cosign-pubkey` (contents of `deploy/kubernetes/ci-cosign.pub`).
+A full `kubectl apply -f deploy/kubernetes/neuromesh-agent.yaml` creates
+Namespace + Secret + DaemonSet with the Cosign volume mount.
+
+**Do not** use `kubectl set image` alone to roll the agent: it never creates
+volumes/mounts/secrets. The image does not bake `cosign.pub`; without the
+mount the agent CrashLoops with
+`Cosign public key missing at /etc/neuromesh/cosign/cosign.pub`.
+
+Optional manual recreate (same PEM):
 
 ```bash
 kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
-  --from-file=cosign.pub=deploy/kubernetes/ci-cosign.pub
+  --from-file=cosign.pub=deploy/kubernetes/ci-cosign.pub \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
+
+Never mount `~/neuromesh-attest-lab/cosign/cosign.pub` against GHCR images
+(that key is for locally-built binaries only; the agent fail-closes on mismatch).
 
 ### Image tags (confirmed fresh for live verify)
 
@@ -155,7 +167,7 @@ CI on `main` publishes **`:ci` / `:<fullsha>`** (and Cosign digests) — **not**
 | Component | Confirmed-fresh reference (post-#109 signing + #111 temporal, SHA `62062bbd…`) |
 |-----------|--------------------------------------------------------------------------------|
 | PE | `ghcr.io/neuromesh-security/neuromesh-zt-policy-engine@sha256:eceb694cc12409a935ca3d83a9ac856b0f3e4461131c63b193142aa828572255` |
-| Agent | `ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:413424ce5ec990e97b58014daa05ae8addab27de5afcac74904eb28fdcd5de2d` |
+| Agent | `ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:b46687a2ca36fae234429507a5c7c7d4c6f8af33974609c7691b5ee3574bcd48` |
 | Admission webhook | `ghcr.io/neuromesh-security/neuromesh-k8s-admission-webhook@sha256:e3997b4c42763c2a2b488b3b0246e8bddaa071ba5d1328d6abd5ea118370e273` |
 
 Manifests on this branch pin those digests. Do **not** live-test with a stale `:0.1.0` pin for the webhook (that tag is never published by CI).

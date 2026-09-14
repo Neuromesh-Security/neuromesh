@@ -6,7 +6,8 @@ images:
   agent:
     repository: ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor
     tag: ""
-    digest: sha256:413424ce5ec990e97b58014daa05ae8addab27de5afcac74904eb28fdcd5de2d
+    # Issue #192 — keep in sync with deploy/kubernetes/neuromesh-agent.yaml
+    digest: sha256:b46687a2ca36fae234429507a5c7c7d4c6f8af33974609c7691b5ee3574bcd48
     pullPolicy: IfNotPresent
   policyEngine:
     repository: ghcr.io/neuromesh-security/neuromesh-zt-policy-engine
@@ -35,8 +36,7 @@ agent:
     policyBundleTokenFile: /etc/neuromesh/policy-bundle/token
     policyBundlePublicKeyPath: /etc/neuromesh/policy-bundle-pubkey/bundle.pub
     cosignPublicKeyPath: /etc/neuromesh/cosign/cosign.pub
-    bytecodeManifestPath: /etc/neuromesh/bytecode-manifest.json
-    bytecodeManifestSigPath: /etc/neuromesh/bytecode-manifest.sig
+    # bytecodeManifestPath/SigPath: not injected — image ENV is SoT for baked pair.
     identityCorrelator: "1"
     cgroupRoot: /host/sys/fs/cgroup
     pathDenyKeyBytes: ""
@@ -160,6 +160,8 @@ secrets:
     bundlePem: ""
   cosignPubkey:
     name: neuromesh-cosign-pubkey
+    # Empty → chart files/ci-cosign.pub (same PEM as deploy/kubernetes/ci-cosign.pub).
+    # Set only to override the CI verify key (never the lab attest-lab key for GHCR).
     cosignPub: ""
   admissionWebhookTls:
     name: neuromesh-admission-webhook-tls

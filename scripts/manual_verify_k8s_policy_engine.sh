@@ -41,7 +41,7 @@ PE_IMAGE_DEFAULT="ghcr.io/neuromesh-security/neuromesh-zt-policy-engine@sha256:e
 PE_IMAGE="${NEUROMESH_PE_IMAGE:-$PE_IMAGE_DEFAULT}"
 
 # Agent image from the same main publish wave (CI name is neuromesh-agent-ebpf-sensor).
-AGENT_IMAGE_DEFAULT="ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:413424ce5ec990e97b58014daa05ae8addab27de5afcac74904eb28fdcd5de2d"
+AGENT_IMAGE_DEFAULT="ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:b46687a2ca36fae234429507a5c7c7d4c6f8af33974609c7691b5ee3574bcd48"
 AGENT_IMAGE="${NEUROMESH_AGENT_IMAGE:-$AGENT_IMAGE_DEFAULT}"
 
 PASS_COUNT=0
@@ -73,7 +73,7 @@ echo "AGENT_IMAGE=$AGENT_IMAGE"
 CI_COSIGN_PUB="$ROOT/deploy/kubernetes/ci-cosign.pub"
 COSIGN_PUB="${NEUROMESH_COSIGN_PUB_FILE:-$CI_COSIGN_PUB}"
 case "$COSIGN_PUB" in
-  *neuromesh-attest-lab*|"$HOME/cosign.pub"|"$HOME/neuromesh-attest-lab/cosign/cosign.pub")
+  *neuromesh-attest-lab*|"$HOME/cosign.pub")
     fail "refusing lab Cosign key at $COSIGN_PUB — GHCR images need deploy/kubernetes/ci-cosign.pub (CI COSIGN_PUBLIC_KEY), not the local attest-lab key"
     ;;
 esac
@@ -192,8 +192,9 @@ if command -v jq >/dev/null; then
 else
   grep -q '"schema_version"[[:space:]]*:[[:space:]]*3' "$BODY" \
     || fail "schema_version 3 not found in body"
-  grep -q 'not_before' "$BODY" && grep -q 'not_after' "$BODY" \
-    || fail "not_before/not_after missing (install jq for stricter check)"
+  if ! grep -q 'not_before' "$BODY" || ! grep -q 'not_after' "$BODY"; then
+    fail "not_before/not_after missing (install jq for stricter check)"
+  fi
   pass "schema_version 3 + temporal fields (grep)"
 fi
 

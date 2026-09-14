@@ -52,10 +52,7 @@ spec:
                   fieldPath: spec.nodeName
             - name: NEUROMESH_COSIGN_PUBLIC_KEY_PATH
               value: {{ .Values.agent.env.cosignPublicKeyPath | quote }}
-            - name: NEUROMESH_BYTECODE_MANIFEST_PATH
-              value: {{ .Values.agent.env.bytecodeManifestPath | quote }}
-            - name: NEUROMESH_BYTECODE_MANIFEST_SIG_PATH
-              value: {{ .Values.agent.env.bytecodeManifestSigPath | quote }}
+            # bytecode manifest/sig: image ENV only (do not override from values)
             - name: NEUROMESH_POLICY_BUNDLE_TOKEN_FILE
               value: {{ .Values.agent.env.policyBundleTokenFile | quote }}
             - name: NEUROMESH_ZT_POLICY_ENGINE_URL

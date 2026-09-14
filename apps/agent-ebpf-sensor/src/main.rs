@@ -10,6 +10,11 @@ use agent_ebpf_sensor::startup_sequence;
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     startup::init_tracing();
+    // Dockerfile/CI gate: verify signed manifest digests match embedded BPF
+    // bytes, then exit — no BTF/BPF/Privileged requirements.
+    if std::env::var("NEUROMESH_ATTESTATION_ONLY").as_deref() == Ok("1") {
+        return startup::attest_bytecode_only();
+    }
     startup_sequence::log_initializing();
 
     let shutdown = tokio_util::sync::CancellationToken::new();
