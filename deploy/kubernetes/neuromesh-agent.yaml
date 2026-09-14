@@ -97,11 +97,10 @@ spec:
             # under deploy/ today.)
             - name: NEUROMESH_COSIGN_PUBLIC_KEY_PATH
               value: /etc/neuromesh/cosign/cosign.pub
-            - name: NEUROMESH_BYTECODE_MANIFEST_PATH
-              value: /etc/neuromesh/bytecode-manifest.json
-            - name: NEUROMESH_BYTECODE_MANIFEST_SIG_PATH
-              value: /etc/neuromesh/bytecode-manifest.sig
-            # Issue #55: shared bearer for GET /v1/policy-bundle (Secret mount).
+            # Manifest/sig paths: intentionally NOT set here — use image ENV
+            # (/etc/neuromesh/bytecode-manifest.{json,sig} baked into the image).
+            # Do not override from DaemonSet/ConfigMap/host paths (stale-override
+            # class). Cosign pubkey remains a mounted Secret.
             - name: NEUROMESH_POLICY_BUNDLE_TOKEN_FILE
               value: /etc/neuromesh/policy-bundle/token
             # Phase 1 policy sync — ClusterIP DNS for zt-policy-engine.

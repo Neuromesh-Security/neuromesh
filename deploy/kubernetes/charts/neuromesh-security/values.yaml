@@ -36,8 +36,7 @@ agent:
     policyBundleTokenFile: /etc/neuromesh/policy-bundle/token
     policyBundlePublicKeyPath: /etc/neuromesh/policy-bundle-pubkey/bundle.pub
     cosignPublicKeyPath: /etc/neuromesh/cosign/cosign.pub
-    bytecodeManifestPath: /etc/neuromesh/bytecode-manifest.json
-    bytecodeManifestSigPath: /etc/neuromesh/bytecode-manifest.sig
+    # bytecodeManifestPath/SigPath: not injected — image ENV is SoT for baked pair.
     identityCorrelator: "1"
     cgroupRoot: /host/sys/fs/cgroup
     pathDenyKeyBytes: ""

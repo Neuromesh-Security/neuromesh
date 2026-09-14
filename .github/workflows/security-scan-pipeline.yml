@@ -358,11 +358,32 @@ jobs:
           exit 1
 
       - name: Generate SBOM (SPDX)
+        id: sbom
+        continue-on-error: true
         uses: anchore/sbom-action@v0
         with:
           image: neuromesh-zt-policy-engine:ci
           format: spdx-json
           output-file: neuromesh-zt-policy-engine-sbom.spdx.json
+
+      # anchore/sbom-action downloads Syft from GitHub Releases; intermittent
+      # HTTP 504 → empty tag → job fails in ~seconds (not a real CVE finding).
+      - name: Generate SBOM (SPDX) retry after Syft download flake
+        id: sbom-retry
+        if: steps.sbom.outcome == 'failure'
+        uses: anchore/sbom-action@v0
+        with:
+          image: neuromesh-zt-policy-engine:ci
+          format: spdx-json
+          output-file: neuromesh-zt-policy-engine-sbom.spdx.json
+
+      - name: Require SBOM success
+        if: |
+          steps.sbom.outcome != 'success' &&
+          steps.sbom-retry.outcome != 'success'
+        run: |
+          echo "::error::SBOM generation failed after retry (Syft download / anchore/sbom-action)."
+          exit 1
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
@@ -423,6 +444,8 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
+        id: docker-build
+        continue-on-error: true
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -432,12 +455,51 @@ jobs:
           cache-from: type=gha,scope=neuromesh-agent-ebpf-sensor
           cache-to: type=gha,mode=max,scope=neuromesh-agent-ebpf-sensor
 
+      - name: Build Docker image (retry after registry timeout)
+        id: docker-build-retry
+        if: steps.docker-build.outcome == 'failure'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/agent-ebpf-sensor/Dockerfile
+          tags: neuromesh-agent-ebpf-sensor:ci
+          load: true
+          cache-from: type=gha,scope=neuromesh-agent-ebpf-sensor
+          cache-to: type=gha,mode=max,scope=neuromesh-agent-ebpf-sensor
+
+      - name: Require Docker image build success
+        if: |
+          steps.docker-build.outcome != 'success' &&
+          steps.docker-build-retry.outcome != 'success'
+        run: |
+          echo "::error::neuromesh-agent-ebpf-sensor Docker build failed after retry."
+          exit 1
+
       - name: Generate SBOM (SPDX)
+        id: sbom
+        continue-on-error: true
         uses: anchore/sbom-action@v0
         with:
           image: neuromesh-agent-ebpf-sensor:ci
           format: spdx-json
           output-file: neuromesh-agent-ebpf-sensor-sbom.spdx.json
+
+      - name: Generate SBOM (SPDX) retry after Syft download flake
+        id: sbom-retry
+        if: steps.sbom.outcome == 'failure'
+        uses: anchore/sbom-action@v0
+        with:
+          image: neuromesh-agent-ebpf-sensor:ci
+          format: spdx-json
+          output-file: neuromesh-agent-ebpf-sensor-sbom.spdx.json
+
+      - name: Require SBOM success
+        if: |
+          steps.sbom.outcome != 'success' &&
+          steps.sbom-retry.outcome != 'success'
+        run: |
+          echo "::error::SBOM generation failed after retry (Syft download / anchore/sbom-action). Unrelated to agent Cosign Secret wiring."
+          exit 1
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
@@ -469,7 +531,7 @@ jobs:
           skip-setup-trivy: true
 
       - name: Upload Trivy SARIF
-        if: always()
+        if: hashFiles('trivy-neuromesh-agent-ebpf-sensor.sarif') != ''
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-neuromesh-agent-ebpf-sensor.sarif
