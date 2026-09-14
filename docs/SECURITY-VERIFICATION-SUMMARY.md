@@ -120,7 +120,7 @@ Current engineering-grade milestone is **`v0.1.0-core`**. The project is **solo-
 
 | Image | Digest pin (manifests / chart values) |
 |-------|----------------------------------------|
-| Agent | `ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:b46687a2ca36fae234429507a5c7c7d4c6f8af33974609c7691b5ee3574bcd48` |
+| Agent | `ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:bcb82764ca020ff6d611f3775950b8c17153ad5d4ae178aa7de9fff2b0bcc368` |
 | PE | `ghcr.io/neuromesh-security/neuromesh-zt-policy-engine@sha256:eceb694cc12409a935ca3d83a9ac856b0f3e4461131c63b193142aa828572255` |
 | Admission webhook | `ghcr.io/neuromesh-security/neuromesh-k8s-admission-webhook@sha256:e3997b4c42763c2a2b488b3b0246e8bddaa071ba5d1328d6abd5ea118370e273` |
 
