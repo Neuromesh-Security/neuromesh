@@ -161,6 +161,8 @@ secrets:
     bundlePem: ""
   cosignPubkey:
     name: neuromesh-cosign-pubkey
+    # Empty → chart files/ci-cosign.pub (same PEM as deploy/kubernetes/ci-cosign.pub).
+    # Set only to override the CI verify key (never the lab attest-lab key for GHCR).
     cosignPub: ""
   admissionWebhookTls:
     name: neuromesh-admission-webhook-tls

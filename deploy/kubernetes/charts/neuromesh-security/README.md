@@ -4,7 +4,7 @@ Production Helm packaging of the existing manifests in `deploy/kubernetes/` and 
 
 ## Inventory mapped into templates
 
-- `neuromesh-agent.yaml` -> `templates/agent.yaml` (DaemonSet + ServiceAccount)
+- `neuromesh-agent.yaml` -> `templates/agent.yaml` (DaemonSet + ServiceAccount) + `templates/cosign-pubkey-secret.yaml` (CI `ci-cosign.pub`, always when `agent.enabled`)
 - `neuromesh-agent-correlator-rbac.yaml` -> `templates/agent-correlator-rbac.yaml`
 - `neuromesh-zt-policy-engine-deployment.yaml` -> `templates/policy-engine.yaml` (Deployment + ServiceAccount)
 - `neuromesh-zt-policy-engine-service.yaml` -> `templates/policy-engine-service.yaml`
@@ -17,7 +17,7 @@ Production Helm packaging of the existing manifests in `deploy/kubernetes/` and 
 - `admission/neuromesh-admission-webhook-cert-manager.yaml` -> `templates/admission-webhook-cert-manager.yaml` (when `certManager.enabled`)
 - `neuromesh-zt-policy-engine-networkpolicy.yaml` -> `templates/policy-engine-networkpolicy.yaml`
 
-Associated Secrets are represented in `templates/secrets.yaml` (disabled by default to preserve current operational workflow).
+Associated Secrets for PE/token/SPIFFE/TLS are in `templates/secrets.yaml` (disabled by default via `secrets.create=false`). The agent Cosign verify pubkey Secret is **always** rendered by `templates/cosign-pubkey-secret.yaml` when `agent.enabled` (defaults to chart `files/ci-cosign.pub`).
 
 ## Install order (required)
 

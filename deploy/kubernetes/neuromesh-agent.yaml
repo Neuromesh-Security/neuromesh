@@ -7,6 +7,29 @@ metadata:
     app.kubernetes.io/name: neuromesh
     app.kubernetes.io/part-of: neuromesh
 ---
+# CI Cosign static public key (secrets.COSIGN_PUBLIC_KEY) — same keypair as
+# GHCR image sign + bytecode-manifest sign-blob. Public material; shipped so
+# `kubectl apply -f neuromesh-agent.yaml` is self-contained. Image does NOT
+# bake this file (fail-closed at /etc/neuromesh/cosign/cosign.pub). Do NOT
+# replace with ~/neuromesh-attest-lab keys (GHCR bytecode will fail-closed).
+# Source of truth on disk: deploy/kubernetes/ci-cosign.pub
+apiVersion: v1
+kind: Secret
+metadata:
+  name: neuromesh-cosign-pubkey
+  namespace: neuromesh-system
+  labels:
+    app.kubernetes.io/name: neuromesh
+    app.kubernetes.io/part-of: neuromesh
+    app.kubernetes.io/component: cosign-pubkey
+type: Opaque
+stringData:
+  cosign.pub: |
+    -----BEGIN PUBLIC KEY-----
+    MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQnb8XZOOPgUSDI8tQjLu0u1e/5eY
+    ducqV7wDm9bsY4Q9Q0hG4p4SHFZ/Lbz+5OkLhwtg6pI0FqmOT7QgNzWwVg==
+    -----END PUBLIC KEY-----
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -179,11 +202,10 @@ spec:
             type: Directory
         - name: tmp
           emptyDir: {}
-        # CI Cosign static public key (secrets.COSIGN_PUBLIC_KEY) — same
-        # keypair as GHCR image sign + bytecode-manifest sign-blob.
-        # Use deploy/kubernetes/ci-cosign.pub, NOT the lab attest-lab key:
-        #   kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
-        #     --from-file=cosign.pub=deploy/kubernetes/ci-cosign.pub
+        # Secret neuromesh-cosign-pubkey is defined at the top of this file
+        # (ci-cosign.pub). Full `kubectl apply -f` required — `kubectl set image`
+        # does not create volumes/mounts/secrets and will CrashLoop with
+        # "Cosign public key missing at /etc/neuromesh/cosign/cosign.pub".
         - name: cosign-pubkey
           secret:
             secretName: neuromesh-cosign-pubkey

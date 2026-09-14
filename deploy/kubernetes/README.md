@@ -139,14 +139,26 @@ kubectl -n neuromesh-system create secret generic neuromesh-spiffe-trust-bundle 
 
 5. **Cosign pubkey** (agent bytecode + GHCR image attestation):
 
-Use **`deploy/kubernetes/ci-cosign.pub`** — the CI static key (`secrets.COSIGN_PUBLIC_KEY`)
-that signed the GHCR agent bytecode manifest. **Not** `~/neuromesh-attest-lab/cosign/cosign.pub`
-(that key is for locally-built binaries only; the agent correctly fail-closes on a mismatch).
+`deploy/kubernetes/neuromesh-agent.yaml` now **includes** Secret
+`neuromesh-cosign-pubkey` (contents of `deploy/kubernetes/ci-cosign.pub`).
+A full `kubectl apply -f deploy/kubernetes/neuromesh-agent.yaml` creates
+Namespace + Secret + DaemonSet with the Cosign volume mount.
+
+**Do not** use `kubectl set image` alone to roll the agent: it never creates
+volumes/mounts/secrets. The image does not bake `cosign.pub`; without the
+mount the agent CrashLoops with
+`Cosign public key missing at /etc/neuromesh/cosign/cosign.pub`.
+
+Optional manual recreate (same PEM):
 
 ```bash
 kubectl -n neuromesh-system create secret generic neuromesh-cosign-pubkey \
-  --from-file=cosign.pub=deploy/kubernetes/ci-cosign.pub
+  --from-file=cosign.pub=deploy/kubernetes/ci-cosign.pub \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
+
+Never mount `~/neuromesh-attest-lab/cosign/cosign.pub` against GHCR images
+(that key is for locally-built binaries only; the agent fail-closes on mismatch).
 
 ### Image tags (confirmed fresh for live verify)
 
