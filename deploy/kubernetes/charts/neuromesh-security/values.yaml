@@ -7,7 +7,7 @@ images:
     repository: ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor
     tag: ""
     # Issue #192 — keep in sync with deploy/kubernetes/neuromesh-agent.yaml
-    digest: sha256:b46687a2ca36fae234429507a5c7c7d4c6f8af33974609c7691b5ee3574bcd48
+    digest: sha256:bcb82764ca020ff6d611f3775950b8c17153ad5d4ae178aa7de9fff2b0bcc368
     pullPolicy: IfNotPresent
   policyEngine:
     repository: ghcr.io/neuromesh-security/neuromesh-zt-policy-engine

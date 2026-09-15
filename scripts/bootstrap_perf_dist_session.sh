@@ -36,7 +36,7 @@ ENFORCEMENT="${REPO}/apps/agent-ebpf-sensor/ebpf/target/bpfel-unknown-none/relea
 BPF_PIN_ROOT="/sys/fs/bpf/neuromesh"
 KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
 K8S_CA="/var/lib/rancher/k3s/server/tls/server-ca.crt"
-SIGNED_POD_IMAGE="ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:b46687a2ca36fae234429507a5c7c7d4c6f8af33974609c7691b5ee3574bcd48"
+SIGNED_POD_IMAGE="ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:bcb82764ca020ff6d611f3775950b8c17153ad5d4ae178aa7de9fff2b0bcc368"
 
 log() { echo "bootstrap: $*" >&2; }
 die() { echo "bootstrap: ERROR: $*" >&2; exit 1; }

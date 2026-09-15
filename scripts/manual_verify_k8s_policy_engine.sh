@@ -41,7 +41,7 @@ PE_IMAGE_DEFAULT="ghcr.io/neuromesh-security/neuromesh-zt-policy-engine@sha256:e
 PE_IMAGE="${NEUROMESH_PE_IMAGE:-$PE_IMAGE_DEFAULT}"
 
 # Agent image from the same main publish wave (CI name is neuromesh-agent-ebpf-sensor).
-AGENT_IMAGE_DEFAULT="ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:b46687a2ca36fae234429507a5c7c7d4c6f8af33974609c7691b5ee3574bcd48"
+AGENT_IMAGE_DEFAULT="ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:bcb82764ca020ff6d611f3775950b8c17153ad5d4ae178aa7de9fff2b0bcc368"
 AGENT_IMAGE="${NEUROMESH_AGENT_IMAGE:-$AGENT_IMAGE_DEFAULT}"
 
 PASS_COUNT=0

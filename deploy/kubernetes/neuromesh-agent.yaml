@@ -72,9 +72,10 @@ spec:
       containers:
         - name: agent
           # CI publishes neuromesh-agent-ebpf-sensor (:ci / :<sha>), not agent-ebpf-sensor:0.1.0.
-          # Digest from main CI after #191 (SHA 3e462e3 / run 34152176424) — Cosign-signed
-          # linux/amd64. Issue #192 refreshes stale @sha256:413424ce… pin.
-          image: ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:b46687a2ca36fae234429507a5c7c7d4c6f8af33974609c7691b5ee3574bcd48
+          # Digest from main CI after #205 (SHA 7deca2c / run 34891983834) — Cosign-signed
+          # linux/amd64 + NEUROMESH_ATTESTATION_ONLY embedded-digest gate. Replaces
+          # confirmed-bad @sha256:b46687a2… (digest mismatch CrashLoop). Issue #192.
+          image: ghcr.io/neuromesh-security/neuromesh-agent-ebpf-sensor@sha256:bcb82764ca020ff6d611f3775950b8c17153ad5d4ae178aa7de9fff2b0bcc368
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/agent-ebpf-sensor"]
           env:
