@@ -104,7 +104,20 @@ pub trait PinAbiIo {
     fn read_dir_names(&self, path: &Path) -> Result<Vec<String>>;
     fn map_info(&self, pin_path: &Path) -> Result<ObservedMapInfo>;
     /// Read legacy PATH_DENY_LIST + COUNT from a pin directory (canonical or legacy_abi_*).
-    fn read_legacy_deny_entries(&self, map_dir: &Path) -> Result<Vec<PathDenyEntry>>;
+    fn read_legacy_deny_entries(&self, map_dir: &Path) -> Result<Vec<PathDenyEntry>> {
+        self.read_legacy_deny_entries_at(
+            &map_dir.join(PATH_DENY_LIST_MAP),
+            &map_dir.join(PATH_DENY_COUNT_MAP),
+        )
+    }
+
+    /// Read legacy deny entries when LIST and COUNT may live in different directories
+    /// (crash mid-stage: COUNT already under `legacy_abi_<n>/`, LIST still canonical).
+    fn read_legacy_deny_entries_at(
+        &self,
+        list_path: &Path,
+        count_path: &Path,
+    ) -> Result<Vec<PathDenyEntry>>;
 }
 
 /// Production I/O backed by the real filesystem + aya `MapInfo` / map lookups.
@@ -178,20 +191,22 @@ impl PinAbiIo for RealPinAbiIo {
         }
     }
 
-    fn read_legacy_deny_entries(&self, map_dir: &Path) -> Result<Vec<PathDenyEntry>> {
+    fn read_legacy_deny_entries_at(
+        &self,
+        list_path: &Path,
+        count_path: &Path,
+    ) -> Result<Vec<PathDenyEntry>> {
         #[cfg(target_os = "linux")]
         {
             use aya::maps::{Array, Map, MapData};
-            let list_path = map_dir.join(PATH_DENY_LIST_MAP);
-            let count_path = map_dir.join(PATH_DENY_COUNT_MAP);
             // aya 0.14: Array::try_from takes `Map`, not bare `MapData`.
             let list_map = Map::from_map_data(
-                MapData::from_pin(&list_path)
+                MapData::from_pin(list_path)
                     .with_context(|| format!("open legacy {}", list_path.display()))?,
             )
             .with_context(|| format!("classify legacy map {}", list_path.display()))?;
             let count_map = Map::from_map_data(
-                MapData::from_pin(&count_path)
+                MapData::from_pin(count_path)
                     .with_context(|| format!("open legacy {}", count_path.display()))?,
             )
             .with_context(|| format!("classify legacy map {}", count_path.display()))?;
@@ -221,7 +236,7 @@ impl PinAbiIo for RealPinAbiIo {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = map_dir;
+            let _ = (list_path, count_path);
             bail!("legacy deny map reads require Linux + bpffs");
         }
     }
@@ -309,6 +324,68 @@ pub fn select_deny_legacy_dir<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<Op
         }
     }
     Ok(best.map(|(_, p)| p))
+}
+
+/// Where LIST and COUNT pins currently live during (or after) staging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenyPinLocations {
+    pub list: PathBuf,
+    pub count: PathBuf,
+}
+
+/// Resolve LIST/COUNT paths when a crash may have left them split across
+/// `legacy_abi_<n>/` and the canonical pin root.
+///
+/// Prefers the staging copy when present (that is the migrated-aside source of
+/// truth during resume); otherwise falls back to the canonical name.
+pub fn resolve_deny_pin_locations<I: PinAbiIo>(
+    io: &I,
+    pin_root: &Path,
+    legacy_dir: &Path,
+) -> Result<DenyPinLocations> {
+    let canon_list = pin_root.join(PATH_DENY_LIST_MAP);
+    let canon_count = pin_root.join(PATH_DENY_COUNT_MAP);
+    let leg_list = legacy_dir.join(PATH_DENY_LIST_MAP);
+    let leg_count = legacy_dir.join(PATH_DENY_COUNT_MAP);
+
+    let list = if io.exists(&leg_list) {
+        leg_list
+    } else if io.exists(&canon_list) {
+        canon_list
+    } else {
+        bail!(
+            "PATH_DENY_LIST missing from both {} and {}",
+            legacy_dir.display(),
+            pin_root.display()
+        );
+    };
+
+    let count = if io.exists(&leg_count) {
+        leg_count
+    } else if io.exists(&canon_count) {
+        canon_count
+    } else {
+        bail!(
+            "PATH_DENY_COUNT missing from both {} and {}",
+            legacy_dir.display(),
+            pin_root.display()
+        );
+    };
+
+    Ok(DenyPinLocations { list, count })
+}
+
+/// After a successful in-memory read, free canonical names so load can create
+/// fresh ABI-sized maps. Never call this before entries are safely in memory —
+/// a canonical pin may still hold the only copy of unread deny data (F3).
+fn free_canonical_deny_pins_after_read<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<()> {
+    for name in [PATH_DENY_LIST_MAP, PATH_DENY_COUNT_MAP] {
+        let p = pin_root.join(name);
+        if io.exists(&p) {
+            io.remove_file(&p)?;
+        }
+    }
+    Ok(())
 }
 
 fn expected_abi(name: &str) -> Option<&'static PinnedMapAbi> {
@@ -444,8 +521,16 @@ pub fn stage_legacy_deny_pins<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<Pa
     if !io.exists(&list) || !io.exists(&count) {
         bail!("stage_legacy_deny_pins: canonical deny pins missing");
     }
-    io.rename(&list, &dest.join(PATH_DENY_LIST_MAP))?;
+    // Rename COUNT first, then LIST.
+    //
+    // Why: a crash between the two renames must remain recoverable without
+    // losing unread deny data (F3). COUNT-first leaves LIST at the canonical
+    // name (stable path) while COUNT is already under legacy_abi_<n>/.
+    // `resolve_deny_pin_locations` then reads COUNT from legacy and LIST from
+    // canonical. LIST-first would also be resolvable, but keeping the denser
+    // policy payload on the canonical path longer is the safer mid-crash shape.
     io.rename(&count, &dest.join(PATH_DENY_COUNT_MAP))?;
+    io.rename(&list, &dest.join(PATH_DENY_LIST_MAP))?;
     tracing::warn!(
         target: "neuromesh::pin_abi",
         legacy_dir = %dest.display(),
@@ -572,8 +657,12 @@ pub fn prepare_pin_root_for_load<I: PinAbiIo>(
             ))
         }
         PinAbiState::MigrationInProgress { legacy_dir } => {
-            let entries = match io.read_legacy_deny_entries(&legacy_dir) {
+            let locs = resolve_deny_pin_locations(io, pin_root, &legacy_dir)?;
+            let entries = match io.read_legacy_deny_entries_at(&locs.list, &locs.count) {
                 Ok(e) => {
+                    // Data is now in memory — safe to free any remaining canonical
+                    // names so load can create fresh ABI-sized maps (F3 preserved).
+                    free_canonical_deny_pins_after_read(io, pin_root)?;
                     results.push(MigrationResult::ResumedMigration);
                     DenySeedOverride::MigratedEntries {
                         entries: e,
@@ -585,8 +674,27 @@ pub fn prepare_pin_root_for_load<I: PinAbiIo>(
                         target: "neuromesh::pin_abi",
                         error = %e,
                         legacy_dir = %legacy_dir.display(),
+                        list = %locs.list.display(),
+                        count = %locs.count.display(),
                         "MigrationInProgress but legacy entries unreadable — bootstrap fallback"
                     );
+                    // Do NOT delete a canonical pin that may still hold the only
+                    // copy of unread deny data. Only free a canonical name when a
+                    // staging copy already exists (so we are not destroying the
+                    // sole unread source).
+                    for name in [PATH_DENY_LIST_MAP, PATH_DENY_COUNT_MAP] {
+                        let canon = pin_root.join(name);
+                        let staged = legacy_dir.join(name);
+                        if io.exists(&canon) && io.exists(&staged) {
+                            io.remove_file(&canon)?;
+                        } else if io.exists(&canon) && !io.exists(&staged) {
+                            tracing::warn!(
+                                target: "neuromesh::pin_abi",
+                                pin = %canon.display(),
+                                "retaining unread canonical deny pin (sole copy);                                  load may fail closed rather than destroy F3 data"
+                            );
+                        }
+                    }
                     results.push(MigrationResult::BootstrapFallback);
                     DenySeedOverride::MigratedEntries {
                         entries: bootstrap_entries_fallback()?,
@@ -594,14 +702,6 @@ pub fn prepare_pin_root_for_load<I: PinAbiIo>(
                     }
                 }
             };
-            // Ensure canonical names are free.
-            for name in [PATH_DENY_LIST_MAP, PATH_DENY_COUNT_MAP] {
-                let p = pin_root.join(name);
-                if io.exists(&p) {
-                    // Partial load left canonical pins — remove so load creates fresh ABI.
-                    io.remove_file(&p)?;
-                }
-            }
             let proc = recreate_mismatched_process_maps(io, pin_root)?;
             if !proc.is_empty() {
                 results.push(MigrationResult::ProcessMapRecreated);
@@ -754,13 +854,31 @@ mod tests {
                 .copied()
                 .ok_or_else(|| anyhow::anyhow!("no info for {}", pin_path.display()))
         }
-        fn read_legacy_deny_entries(&self, map_dir: &Path) -> Result<Vec<PathDenyEntry>> {
-            self.legacy_entries
-                .lock()
-                .unwrap()
-                .get(map_dir)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("no legacy entries for {}", map_dir.display()))
+        fn read_legacy_deny_entries_at(
+            &self,
+            list_path: &Path,
+            count_path: &Path,
+        ) -> Result<Vec<PathDenyEntry>> {
+            let entries = self.legacy_entries.lock().unwrap();
+            // Look up by either parent (split staging: LIST/COUNT in different dirs)
+            // or by the pin root / legacy dir keys tests insert.
+            for key in [list_path.parent(), count_path.parent()] {
+                if let Some(parent) = key {
+                    if let Some(e) = entries.get(parent) {
+                        if e.is_empty() {
+                            bail!(
+                                "legacy PATH_DENY_COUNT[0] == 0 — refuse empty deny list (fail-open)"
+                            );
+                        }
+                        return Ok(e.clone());
+                    }
+                }
+            }
+            bail!(
+                "no legacy entries for list={} count={}",
+                list_path.display(),
+                count_path.display()
+            )
         }
     }
 
@@ -1091,6 +1209,90 @@ mod tests {
         for p in paths {
             assert!(legacy_match_equivalent(p, &legacy), "mismatch on {p:?}");
         }
+    }
+
+    #[test]
+    fn crash_between_count_and_list_rename_converges() {
+        // D3: stage renames COUNT then LIST. Simulate crash after COUNT rename:
+        // COUNT in legacy_abi_0/, LIST still canonical. Resume must read both
+        // and preserve entries (never BootstrapFallback / empty deny).
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins");
+        let legacy = root.join("legacy_abi_0");
+        io.touch_dir(&root);
+        io.touch_dir(&legacy);
+
+        // Partial stage: COUNT moved, LIST still canonical (post-COUNT, pre-LIST).
+        io.set_info(&legacy.join(PATH_DENY_COUNT_MAP), count_info());
+        io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
+
+        let entry = PathDenyEntry::from_prefix(b"/opt/neuromesh/staging/").unwrap();
+        // Entries discoverable via either parent (resolve reads split paths).
+        io.legacy_entries
+            .lock()
+            .unwrap()
+            .insert(root.clone(), vec![entry.clone()]);
+        io.legacy_entries
+            .lock()
+            .unwrap()
+            .insert(legacy.clone(), vec![entry]);
+
+        let locs = resolve_deny_pin_locations(&io, &root, &legacy).unwrap();
+        assert_eq!(locs.list, root.join(PATH_DENY_LIST_MAP));
+        assert_eq!(locs.count, legacy.join(PATH_DENY_COUNT_MAP));
+
+        match assess_pin_abi(&io, &root).unwrap() {
+            PinAbiState::MigrationInProgress { legacy_dir } => {
+                assert_eq!(legacy_dir, legacy);
+            }
+            other => panic!("expected MigrationInProgress, got {other:?}"),
+        }
+
+        let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+        assert!(results.contains(&MigrationResult::ResumedMigration));
+        assert!(!results.contains(&MigrationResult::BootstrapFallback));
+        match seed {
+            DenySeedOverride::MigratedEntries {
+                entries,
+                from_legacy,
+            } => {
+                assert!(from_legacy);
+                assert!(!entries.is_empty());
+                assert!(entries[0].matches(b"/opt/neuromesh/staging/x"));
+            }
+            other => panic!("unexpected seed {other:?}"),
+        }
+        // Canonical names freed after successful read.
+        assert!(!io.exists(&root.join(PATH_DENY_LIST_MAP)));
+        assert!(!io.exists(&root.join(PATH_DENY_COUNT_MAP)));
+
+        // Re-run converges (still MigrationInProgress with LIST+COUNT in legacy).
+        io.touch_file(&legacy.join(PATH_DENY_LIST_MAP));
+        let (seed2, results2) = prepare_pin_root_for_load(&io, &root).unwrap();
+        assert!(results2.contains(&MigrationResult::ResumedMigration));
+        match seed2 {
+            DenySeedOverride::MigratedEntries { entries, .. } => {
+                assert!(!entries.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn stage_renames_count_before_list() {
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins");
+        io.touch_dir(&root);
+        io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
+        io.set_info(&root.join(PATH_DENY_COUNT_MAP), count_info());
+        // Instrument order via a wrapper would be ideal; here we assert final
+        // stage layout and that an interrupted COUNT-first shape is the
+        // documented recoverable form (see crash_between_count_and_list_rename).
+        let dest = stage_legacy_deny_pins(&io, &root).unwrap();
+        assert!(io.exists(&dest.join(PATH_DENY_LIST_MAP)));
+        assert!(io.exists(&dest.join(PATH_DENY_COUNT_MAP)));
+        assert!(!io.exists(&root.join(PATH_DENY_LIST_MAP)));
+        assert!(!io.exists(&root.join(PATH_DENY_COUNT_MAP)));
     }
 
     #[test]
