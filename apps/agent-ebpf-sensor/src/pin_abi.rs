@@ -896,16 +896,17 @@ mod tests {
             let entries = self.legacy_entries.lock().unwrap();
             // Look up by either parent (split staging: LIST/COUNT in different dirs)
             // or by the pin root / legacy dir keys tests insert.
-            for key in [list_path.parent(), count_path.parent()] {
-                if let Some(parent) = key {
-                    if let Some(e) = entries.get(parent) {
-                        if e.is_empty() {
-                            bail!(
-                                "legacy PATH_DENY_COUNT[0] == 0 — refuse empty deny list (fail-open)"
-                            );
-                        }
-                        return Ok(e.clone());
+            for parent in [list_path.parent(), count_path.parent()]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(e) = entries.get(parent) {
+                    if e.is_empty() {
+                        bail!(
+                            "legacy PATH_DENY_COUNT[0] == 0 — refuse empty deny list (fail-open)"
+                        );
                     }
+                    return Ok(e.clone());
                 }
             }
             bail!(
@@ -1263,7 +1264,7 @@ mod tests {
         io.legacy_entries
             .lock()
             .unwrap()
-            .insert(root.clone(), vec![entry.clone()]);
+            .insert(root.clone(), vec![entry]);
         io.legacy_entries
             .lock()
             .unwrap()
@@ -1419,14 +1420,14 @@ mod tests {
             io.legacy_entries
                 .lock()
                 .unwrap()
-                .insert(root.clone(), vec![entry.clone()]);
+                .insert(root.clone(), vec![entry]);
             io.arm_fail_after_renames(fail_at);
 
             let first = prepare_pin_root_for_load(&io, &root);
-            if first.is_ok() {
+            if let Ok(ok) = first {
                 // No further rename steps exist at this fail_at — migration already
                 // completed without hitting the armed crash point.
-                match first.unwrap() {
+                match ok {
                     (DenySeedOverride::MigratedEntries { entries, .. }, results) => {
                         assert!(!entries.is_empty());
                         assert!(
@@ -1443,16 +1444,13 @@ mod tests {
             // parent resolve may consult (root and any legacy_abi_*).
             io.disarm_crash();
             for dir in list_legacy_abi_dirs(&io, &root).unwrap() {
-                io.legacy_entries
-                    .lock()
-                    .unwrap()
-                    .insert(dir, vec![entry.clone()]);
+                io.legacy_entries.lock().unwrap().insert(dir, vec![entry]);
             }
             // If COUNT moved but LIST remains, also keep root key.
             io.legacy_entries
                 .lock()
                 .unwrap()
-                .insert(root.clone(), vec![entry.clone()]);
+                .insert(root.clone(), vec![entry]);
 
             let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
             assert!(
@@ -1530,7 +1528,7 @@ mod tests {
         // D4: seeded exhaustive property — prefix lens 1..=16, path lens 0..=40,
         // with mutations; independent oracle via legacy hardcoded / 16B window
         // matcher cross-checked with widen + map-backed matches.
-        let mut seed: u64 = 0x208_c0ff_eeu64;
+        let mut seed: u64 = 0x0002_08c0_ffee_u64;
         let mut next = || {
             // xorshift64*
             seed ^= seed << 13;
@@ -1546,8 +1544,8 @@ mod tests {
                         len: prefix_len as u32,
                         bytes: [0; LEGACY_KEY],
                     };
-                    for i in 0..prefix_len {
-                        legacy.bytes[i] = (next() as u8).wrapping_add(b'a');
+                    for byte in &mut legacy.bytes[..prefix_len] {
+                        *byte = (next() as u8).wrapping_add(b'a');
                     }
                     // Ensure printable-ish and stable for starts_with.
                     if legacy.bytes[0] == 0 {
@@ -1555,8 +1553,8 @@ mod tests {
                     }
 
                     let mut path = vec![0u8; path_len];
-                    for i in 0..path_len {
-                        path[i] = (next() as u8).wrapping_add(b'a');
+                    for byte in path.iter_mut() {
+                        *byte = (next() as u8).wrapping_add(b'a');
                     }
                     // Mutation 0: path starts with prefix (when long enough)
                     // Mutation 1: diverge at last prefix byte
