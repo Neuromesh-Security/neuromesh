@@ -60,6 +60,41 @@ On agent start, before `EbpfLoader::load`:
 
 Live proof script: `scripts/manual_verify_pin_abi_migration.sh`.
 
+## Building LEGACY_AGENT_BIN (pre-#134) for F2 live proof
+
+`scripts/manual_verify_pin_abi_migration.sh` **requires** an executable
+`LEGACY_AGENT_BIN`. Without it the script prints `F2 NOT PROVEN` and exits **2**
+(it will not fake-pass via bpftool-only map create).
+
+Build the last pre-#134 agent (parent of the 16→32 headroom commit) in a
+detached worktree:
+
+```bash
+# 526389b = feat: raise PATH_DENY_KEY_BYTES 16→32 (#134)
+# 526389b^ = last commit with 16-byte / value-20B PATH_DENY_LIST ABI
+cd /path/to/neuromesh
+git fetch origin
+git worktree add /tmp/neuromesh-legacy-526389b 526389b^
+cd /tmp/neuromesh-legacy-526389b
+cargo build -p agent-ebpf-sensor --release
+export LEGACY_AGENT_BIN=/tmp/neuromesh-legacy-526389b/target/release/agent-ebpf-sensor
+# verify: readelf/strings or run once and bpftool map show → value 20B
+```
+
+Then run the verify script with the **current** (post-#208) `AGENT_BIN` against
+an isolated pin root on a BPF-LSM host:
+
+```bash
+export AGENT_BIN=/path/to/current/target/release/agent-ebpf-sensor
+export LEGACY_AGENT_BIN=/tmp/neuromesh-legacy-526389b/target/release/agent-ebpf-sensor
+sudo -E bash scripts/manual_verify_pin_abi_migration.sh
+```
+
+The script starts the /tmp probe **only after** the legacy `nm_lsm_bprm` is
+attached, keeps the probe through migration, and asserts **exactly one**
+`nm_lsm_bprm` via `bpftool -j prog show` filtered on `"name": "nm_lsm_bprm"`.
+
+
 ## Manual recovery (production caution)
 
 > **WARNING:** Manually removing pins opens an **enforcement gap** until a new
