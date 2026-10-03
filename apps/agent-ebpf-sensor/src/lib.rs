@@ -12,6 +12,7 @@ pub mod lsm_pin;
 pub mod mocks;
 pub mod normalizer;
 pub mod path_deny;
+pub mod pin_abi;
 pub mod pipeline;
 pub mod policy_sync;
 pub mod rules;

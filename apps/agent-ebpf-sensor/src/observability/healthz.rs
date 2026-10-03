@@ -1,6 +1,11 @@
-//! HTTP `/healthz` for Kubernetes liveness — shared listener with Prometheus.
+//! HTTP `/healthz` for Kubernetes liveness **and** readiness — shared listener
+//! with Prometheus.
 //!
-//! # Liveness contract (fail-closed on enforcement plane only)
+//! # Liveness / readiness contract (fail-closed on enforcement plane only)
+//!
+//! The HTTP server is bound only after attestation → ABI reconcile → BPF load →
+//! deny seed → LSM attach (Issue #208). During ABI migration the process has
+//! not yet listened, so readiness probes fail until enforcement is armed.
 //!
 //! **503 Unhealthy (kubelet should restart)** when either:
 //! - the pinned LSM link is missing or not openable via bpffs, or

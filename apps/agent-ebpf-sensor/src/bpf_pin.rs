@@ -41,6 +41,18 @@ pub fn prepare_pin_directory(root: &Path) -> Result<()> {
 pub fn load_with_map_pinning(bytecode: &[u8], pin_root: &Path) -> Result<Ebpf> {
     prepare_pin_directory(pin_root)?;
 
+    // Issue #208: same aya reuse hazard as enforcement maps — recreate on ABI drift.
+    // Process maps hold no deny-list state (ringbuf + rate-limit counters only).
+    let recreated =
+        crate::pin_abi::recreate_mismatched_process_maps(&crate::pin_abi::RealPinAbiIo, pin_root)?;
+    if !recreated.is_empty() {
+        tracing::warn!(
+            target: "neuromesh::bpf_pin",
+            maps = ?recreated,
+            "recreated process map pins due to ABI mismatch before visibility load"
+        );
+    }
+
     let mut reused = Vec::new();
     for map_name in PINNED_PROCESS_MAPS {
         if pin_root.join(map_name).exists() {

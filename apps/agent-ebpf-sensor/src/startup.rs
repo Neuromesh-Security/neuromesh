@@ -16,6 +16,10 @@ use agent_ebpf_sensor::lsm_pin::{
 };
 use agent_ebpf_sensor::observability::AgentMetrics;
 use agent_ebpf_sensor::path_deny::{self, PathDenyMaps, PolicySyncState};
+use agent_ebpf_sensor::pin_abi::{
+    cleanup_legacy_abi_dirs, prepare_pin_root_for_load, DenySeedOverride, MigrationResult,
+    RealPinAbiIo,
+};
 use agent_ebpf_sensor::pin_root;
 use agent_ebpf_sensor::policy_sync;
 use agent_ebpf_sensor::startup_sequence;
@@ -68,6 +72,8 @@ pub struct EnforcementLoaded {
     pub metrics: Arc<AgentMetrics>,
     pub manual_seeds: Vec<u64>,
     pub maps_preexisted: bool,
+    /// Issue #208 — seed plan after pinned-map ABI reconcile (before load).
+    pub deny_seed_override: DenySeedOverride,
 }
 
 pub struct EnforcementArmed {
@@ -149,6 +155,40 @@ pub async fn attest_and_load_enforcement(
         "bpffs pin directory unavailable — refusing to start without ability to pin LSM \
          enforcement (fail-closed; see Issue #44)",
     )?;
+
+    // Issue #208 / ADR-002: validate pinned map ABI *before* EbpfLoader::load.
+    // aya reuses pins without size checks; stale pre-#134 PATH_DENY_LIST (20 B)
+    // otherwise makes the verifier reject nm_lsm_bprm while the old link stays.
+    let (deny_seed_override, migration_results) =
+        prepare_pin_root_for_load(&RealPinAbiIo, &bpf_pin_root).context(
+            "pinned BPF map ABI reconcile failed — refusing to load enforcement object \
+             (fail-closed; see docs/runbooks/agent-pin-recovery.md)",
+        )?;
+    for result in &migration_results {
+        match result {
+            MigrationResult::Migrated | MigrationResult::ResumedMigration => {
+                tracing::warn!(
+                    target: "neuromesh::pin_abi",
+                    ?result,
+                    "pinned map ABI migration in progress — healthz not ready until LSM handoff"
+                );
+            }
+            MigrationResult::BootstrapFallback => {
+                tracing::error!(
+                    target: "neuromesh::pin_abi",
+                    "legacy deny pins unreadable — seeding bootstrap prefixes (STALE until PE sync)"
+                );
+            }
+            MigrationResult::ProcessMapRecreated => {
+                tracing::warn!(
+                    target: "neuromesh::pin_abi",
+                    "recreated mismatched process/visibility map pins (non-enforcement)"
+                );
+            }
+            MigrationResult::Compatible => {}
+        }
+    }
+
     let pin_state = classify_enforcement_pins(&bpf_pin_root);
     if matches!(pin_state, EnforcementPinState::InconsistentLinkWithoutMaps) {
         anyhow::bail!(
@@ -159,7 +199,8 @@ pub async fn attest_and_load_enforcement(
             LSM = lsm_pin::LSM_LINK_PIN_NAME,
         );
     }
-    let maps_preexisted = matches!(pin_state, EnforcementPinState::MapsReady { .. });
+    // After ABI prepare, "resume" only when we intentionally kept compatible pins.
+    let maps_preexisted = matches!(deny_seed_override, DenySeedOverride::ResumePinned);
     let enf_paths = enforcement_pin_paths(&bpf_pin_root);
 
     let mut enforcement_loader = EbpfLoader::new();
@@ -235,6 +276,28 @@ pub async fn attest_and_load_enforcement(
 
     // Metrics before correlator so invalidation counters are live from first event.
     let metrics = AgentMetrics::new()?;
+    for result in &migration_results {
+        match result {
+            MigrationResult::Migrated => {
+                metrics.record_pin_abi_migration("migrated");
+            }
+            MigrationResult::ResumedMigration => {
+                metrics.record_pin_abi_migration("resumed");
+            }
+            MigrationResult::BootstrapFallback => {
+                metrics.record_pin_abi_migration("bootstrap_fallback");
+            }
+            MigrationResult::ProcessMapRecreated => {
+                metrics.record_pin_abi_migration("process_map_recreated");
+            }
+            MigrationResult::Compatible => {
+                metrics.record_pin_abi_migration("compatible");
+            }
+        }
+    }
+    if matches!(deny_seed_override, DenySeedOverride::MigratedEntries { .. }) {
+        metrics.record_pin_abi_mismatch(PATH_DENY_LIST_MAP);
+    }
 
     Ok(EnforcementLoaded {
         shutdown,
@@ -250,6 +313,7 @@ pub async fn attest_and_load_enforcement(
         metrics,
         manual_seeds,
         maps_preexisted,
+        deny_seed_override,
     })
 }
 
@@ -270,6 +334,7 @@ pub async fn arm_correlator_deny_and_lsm(
         metrics,
         manual_seeds,
         maps_preexisted,
+        deny_seed_override,
     } = loaded;
 
     #[cfg(target_os = "linux")]
@@ -347,16 +412,40 @@ pub async fn arm_correlator_deny_and_lsm(
         metrics: Some(Arc::clone(&metrics)),
     };
 
-    let active_count = lsm_pin::active_deny_count(&deny_maps)?;
-    let seed_plan = deny_map_seed_plan(maps_preexisted, active_count)?;
-    let policy_state: PolicySyncState = match seed_plan {
-        DenyMapSeedPlan::Bootstrap => {
+    let policy_state: PolicySyncState = match deny_seed_override {
+        DenySeedOverride::Bootstrap => {
             startup_sequence::log_deny_bootstrap();
             path_deny::bootstrap_deny_maps(&mut deny_maps)
                 .context("failed to bootstrap path-prefix deny list (fail-closed)")?
         }
-        DenyMapSeedPlan::ResumePinned { count } => {
-            startup_sequence::log_deny_resume(count);
+        DenySeedOverride::ResumePinned => {
+            let active_count = lsm_pin::active_deny_count(&deny_maps)?;
+            let seed_plan = deny_map_seed_plan(maps_preexisted, active_count)?;
+            match seed_plan {
+                DenyMapSeedPlan::Bootstrap => {
+                    // Compatible pins missing content — still refuse empty via seed plan.
+                    startup_sequence::log_deny_bootstrap();
+                    path_deny::bootstrap_deny_maps(&mut deny_maps)
+                        .context("failed to bootstrap path-prefix deny list (fail-closed)")?
+                }
+                DenyMapSeedPlan::ResumePinned { count } => {
+                    startup_sequence::log_deny_resume(count);
+                    policy_state_for_pinned_resume()
+                }
+            }
+        }
+        DenySeedOverride::MigratedEntries {
+            entries,
+            from_legacy,
+        } => {
+            tracing::warn!(
+                target: "neuromesh::pin_abi",
+                count = entries.len(),
+                from_legacy,
+                "seeding PATH_DENY_* after ABI migration (STALE until PE sync)"
+            );
+            path_deny::apply_deny_entries(&mut deny_maps, &entries)
+                .context("failed to seed deny list after pinned-map ABI migration (fail-closed)")?;
             policy_state_for_pinned_resume()
         }
     };
@@ -371,6 +460,10 @@ pub async fn arm_correlator_deny_and_lsm(
     // mechanism across kill -9; holding FD is belt-and-suspenders while running).
     let _lsm_link_pin = attach_and_pin_lsm_fail_closed(lsm_program, &bpf_pin_root)?;
     startup_sequence::log_lsm_pinned(&enf_paths.link);
+
+    // Only after the new link is pinned + re-opened: drop legacy_abi_* staging (F2).
+    cleanup_legacy_abi_dirs(&RealPinAbiIo, &bpf_pin_root)
+        .context("failed to cleanup legacy_abi_* after LSM handoff (fail-closed)")?;
 
     let _policy_sync = policy_sync::spawn_policy_sync(
         deny_maps,

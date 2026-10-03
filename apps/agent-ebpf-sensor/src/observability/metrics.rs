@@ -30,6 +30,11 @@ pub struct AgentMetrics {
     /// Issue #176 — PE returned HTTP 429 on GET /v1/policy-bundle (throttled;
     /// distinct from crypto/temporal sync failures).
     pub policy_sync_throttled: Counter,
+    /// Issue #208 — pinned map ABI mismatch detections; label `map`.
+    pub pin_abi_mismatch: CounterVec,
+    /// Issue #208 — ABI migration outcomes; label `result`
+    /// (`compatible`|`migrated`|`resumed`|`bootstrap_fallback`|`process_map_recreated`).
+    pub pin_abi_migration: CounterVec,
     userspace_drops: AtomicU64,
     started_at: Instant,
 }
@@ -89,6 +94,24 @@ impl AgentMetrics {
         ))
         .context("failed to create policy_sync_throttled_total counter")?;
 
+        let pin_abi_mismatch = CounterVec::new(
+            Opts::new(
+                "agent_pin_abi_mismatch_total",
+                "Pinned BPF map ABI mismatches detected before load (Issue #208 / ADR-002); label map",
+            ),
+            &["map"],
+        )
+        .context("failed to create agent_pin_abi_mismatch_total counter")?;
+
+        let pin_abi_migration = CounterVec::new(
+            Opts::new(
+                "agent_pin_abi_migration_total",
+                "Pinned BPF map ABI migration outcomes (Issue #208); label result=compatible|migrated|resumed|bootstrap_fallback|process_map_recreated",
+            ),
+            &["result"],
+        )
+        .context("failed to create agent_pin_abi_migration_total counter")?;
+
         registry
             .register(Box::new(events_processed.clone()))
             .context("failed to register ebpf_events_processed_total")?;
@@ -110,6 +133,12 @@ impl AgentMetrics {
         registry
             .register(Box::new(policy_sync_throttled.clone()))
             .context("failed to register policy_sync_throttled_total")?;
+        registry
+            .register(Box::new(pin_abi_mismatch.clone()))
+            .context("failed to register agent_pin_abi_mismatch_total")?;
+        registry
+            .register(Box::new(pin_abi_migration.clone()))
+            .context("failed to register agent_pin_abi_migration_total")?;
 
         Ok(Arc::new(Self {
             registry,
@@ -120,6 +149,8 @@ impl AgentMetrics {
             identity_invalidations,
             identity_resyncs,
             policy_sync_throttled,
+            pin_abi_mismatch,
+            pin_abi_migration,
             userspace_drops: AtomicU64::new(0),
             started_at: Instant::now(),
         }))
@@ -197,5 +228,13 @@ impl AgentMetrics {
 
     pub fn policy_sync_throttled_total(&self) -> f64 {
         self.policy_sync_throttled.get()
+    }
+
+    pub fn record_pin_abi_mismatch(&self, map: &str) {
+        self.pin_abi_mismatch.with_label_values(&[map]).inc();
+    }
+
+    pub fn record_pin_abi_migration(&self, result: &str) {
+        self.pin_abi_migration.with_label_values(&[result]).inc();
     }
 }
