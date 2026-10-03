@@ -17,7 +17,8 @@ use agent_ebpf_sensor::lsm_pin::{
 use agent_ebpf_sensor::observability::AgentMetrics;
 use agent_ebpf_sensor::path_deny::{self, PathDenyMaps, PolicySyncState};
 use agent_ebpf_sensor::pin_abi::{
-    cleanup_legacy_abi_dirs, prepare_pin_root_for_load, DenySeedOverride, MigrationResult,
+    cleanup_legacy_abi_dirs, cleanup_proc_abi_dirs, prepare_pin_root_for_load, DenySeedOverride,
+    MigrationResult,
     RealPinAbiIo,
 };
 use agent_ebpf_sensor::pin_root;
@@ -461,9 +462,11 @@ pub async fn arm_correlator_deny_and_lsm(
     let _lsm_link_pin = attach_and_pin_lsm_fail_closed(lsm_program, &bpf_pin_root)?;
     startup_sequence::log_lsm_pinned(&enf_paths.link);
 
-    // Only after the new link is pinned + re-opened: drop legacy_abi_* staging (F2).
+    // Only after the new link is pinned + re-opened: drop staging dirs (F2).
     cleanup_legacy_abi_dirs(&RealPinAbiIo, &bpf_pin_root)
         .context("failed to cleanup legacy_abi_* after LSM handoff (fail-closed)")?;
+    cleanup_proc_abi_dirs(&RealPinAbiIo, &bpf_pin_root)
+        .context("failed to cleanup proc_abi_* after LSM handoff (fail-closed)")?;
 
     let _policy_sync = policy_sync::spawn_policy_sync(
         deny_maps,

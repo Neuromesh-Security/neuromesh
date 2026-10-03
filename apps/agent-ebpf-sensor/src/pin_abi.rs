@@ -18,8 +18,14 @@ use neuromesh_common::{
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// bpffs subdirectory prefix for staged legacy pins (no `.` — kernel `-EPERM`).
+/// bpffs subdirectory prefix for staged legacy deny pins (no `.` — kernel `-EPERM`).
+/// Only `legacy_abi_<digits>` dirs are deny staging; never use this for process maps.
 pub const LEGACY_ABI_DIR_PREFIX: &str = "legacy_abi_";
+
+/// bpffs subdirectory prefix for staged mismatched process/visibility maps.
+/// Kept separate from [`LEGACY_ABI_DIR_PREFIX`] so process-only staging cannot
+/// look like an interrupted deny-list migration (false `MigrationInProgress`).
+pub const PROC_ABI_DIR_PREFIX: &str = "proc_abi_";
 
 /// Observed map create attrs from a live pin (or a test double).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +62,8 @@ pub enum PinAbiState {
     Compatible,
     /// Pre-#134 deny-list pins present; migrate before load.
     LegacyMigratable,
-    /// `legacy_abi_*` staging dir present — resume interrupted migration.
+    /// Deny `legacy_abi_<n>` staging present without complete canonical pins —
+    /// resume interrupted migration. Process-only `proc_abi_*` is not this state.
     MigrationInProgress { legacy_dir: PathBuf },
     /// Unknown / unsupported layout — refuse (F4).
     Incompatible { map: String, detail: String },
@@ -220,11 +227,40 @@ impl PinAbiIo for RealPinAbiIo {
     }
 }
 
-/// List `legacy_abi_*` directories under `pin_root`.
+/// Parse numeric suffix of a `legacy_abi_<n>` directory name.
+fn legacy_abi_numeric_suffix(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix(LEGACY_ABI_DIR_PREFIX)?;
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
+}
+
+/// List deny-only `legacy_abi_<digits>` directories under `pin_root`.
+///
+/// Matches `^legacy_abi_[0-9]+$` only — `legacy_abi_proc_*` and other non-numeric
+/// suffixes are intentionally excluded. Sorted by numeric suffix ascending
+/// (so `legacy_abi_2` precedes `legacy_abi_10`).
 pub fn list_legacy_abi_dirs<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<Vec<PathBuf>> {
+    let mut dirs: Vec<(u32, PathBuf)> = Vec::new();
+    for name in io.read_dir_names(pin_root)? {
+        let Some(n) = legacy_abi_numeric_suffix(&name) else {
+            continue;
+        };
+        let p = pin_root.join(&name);
+        if io.is_dir(&p) {
+            dirs.push((n, p));
+        }
+    }
+    dirs.sort_by_key(|(n, _)| *n);
+    Ok(dirs.into_iter().map(|(_, p)| p).collect())
+}
+
+/// List `proc_abi_*` process-map staging directories under `pin_root`.
+pub fn list_proc_abi_dirs<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<Vec<PathBuf>> {
     let mut dirs = Vec::new();
     for name in io.read_dir_names(pin_root)? {
-        if name.starts_with(LEGACY_ABI_DIR_PREFIX) && !name.contains('.') {
+        if name.starts_with(PROC_ABI_DIR_PREFIX) && !name.contains('.') {
             let p = pin_root.join(&name);
             if io.is_dir(&p) {
                 dirs.push(p);
@@ -235,22 +271,63 @@ pub fn list_legacy_abi_dirs<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<Vec<
     Ok(dirs)
 }
 
+/// Pick the deny staging directory that holds migratable pins.
+///
+/// Prefers the highest numeric `legacy_abi_<n>` that contains `PATH_DENY_LIST`
+/// (and ideally COUNT). Never returns `legacy_dirs[0]` by string sort — that
+/// would pick `legacy_abi_10` over `legacy_abi_2` incorrectly when only the
+/// latter holds data (or the reverse when both exist and we need the latest).
+pub fn select_deny_legacy_dir<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<Option<PathBuf>> {
+    let dirs = list_legacy_abi_dirs(io, pin_root)?;
+    let mut best: Option<(u32, PathBuf)> = None;
+    for dir in dirs {
+        let name = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let Some(n) = legacy_abi_numeric_suffix(name) else {
+            continue;
+        };
+        let has_list = io.exists(&dir.join(PATH_DENY_LIST_MAP));
+        let has_count = io.exists(&dir.join(PATH_DENY_COUNT_MAP));
+        if !has_list && !has_count {
+            continue;
+        }
+        // Prefer dirs that have LIST; among equals, highest n wins.
+        let score = (has_list as u8, has_count as u8, n);
+        let replace = match &best {
+            None => true,
+            Some((bn, bdir)) => {
+                let b_has_list = io.exists(&bdir.join(PATH_DENY_LIST_MAP));
+                let b_has_count = io.exists(&bdir.join(PATH_DENY_COUNT_MAP));
+                let bscore = (b_has_list as u8, b_has_count as u8, *bn);
+                score >= bscore
+            }
+        };
+        if replace {
+            best = Some((n, dir));
+        }
+    }
+    Ok(best.map(|(_, p)| p))
+}
+
 fn expected_abi(name: &str) -> Option<&'static PinnedMapAbi> {
     PINNED_MAP_ABI.iter().find(|m| m.name == name)
 }
 
 /// Classify pin directory ABI state (read-only).
 pub fn assess_pin_abi<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<PinAbiState> {
-    let legacy_dirs = list_legacy_abi_dirs(io, pin_root)?;
     let list_path = pin_root.join(PATH_DENY_LIST_MAP);
     let count_path = pin_root.join(PATH_DENY_COUNT_MAP);
     let list_exists = io.exists(&list_path);
     let count_exists = io.exists(&count_path);
 
-    if !legacy_dirs.is_empty() && !(list_exists && count_exists) {
-        return Ok(PinAbiState::MigrationInProgress {
-            legacy_dir: legacy_dirs[0].clone(),
-        });
+    // Deny-only staging: process-only `proc_abi_*` must NOT force MigrationInProgress
+    // (would falsely BootstrapFallback on cold start with leftover process staging).
+    if let Some(legacy_dir) = select_deny_legacy_dir(io, pin_root)? {
+        if !(list_exists && count_exists) {
+            return Ok(PinAbiState::MigrationInProgress { legacy_dir });
+        }
     }
 
     if !list_exists && !count_exists {
@@ -332,12 +409,8 @@ pub fn assess_pin_abi<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<PinAbiStat
         }
     }
 
-    if !legacy_dirs.is_empty() {
-        // Compatible canonical maps + leftover staging → treat as Compatible;
-        // prepare will clean staging after attach.
-        return Ok(PinAbiState::Compatible);
-    }
-
+    // Compatible canonical maps + leftover deny/proc staging → Compatible;
+    // prepare/cleanup will remove staging after LSM handoff.
     Ok(PinAbiState::Compatible)
 }
 
@@ -397,9 +470,8 @@ pub fn recreate_mismatched_process_maps<I: PinAbiIo>(
         if info.matches_expected(exp) {
             continue;
         }
-        // Stage aside rather than unlink when possible (crash-safe audit trail).
-        let staging = pin_root.join(format!("{LEGACY_ABI_DIR_PREFIX}proc_{name}"));
-        // proc staging is a file rename target directory
+        // Stage under proc_abi_<name>/ — never legacy_abi_* (deny-migration namespace).
+        let staging = pin_root.join(format!("{PROC_ABI_DIR_PREFIX}{name}"));
         let _ = io.remove_dir_all(&staging);
         io.create_dir_all(&staging)?;
         io.rename(&path, &staging.join(name))?;
@@ -539,15 +611,27 @@ pub fn prepare_pin_root_for_load<I: PinAbiIo>(
     }
 }
 
-/// Delete `legacy_abi_*` staging dirs after the new LSM link is live.
+/// Delete deny-only `legacy_abi_<n>` staging dirs after the new LSM link is live.
 pub fn cleanup_legacy_abi_dirs<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<()> {
     for dir in list_legacy_abi_dirs(io, pin_root)? {
-        // Also clean proc_* staging dirs that share the prefix.
         io.remove_dir_all(&dir)?;
         tracing::info!(
             target: "neuromesh::pin_abi",
             legacy_dir = %dir.display(),
             "removed legacy ABI staging directory after successful LSM handoff"
+        );
+    }
+    Ok(())
+}
+
+/// Delete `proc_abi_*` process-map staging dirs after the new LSM link is live.
+pub fn cleanup_proc_abi_dirs<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<()> {
+    for dir in list_proc_abi_dirs(io, pin_root)? {
+        io.remove_dir_all(&dir)?;
+        tracing::info!(
+            target: "neuromesh::pin_abi",
+            proc_dir = %dir.display(),
+            "removed process ABI staging directory after successful LSM handoff"
         );
     }
     Ok(())
@@ -859,11 +943,135 @@ mod tests {
         let io = FakeIo::default();
         let root = PathBuf::from("/pins");
         let legacy = root.join("legacy_abi_0");
+        let proc = root.join(format!("{PROC_ABI_DIR_PREFIX}{PROCESS_EVENTS_MAP}"));
         io.touch_dir(&root);
         io.touch_dir(&legacy);
+        io.touch_dir(&proc);
         io.touch_file(&legacy.join(PATH_DENY_LIST_MAP));
+        io.touch_file(&proc.join(PROCESS_EVENTS_MAP));
         cleanup_legacy_abi_dirs(&io, &root).unwrap();
         assert!(!io.exists(&legacy));
+        // Deny cleanup must not touch proc staging.
+        assert!(io.exists(&proc));
+        cleanup_proc_abi_dirs(&io, &root).unwrap();
+        assert!(!io.exists(&proc));
+    }
+
+    #[test]
+    fn process_only_staging_cold_stays_cold() {
+        // D2: leftover proc_abi_* on a cold pin root must NOT look like migration
+        // (would falsely BootstrapFallback / MigrationInProgress).
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins");
+        let proc = root.join(format!("{PROC_ABI_DIR_PREFIX}{PROCESS_EVENTS_MAP}"));
+        io.touch_dir(&root);
+        io.touch_dir(&proc);
+        io.touch_file(&proc.join(PROCESS_EVENTS_MAP));
+        assert_eq!(assess_pin_abi(&io, &root).unwrap(), PinAbiState::Cold);
+        let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+        assert!(matches!(seed, DenySeedOverride::Bootstrap));
+        assert!(!results.contains(&MigrationResult::BootstrapFallback));
+    }
+
+    #[test]
+    fn both_proc_and_deny_staging_still_migrates() {
+        // D2: proc_abi_* coexisting with legacy_abi_<n> must not hide deny migration.
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins");
+        let legacy = root.join("legacy_abi_0");
+        let proc = root.join(format!("{PROC_ABI_DIR_PREFIX}{PROCESS_EVENTS_MAP}"));
+        io.touch_dir(&root);
+        io.touch_dir(&legacy);
+        io.touch_dir(&proc);
+        io.touch_file(&legacy.join(PATH_DENY_LIST_MAP));
+        io.touch_file(&legacy.join(PATH_DENY_COUNT_MAP));
+        io.touch_file(&proc.join(PROCESS_EVENTS_MAP));
+        let entry = PathDenyEntry::from_prefix(b"/tmp/").unwrap();
+        io.legacy_entries
+            .lock()
+            .unwrap()
+            .insert(legacy.clone(), vec![entry]);
+
+        match assess_pin_abi(&io, &root).unwrap() {
+            PinAbiState::MigrationInProgress { legacy_dir } => {
+                assert_eq!(legacy_dir, legacy);
+            }
+            other => panic!("expected MigrationInProgress, got {other:?}"),
+        }
+        let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+        assert!(results.contains(&MigrationResult::ResumedMigration));
+        match seed {
+            DenySeedOverride::MigratedEntries {
+                entries,
+                from_legacy,
+            } => {
+                assert!(from_legacy);
+                assert_eq!(entries.len(), 1);
+                assert!(entries[0].matches(b"/tmp/x"));
+            }
+            other => panic!("unexpected seed {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_deny_legacy_dir_prefers_numeric_highest_with_list() {
+        // D2: string sort would order legacy_abi_10 before legacy_abi_2; we must
+        // pick by content + numeric suffix, not dirs[0] from lexicographic sort.
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins");
+        let d2 = root.join("legacy_abi_2");
+        let d10 = root.join("legacy_abi_10");
+        io.touch_dir(&root);
+        io.touch_dir(&d2);
+        io.touch_dir(&d10);
+        // Only legacy_abi_2 holds LIST (string-sort dirs[0] would be legacy_abi_10).
+        io.touch_file(&d2.join(PATH_DENY_LIST_MAP));
+        io.touch_file(&d2.join(PATH_DENY_COUNT_MAP));
+
+        let listed = list_legacy_abi_dirs(&io, &root).unwrap();
+        assert_eq!(listed, vec![d2.clone(), d10.clone()]);
+
+        let selected = select_deny_legacy_dir(&io, &root).unwrap().unwrap();
+        assert_eq!(selected, d2);
+
+        // When both have LIST/COUNT, highest numeric n wins.
+        io.touch_file(&d10.join(PATH_DENY_LIST_MAP));
+        io.touch_file(&d10.join(PATH_DENY_COUNT_MAP));
+        let selected = select_deny_legacy_dir(&io, &root).unwrap().unwrap();
+        assert_eq!(selected, d10);
+
+        match assess_pin_abi(&io, &root).unwrap() {
+            PinAbiState::MigrationInProgress { legacy_dir } => {
+                assert_eq!(legacy_dir, d10);
+            }
+            other => panic!(
+                "expected MigrationInProgress toward legacy_abi_10, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn recreate_process_maps_uses_proc_abi_prefix() {
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins");
+        io.touch_dir(&root);
+        io.set_info(
+            &root.join(PROCESS_EVENTS_MAP),
+            ObservedMapInfo {
+                map_type: neuromesh_common::BPF_MAP_TYPE_RINGBUF,
+                key_size: 0,
+                value_size: 0,
+                max_entries: 1,
+            },
+        );
+        let removed = recreate_mismatched_process_maps(&io, &root).unwrap();
+        assert_eq!(removed, vec![PROCESS_EVENTS_MAP]);
+        let staging = root.join(format!("{PROC_ABI_DIR_PREFIX}{PROCESS_EVENTS_MAP}"));
+        assert!(io.exists(&staging.join(PROCESS_EVENTS_MAP)));
+        assert!(list_legacy_abi_dirs(&io, &root).unwrap().is_empty());
+        assert_eq!(list_proc_abi_dirs(&io, &root).unwrap(), vec![staging]);
+        // Cold with only proc staging.
+        assert_eq!(assess_pin_abi(&io, &root).unwrap(), PinAbiState::Cold);
     }
 
     #[test]

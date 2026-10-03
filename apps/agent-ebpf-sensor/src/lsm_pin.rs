@@ -67,8 +67,9 @@ pub enum EnforcementPinState {
     MapsReady { link_pinned: bool },
     /// Link pin without both deny maps — refuse (would be split-brain).
     InconsistentLinkWithoutMaps,
-    /// `legacy_abi_*` staging present without canonical deny maps — resume migration
-    /// (Issue #208 / ADR-002). Must not be mistaken for [`Self::InconsistentLinkWithoutMaps`].
+    /// Deny-only `legacy_abi_<n>` staging present without canonical deny maps — resume
+    /// migration (Issue #208 / ADR-002). Process-only `proc_abi_*` is not this state.
+    /// Must not be mistaken for [`Self::InconsistentLinkWithoutMaps`].
     MigrationInProgress,
 }
 
@@ -80,11 +81,14 @@ pub fn classify_enforcement_pins(pin_root: &Path) -> EnforcementPinState {
     let maps_ok = list.is_file() && count.is_file();
     let link_ok = link.is_file();
 
-    // ADR-002: interrupted ABI migration leaves the LSM link + legacy_abi_* maps.
-    // Check before InconsistentLinkWithoutMaps so kill -9 mid-migrate is recoverable.
-    if crate::pin_abi::list_legacy_abi_dirs(&crate::pin_abi::RealPinAbiIo, pin_root)
-        .map(|d| !d.is_empty())
-        .unwrap_or(false)
+    // ADR-002: interrupted ABI migration leaves the LSM link + deny legacy_abi_<n> maps.
+    // Use deny-only select (not proc_abi_* / non-numeric legacy names) so process-map
+    // staging alone cannot look like MigrationInProgress. Check before
+    // InconsistentLinkWithoutMaps so kill -9 mid-migrate is recoverable.
+    if crate::pin_abi::select_deny_legacy_dir(&crate::pin_abi::RealPinAbiIo, pin_root)
+        .ok()
+        .flatten()
+        .is_some()
         && !maps_ok
     {
         return EnforcementPinState::MigrationInProgress;
