@@ -758,16 +758,33 @@ pub fn legacy_match_equivalent(path: &[u8], legacy: &LegacyPathDenyEntry) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neuromesh_common::PATH_DENY_ENTRY_SIZE;
+    use crate::path_deny::{legacy_hardcoded_is_blacklisted, map_backed_is_blacklisted};
+    use neuromesh_common::{PATH_DENY_ENTRY_SIZE, PATH_DENY_KEY_BYTES_LEGACY as LEGACY_KEY};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    #[derive(Default)]
+    /// Test double with optional fail-after-N rename crash injection (D4).
     struct FakeIo {
         files: Mutex<HashMap<PathBuf, Vec<u8>>>,
         dirs: Mutex<Vec<PathBuf>>,
         info: Mutex<HashMap<PathBuf, ObservedMapInfo>>,
         legacy_entries: Mutex<HashMap<PathBuf, Vec<PathDenyEntry>>>,
+        /// When `Some(n)`, the n-th `rename` call (1-based) returns an error.
+        fail_after_renames: Mutex<Option<usize>>,
+        rename_count: Mutex<usize>,
+    }
+
+    impl Default for FakeIo {
+        fn default() -> Self {
+            Self {
+                files: Mutex::new(HashMap::new()),
+                dirs: Mutex::new(Vec::new()),
+                info: Mutex::new(HashMap::new()),
+                legacy_entries: Mutex::new(HashMap::new()),
+                fail_after_renames: Mutex::new(None),
+                rename_count: Mutex::new(0),
+            }
+        }
     }
 
     impl FakeIo {
@@ -784,6 +801,13 @@ mod tests {
             self.touch_file(p);
             self.info.lock().unwrap().insert(p.to_path_buf(), info);
         }
+        fn arm_fail_after_renames(&self, n: usize) {
+            *self.fail_after_renames.lock().unwrap() = Some(n);
+            *self.rename_count.lock().unwrap() = 0;
+        }
+        fn disarm_crash(&self) {
+            *self.fail_after_renames.lock().unwrap() = None;
+        }
     }
 
     impl PinAbiIo for FakeIo {
@@ -799,6 +823,19 @@ mod tests {
             Ok(())
         }
         fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+            {
+                let mut count = self.rename_count.lock().unwrap();
+                *count = count.saturating_add(1);
+                if let Some(limit) = *self.fail_after_renames.lock().unwrap() {
+                    if *count >= limit {
+                        bail!(
+                            "injected crash after rename #{count} ({} → {})",
+                            from.display(),
+                            to.display()
+                        );
+                    }
+                }
+            }
             let mut files = self.files.lock().unwrap();
             let mut info = self.info.lock().unwrap();
             let bytes = files
@@ -1302,5 +1339,297 @@ mod tests {
         assert!(info.is_legacy_path_deny_list());
         assert_eq!(info.value_size, 20);
         assert_eq!(PATH_DENY_ENTRY_SIZE, 36);
+    }
+
+    #[test]
+    fn incident_208_prepare_legacy_20b_to_canonical_36b_preserves_entries() {
+        // D4 regression: drive legacy 20B layout through prepare_pin_root_for_load
+        // and assert migrated seed carries operator + bootstrap-shaped entries
+        // (canonical names freed for fresh 36B maps).
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins");
+        io.touch_dir(&root);
+        io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
+        io.set_info(&root.join(PATH_DENY_COUNT_MAP), count_info());
+        assert_eq!(
+            io.map_info(&root.join(PATH_DENY_LIST_MAP)).unwrap().value_size,
+            20
+        );
+        let entries = vec![
+            PathDenyEntry::from_prefix(b"/tmp/").unwrap(),
+            PathDenyEntry::from_prefix(b"/dev/shm/").unwrap(),
+            PathDenyEntry::from_prefix(b"/var/tmp/").unwrap(),
+            PathDenyEntry::from_prefix(b"/opt/neuromesh/staging/").unwrap(),
+        ];
+        io.legacy_entries
+            .lock()
+            .unwrap()
+            .insert(root.clone(), entries.clone());
+
+        let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+        assert!(results.contains(&MigrationResult::Migrated));
+        assert!(!io.exists(&root.join(PATH_DENY_LIST_MAP)));
+        assert!(!io.exists(&root.join(PATH_DENY_COUNT_MAP)));
+        match seed {
+            DenySeedOverride::MigratedEntries {
+                entries: migrated,
+                from_legacy,
+            } => {
+                assert!(from_legacy);
+                assert_eq!(migrated.len(), entries.len());
+                for (a, b) in migrated.iter().zip(entries.iter()) {
+                    assert_eq!(a.len, b.len);
+                    assert_eq!(a.bytes, b.bytes);
+                }
+                // Widened entries use the current 36B ABI key width.
+                assert!(migrated.iter().all(|e| e.bytes.len() == PATH_DENY_KEY_BYTES));
+                assert_eq!(PATH_DENY_ENTRY_SIZE, 36);
+                assert!(migrated.iter().any(|e| e.matches(b"/opt/neuromesh/staging/x")));
+                assert!(!migrated.is_empty(), "deny list must never be empty after migrate");
+            }
+            other => panic!("unexpected seed {other:?}"),
+        }
+    }
+
+    #[test]
+    fn crash_injection_every_rename_step_converges() {
+        // D4: inject a crash at every rename step of migration; disarm and
+        // re-run — must converge with non-empty deny seed; unknown layouts still refused.
+        let entry = PathDenyEntry::from_prefix(b"/tmp/").unwrap();
+        for fail_at in 1usize..=4 {
+            let io = FakeIo::default();
+            let root = PathBuf::from(format!("/pins_crash_{fail_at}"));
+            io.touch_dir(&root);
+            io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
+            io.set_info(&root.join(PATH_DENY_COUNT_MAP), count_info());
+            // Mismatched process map adds extra renames into the crash surface.
+            io.set_info(
+                &root.join(PROCESS_EVENTS_MAP),
+                ObservedMapInfo {
+                    map_type: neuromesh_common::BPF_MAP_TYPE_RINGBUF,
+                    key_size: 0,
+                    value_size: 0,
+                    max_entries: 1, // expected is 1MiB — forces recreate rename
+                },
+            );
+            io.legacy_entries
+                .lock()
+                .unwrap()
+                .insert(root.clone(), vec![entry.clone()]);
+            io.arm_fail_after_renames(fail_at);
+
+            let first = prepare_pin_root_for_load(&io, &root);
+            if first.is_ok() {
+                // No further rename steps exist at this fail_at — migration already
+                // completed without hitting the armed crash point.
+                match first.unwrap() {
+                    (DenySeedOverride::MigratedEntries { entries, .. }, results) => {
+                        assert!(!entries.is_empty());
+                        assert!(
+                            results.contains(&MigrationResult::Migrated)
+                                || results.contains(&MigrationResult::ResumedMigration)
+                        );
+                    }
+                    other => panic!("fail_at={fail_at}: unexpected ok {other:?}"),
+                }
+                continue;
+            }
+
+            // Resume: disarm crash injection; seed entries under every possible
+            // parent resolve may consult (root and any legacy_abi_*).
+            io.disarm_crash();
+            for dir in list_legacy_abi_dirs(&io, &root).unwrap() {
+                io.legacy_entries
+                    .lock()
+                    .unwrap()
+                    .insert(dir, vec![entry.clone()]);
+            }
+            // If COUNT moved but LIST remains, also keep root key.
+            io.legacy_entries
+                .lock()
+                .unwrap()
+                .insert(root.clone(), vec![entry.clone()]);
+
+            let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+            assert!(
+                results.contains(&MigrationResult::Migrated)
+                    || results.contains(&MigrationResult::ResumedMigration),
+                "fail_at={fail_at}: results={results:?}"
+            );
+            assert!(!results.contains(&MigrationResult::BootstrapFallback));
+            match seed {
+                DenySeedOverride::MigratedEntries { entries, .. } => {
+                    assert!(
+                        !entries.is_empty(),
+                        "fail_at={fail_at}: deny list empty after converge"
+                    );
+                    assert!(entries[0].matches(b"/tmp/x"));
+                }
+                other => panic!("fail_at={fail_at}: unexpected seed {other:?}"),
+            }
+        }
+
+        // Unknown layouts still refused (assertion not weakened).
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins_unknown");
+        io.touch_dir(&root);
+        io.set_info(
+            &root.join(PATH_DENY_LIST_MAP),
+            ObservedMapInfo {
+                map_type: neuromesh_common::BPF_MAP_TYPE_ARRAY,
+                key_size: 4,
+                value_size: 99,
+                max_entries: PATH_DENY_MAX_ENTRIES,
+            },
+        );
+        io.set_info(&root.join(PATH_DENY_COUNT_MAP), count_info());
+        let err = prepare_pin_root_for_load(&io, &root).unwrap_err();
+        assert!(err.to_string().contains("incompatible"), "{err}");
+    }
+
+    #[test]
+    fn count_zero_via_trait_errors_then_bootstrap_fallback() {
+        // D4: empty deny (count==0 / empty entries) through the trait must error;
+        // prepare LegacyMigratable path falls back to BootstrapFallback (non-empty).
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins");
+        io.touch_dir(&root);
+        io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
+        io.set_info(&root.join(PATH_DENY_COUNT_MAP), count_info());
+        io.legacy_entries
+            .lock()
+            .unwrap()
+            .insert(root.clone(), Vec::new());
+
+        let err = io.read_legacy_deny_entries(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("fail-open") || err.to_string().contains("0"),
+            "{err}"
+        );
+
+        let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+        assert!(results.contains(&MigrationResult::BootstrapFallback));
+        match seed {
+            DenySeedOverride::MigratedEntries {
+                entries,
+                from_legacy,
+            } => {
+                assert!(!from_legacy);
+                assert!(!entries.is_empty(), "bootstrap deny must be non-empty");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn property_widen_oracle_all_prefix_and_path_lengths() {
+        // D4: seeded exhaustive property — prefix lens 1..=16, path lens 0..=40,
+        // with mutations; independent oracle via legacy hardcoded / 16B window
+        // matcher cross-checked with widen + map-backed matches.
+        let mut seed: u64 = 0x208_c0ff_eeu64;
+        let mut next = || {
+            // xorshift64*
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        for prefix_len in 1usize..=LEGACY_KEY {
+            for path_len in 0usize..=40 {
+                for mutation in 0u8..3 {
+                    let mut legacy = LegacyPathDenyEntry {
+                        len: prefix_len as u32,
+                        bytes: [0; LEGACY_KEY],
+                    };
+                    for i in 0..prefix_len {
+                        legacy.bytes[i] = (next() as u8).wrapping_add(b'a');
+                    }
+                    // Ensure printable-ish and stable for starts_with.
+                    if legacy.bytes[0] == 0 {
+                        legacy.bytes[0] = b'/';
+                    }
+
+                    let mut path = vec![0u8; path_len];
+                    for i in 0..path_len {
+                        path[i] = (next() as u8).wrapping_add(b'a');
+                    }
+                    // Mutation 0: path starts with prefix (when long enough)
+                    // Mutation 1: diverge at last prefix byte
+                    // Mutation 2: random (already filled)
+                    if mutation == 0 && path_len >= prefix_len {
+                        path[..prefix_len].copy_from_slice(&legacy.bytes[..prefix_len]);
+                    } else if mutation == 1 && path_len >= prefix_len {
+                        path[..prefix_len].copy_from_slice(&legacy.bytes[..prefix_len]);
+                        path[prefix_len - 1] ^= 0x5a;
+                    }
+
+                    let legacy_hit = path.len() >= prefix_len
+                        && path[..prefix_len] == legacy.bytes[..prefix_len];
+
+                    // 16-byte window matcher (capture head) cross-check.
+                    let mut window = [0u8; LEGACY_KEY];
+                    let wlen = path.len().min(LEGACY_KEY);
+                    window[..wlen].copy_from_slice(&path[..wlen]);
+                    let window_hit = wlen >= prefix_len
+                        && window[..prefix_len] == legacy.bytes[..prefix_len];
+                    // For paths shorter than prefix, both miss; for longer paths
+                    // window head matches legacy_hit on the significant prefix.
+                    if path_len <= LEGACY_KEY {
+                        assert_eq!(
+                            window_hit, legacy_hit,
+                            "window oracle diverged prefix_len={prefix_len} path_len={path_len} mut={mutation}"
+                        );
+                    }
+
+                    assert!(
+                        legacy_match_equivalent(&path, &legacy),
+                        "widen equivalence failed prefix_len={prefix_len} path_len={path_len} mut={mutation}"
+                    );
+
+                    let wide = legacy.widen().expect("valid legacy must widen");
+                    assert_eq!(wide.matches(&path), legacy_hit);
+
+                    // Bootstrap hardcoded oracle: only meaningful for exact
+                    // bootstrap prefixes, but map-backed must agree with widen.
+                    let map_hit = map_backed_is_blacklisted(&path, &[wide]);
+                    assert_eq!(map_hit, legacy_hit);
+
+                    // When the legacy prefix equals a bootstrap prefix, hardcoded
+                    // oracle must agree on matching paths.
+                    for boot in neuromesh_common::BOOTSTRAP_PATH_DENY_PREFIXES {
+                        if prefix_len == boot.len() && legacy.bytes[..prefix_len] == boot[..] {
+                            assert_eq!(
+                                legacy_hardcoded_is_blacklisted(&path),
+                                legacy_hit,
+                                "hardcoded oracle mismatch on {:?}",
+                                boot
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Privileged stub: real aya `read_legacy_deny_entries` against bpffs.
+    /// Requires root + mounted bpffs; ignored in default CI.
+    #[test]
+    #[ignore = "requires root + bpffs; run manually on a BPF-LSM host"]
+    fn privileged_aya_read_legacy_deny_entries_stub() {
+        let pin_root = std::env::var("NEUROMESH_BPF_PIN_ROOT")
+            .unwrap_or_else(|_| "/sys/fs/bpf/neuromesh-pin-abi-verify".into());
+        let root = PathBuf::from(pin_root);
+        assert!(
+            root.is_dir(),
+            "bpffs pin root missing — create legacy pins before running"
+        );
+        let entries = RealPinAbiIo
+            .read_legacy_deny_entries(&root)
+            .expect("aya legacy read");
+        assert!(
+            !entries.is_empty(),
+            "privileged read returned empty deny list (fail-open)"
+        );
     }
 }
