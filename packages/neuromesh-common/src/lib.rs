@@ -305,6 +305,40 @@ pub const PATH_DENY_MAX_ENTRIES: u32 = 64;
 /// (`[u8; 32]` vs `[u8; 16]` in `read_bprm_path_prefix`).
 pub const PATH_DENY_KEY_BYTES: usize = 32;
 
+/// Pre-#134 key width. Pinned maps with this layout are `LegacyMigratable`
+/// (Issue #208 / ADR-002) — never silently reused by aya `map_pin_path`.
+pub const PATH_DENY_KEY_BYTES_LEGACY: usize = 16;
+
+/// `PathDenyEntry` byte size today (`u32` + `[u8; PATH_DENY_KEY_BYTES]`).
+pub const PATH_DENY_ENTRY_SIZE: usize = 4 + PATH_DENY_KEY_BYTES;
+
+/// Pre-#134 `PathDenyEntry` size (`u32` + `[u8; 16]` = 20). Matches the
+/// live verifier failure `value_size=20 off=20`.
+pub const PATH_DENY_ENTRY_SIZE_LEGACY: usize = 4 + PATH_DENY_KEY_BYTES_LEGACY;
+
+/// Bumped whenever a pinned enforcement/visibility map layout changes.
+/// Golden tests refuse accidental layout drift without a version bump (ADR-002).
+///
+/// - `1` — implicit pre-#134 era (`PATH_DENY_KEY_BYTES == 16`, entry 20 B)
+/// - `2` — current (`PATH_DENY_KEY_BYTES == 32`, entry 36 B) + explicit ABI table
+pub const ENFORCEMENT_PIN_ABI_VERSION: u32 = 2;
+
+/// Kernel `bpf_map_type` numeric values (stable ABI; avoid pulling aya into
+/// the `no_std` eBPF crate).
+pub const BPF_MAP_TYPE_ARRAY: u32 = 2;
+pub const BPF_MAP_TYPE_PERCPU_ARRAY: u32 = 6;
+pub const BPF_MAP_TYPE_RINGBUF: u32 = 27;
+
+/// Expected layout of one pinned map (name + kernel create attrs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PinnedMapAbi {
+    pub name: &'static str,
+    pub map_type: u32,
+    pub key_size: u32,
+    pub value_size: u32,
+    pub max_entries: u32,
+}
+
 /// Kernel `BPF_OBJ_NAME_LEN` is 16 (including NUL) → max usable object name length.
 ///
 /// Map and program names longer than this are truncated (or rejected by bpftool
@@ -411,6 +445,42 @@ pub const ALL_BPF_OBJECT_NAMES: &[&str] = &[
     TCP_CONNECT_PROG,
 ];
 
+/// Single source of truth for pinned-map ABI checks (Issue #208 / ADR-002).
+///
+/// Enforcement maps first; process/visibility maps follow. Process maps hold
+/// no deny-list state — recreate-on-mismatch is acceptable (ADR-002).
+pub const PINNED_MAP_ABI: &[PinnedMapAbi] = &[
+    PinnedMapAbi {
+        name: PATH_DENY_LIST_MAP,
+        map_type: BPF_MAP_TYPE_ARRAY,
+        key_size: 4,
+        value_size: PATH_DENY_ENTRY_SIZE as u32,
+        max_entries: PATH_DENY_MAX_ENTRIES,
+    },
+    PinnedMapAbi {
+        name: PATH_DENY_COUNT_MAP,
+        map_type: BPF_MAP_TYPE_ARRAY,
+        key_size: 4,
+        value_size: 4,
+        max_entries: 1,
+    },
+    PinnedMapAbi {
+        name: PROCESS_EVENTS_MAP,
+        map_type: BPF_MAP_TYPE_RINGBUF,
+        key_size: 0,
+        value_size: 0,
+        max_entries: 1024 * 1024,
+    },
+    PinnedMapAbi {
+        name: RATE_LIMIT_BUCKET_MAP,
+        map_type: BPF_MAP_TYPE_PERCPU_ARRAY,
+        key_size: 4,
+        // `struct rate_limit_state { u64 last_ns; u64 tokens; }`
+        value_size: 16,
+        max_entries: 1,
+    },
+];
+
 /// Only path prefix eligible for identity exceptions (must match PE export).
 pub const IDENTITY_EXCEPTION_SCOPE_PREFIX: &[u8] = b"/tmp/";
 
@@ -420,10 +490,36 @@ pub const IDENTITY_EXCEPTION_SCOPE_PREFIX: &[u8] = b"/tmp/";
 /// Matching uses the same `starts_with` semantics as the former hardcoded LSM
 /// compare: the path is denied iff it begins with `bytes[..len]`.
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PathDenyEntry {
     pub len: u32,
     pub bytes: [u8; PATH_DENY_KEY_BYTES],
+}
+
+const _: () = assert!(core::mem::size_of::<PathDenyEntry>() == PATH_DENY_ENTRY_SIZE);
+const _: () = assert!(PATH_DENY_ENTRY_SIZE == 36);
+const _: () = assert!(PATH_DENY_ENTRY_SIZE_LEGACY == 20);
+const _: () = assert!(ENFORCEMENT_PIN_ABI_VERSION == 2);
+
+/// Pre-#134 deny entry (`u32` + `[u8; 16]`). Used only for migration reads.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LegacyPathDenyEntry {
+    pub len: u32,
+    pub bytes: [u8; PATH_DENY_KEY_BYTES_LEGACY],
+}
+
+const _: () = assert!(core::mem::size_of::<LegacyPathDenyEntry>() == PATH_DENY_ENTRY_SIZE_LEGACY);
+
+impl LegacyPathDenyEntry {
+    /// Widen a legacy entry to the current ABI (zero-pad bytes to 32).
+    pub fn widen(self) -> Option<PathDenyEntry> {
+        let len = self.len as usize;
+        if len == 0 || len > PATH_DENY_KEY_BYTES_LEGACY {
+            return None;
+        }
+        PathDenyEntry::from_prefix(&self.bytes[..len])
+    }
 }
 
 impl PathDenyEntry {
@@ -476,6 +572,9 @@ unsafe impl aya::Pod for TelemetryHealthStats {}
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for PathDenyEntry {}
 
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for LegacyPathDenyEntry {}
+
 #[cfg(test)]
 mod bpf_obj_name_tests {
     use super::*;
@@ -504,6 +603,56 @@ mod bpf_obj_name_tests {
             }
             seen[i] = Some(trunc);
         }
+    }
+}
+
+#[cfg(test)]
+mod pin_abi_golden_tests {
+    use super::*;
+    use core::mem::size_of;
+
+    /// Incident #208 regression: layout change without version bump must fail CI.
+    #[test]
+    fn pinned_map_abi_matches_computed_sizes_and_version() {
+        assert_eq!(ENFORCEMENT_PIN_ABI_VERSION, 2);
+        assert_eq!(size_of::<PathDenyEntry>(), PATH_DENY_ENTRY_SIZE);
+        assert_eq!(size_of::<PathDenyEntry>(), 36);
+        assert_eq!(
+            size_of::<LegacyPathDenyEntry>(),
+            PATH_DENY_ENTRY_SIZE_LEGACY
+        );
+        assert_eq!(size_of::<LegacyPathDenyEntry>(), 20);
+
+        let list = PINNED_MAP_ABI
+            .iter()
+            .find(|m| m.name == PATH_DENY_LIST_MAP)
+            .expect("PATH_DENY_LIST in ABI table");
+        assert_eq!(list.value_size, PATH_DENY_ENTRY_SIZE as u32);
+        assert_eq!(list.max_entries, PATH_DENY_MAX_ENTRIES);
+        assert_eq!(list.key_size, 4);
+        assert_eq!(list.map_type, BPF_MAP_TYPE_ARRAY);
+
+        let count = PINNED_MAP_ABI
+            .iter()
+            .find(|m| m.name == PATH_DENY_COUNT_MAP)
+            .expect("PATH_DENY_COUNT in ABI table");
+        assert_eq!(count.value_size, 4);
+        assert_eq!(count.max_entries, 1);
+    }
+
+    #[test]
+    fn widen_legacy_preserves_len_and_zero_pads() {
+        let mut legacy = LegacyPathDenyEntry {
+            len: 5,
+            bytes: [0; PATH_DENY_KEY_BYTES_LEGACY],
+        };
+        legacy.bytes[..5].copy_from_slice(b"/tmp/");
+        let wide = legacy.widen().expect("widen");
+        assert_eq!(wide.len, 5);
+        assert_eq!(&wide.bytes[..5], b"/tmp/");
+        assert!(wide.bytes[5..].iter().all(|&b| b == 0));
+        assert!(wide.matches(b"/tmp/evil"));
+        assert!(!wide.matches(b"/var/tmp/x"));
     }
 }
 
