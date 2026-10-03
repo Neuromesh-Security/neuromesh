@@ -296,10 +296,7 @@ pub fn select_deny_legacy_dir<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<Op
     let dirs = list_legacy_abi_dirs(io, pin_root)?;
     let mut best: Option<(u32, PathBuf)> = None;
     for dir in dirs {
-        let name = dir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let Some(n) = legacy_abi_numeric_suffix(name) else {
             continue;
         };
@@ -1199,9 +1196,7 @@ mod tests {
             PinAbiState::MigrationInProgress { legacy_dir } => {
                 assert_eq!(legacy_dir, d10);
             }
-            other => panic!(
-                "expected MigrationInProgress toward legacy_abi_10, got {other:?}"
-            ),
+            other => panic!("expected MigrationInProgress toward legacy_abi_10, got {other:?}"),
         }
     }
 
@@ -1352,7 +1347,9 @@ mod tests {
         io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
         io.set_info(&root.join(PATH_DENY_COUNT_MAP), count_info());
         assert_eq!(
-            io.map_info(&root.join(PATH_DENY_LIST_MAP)).unwrap().value_size,
+            io.map_info(&root.join(PATH_DENY_LIST_MAP))
+                .unwrap()
+                .value_size,
             20
         );
         let entries = vec![
@@ -1382,10 +1379,17 @@ mod tests {
                     assert_eq!(a.bytes, b.bytes);
                 }
                 // Widened entries use the current 36B ABI key width.
-                assert!(migrated.iter().all(|e| e.bytes.len() == PATH_DENY_KEY_BYTES));
+                assert!(migrated
+                    .iter()
+                    .all(|e| e.bytes.len() == PATH_DENY_KEY_BYTES));
                 assert_eq!(PATH_DENY_ENTRY_SIZE, 36);
-                assert!(migrated.iter().any(|e| e.matches(b"/opt/neuromesh/staging/x")));
-                assert!(!migrated.is_empty(), "deny list must never be empty after migrate");
+                assert!(migrated
+                    .iter()
+                    .any(|e| e.matches(b"/opt/neuromesh/staging/x")));
+                assert!(
+                    !migrated.is_empty(),
+                    "deny list must never be empty after migrate"
+                );
             }
             other => panic!("unexpected seed {other:?}"),
         }
@@ -1571,8 +1575,8 @@ mod tests {
                     let mut window = [0u8; LEGACY_KEY];
                     let wlen = path.len().min(LEGACY_KEY);
                     window[..wlen].copy_from_slice(&path[..wlen]);
-                    let window_hit = wlen >= prefix_len
-                        && window[..prefix_len] == legacy.bytes[..prefix_len];
+                    let window_hit =
+                        wlen >= prefix_len && window[..prefix_len] == legacy.bytes[..prefix_len];
                     // For paths shorter than prefix, both miss; for longer paths
                     // window head matches legacy_hit on the significant prefix.
                     if path_len <= LEGACY_KEY {

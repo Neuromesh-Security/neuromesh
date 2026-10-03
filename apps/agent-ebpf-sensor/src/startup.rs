@@ -18,8 +18,7 @@ use agent_ebpf_sensor::observability::AgentMetrics;
 use agent_ebpf_sensor::path_deny::{self, PathDenyMaps, PolicySyncState};
 use agent_ebpf_sensor::pin_abi::{
     cleanup_legacy_abi_dirs, cleanup_proc_abi_dirs, prepare_pin_root_for_load, DenySeedOverride,
-    MigrationResult,
-    RealPinAbiIo,
+    MigrationResult, RealPinAbiIo,
 };
 use agent_ebpf_sensor::pin_root;
 use agent_ebpf_sensor::policy_sync;
