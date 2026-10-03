@@ -111,6 +111,15 @@ spec:
               readOnly: true
           resources:
 {{ toYaml .Values.agent.resources | indent 12 }}
+          # Readiness gates rollout (Issue #208): /healthz binds only after LSM arm.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /healthz
