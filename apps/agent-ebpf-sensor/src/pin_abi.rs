@@ -401,6 +401,35 @@ pub fn resolve_deny_pin_locations<I: PinAbiIo>(
     Ok(DenyPinLocations { list, count })
 }
 
+/// Finish an interrupted COUNT-then-LIST stage before reading.
+///
+/// For each deny map: if the canonical pin exists and its staged counterpart
+/// does not, rename canonical → staged. Atomic, preserves the sole copy, frees
+/// the canonical name for aya load, and is idempotent if crash recurs.
+///
+/// Never deletes a canonical pin whose staged counterpart is missing.
+fn complete_interrupted_deny_stage<I: PinAbiIo>(
+    io: &I,
+    pin_root: &Path,
+    legacy_dir: &Path,
+) -> Result<()> {
+    io.create_dir_all(legacy_dir)?;
+    for name in [PATH_DENY_LIST_MAP, PATH_DENY_COUNT_MAP] {
+        let canon = pin_root.join(name);
+        let staged = legacy_dir.join(name);
+        if io.exists(&canon) && !io.exists(&staged) {
+            io.rename(&canon, &staged)?;
+            tracing::info!(
+                target: "neuromesh::pin_abi",
+                from = %canon.display(),
+                to = %staged.display(),
+                "completed interrupted deny stage rename (canonical → staging)"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn expected_abi(name: &str) -> Option<&'static PinnedMapAbi> {
     PINNED_MAP_ABI.iter().find(|m| m.name == name)
 }
@@ -678,14 +707,15 @@ pub fn prepare_pin_root_for_load<I: PinAbiIo>(
             ))
         }
         PinAbiState::MigrationInProgress { legacy_dir } => {
+            // Complete interrupted COUNT→LIST stage first so a stale 20B pin
+            // never remains at a canonical name for aya to reuse without ABI check.
+            complete_interrupted_deny_stage(io, pin_root, &legacy_dir)?;
             let locs = resolve_deny_pin_locations(io, pin_root, &legacy_dir)?;
             let entries = match io.read_legacy_deny_entries_at(&locs.list, &locs.count) {
                 Ok(e) => {
                     // Data is now in memory. Free a canonical name only when a
-                    // staging copy already exists — otherwise the canonical pin
-                    // may be the sole unread source mid-stage (COUNT-first crash).
-                    // R1: when empty current-ABI maps coexist with staging, free
-                    // only after confirming canonical COUNT == 0.
+                    // staging copy already exists. R1: when empty current-ABI
+                    // maps coexist with staging, free only after COUNT == 0.
                     let canon_count = pin_root.join(PATH_DENY_COUNT_MAP);
                     let staged_count = legacy_dir.join(PATH_DENY_COUNT_MAP);
                     if io.exists(&canon_count) && io.exists(&staged_count) {
@@ -718,11 +748,10 @@ pub fn prepare_pin_root_for_load<I: PinAbiIo>(
                         count = %locs.count.display(),
                         "MigrationInProgress but legacy entries unreadable — bootstrap fallback"
                     );
-                    // Do NOT delete a canonical pin that may still hold the only
-                    // copy of unread deny data. Only free a canonical name when a
-                    // staging copy already exists (so we are not destroying the
-                    // sole unread source). R1: free empty current-ABI only after
-                    // confirming canonical COUNT == 0 when both copies exist.
+                    // Interrupted stage already completed above (sole-copy renamed
+                    // into staging). Free empty current-ABI canonicals only when
+                    // a staging copy exists and COUNT == 0 (R1). Never delete a
+                    // canonical whose staged counterpart is missing.
                     let canon_count = pin_root.join(PATH_DENY_COUNT_MAP);
                     let staged_count = legacy_dir.join(PATH_DENY_COUNT_MAP);
                     let canon_empty_ok = if io.exists(&canon_count) && io.exists(&staged_count) {
@@ -744,6 +773,8 @@ pub fn prepare_pin_root_for_load<I: PinAbiIo>(
                                 );
                             }
                         } else if io.exists(&canon) && !io.exists(&staged) {
+                            // Should be unreachable after complete_interrupted_deny_stage;
+                            // keep fail-closed retention rather than destroy F3 data.
                             tracing::warn!(
                                 target: "neuromesh::pin_abi",
                                 pin = %canon.display(),
