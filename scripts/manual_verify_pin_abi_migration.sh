@@ -15,7 +15,7 @@
 #   3) Legacy attach proven via link prog_id ↔ prog name cross-ref
 #   4) Wait /healthz + legacy_abi_* gone + legacy prog id gone
 #   5) Exactly one NEW nm_lsm_bprm id after migration
-#   6) Dump deny maps for F3 evidence
+#   6) F3: dump legacy LIST+COUNT before handoff; after migrate assert entry-set equality + COUNT
 #   7) No WARN-only /opt side-effect probe (fail-closed on /tmp only)
 #   8) PROBE_LOG path is consistent (probe script writes to $PROBE_LOG)
 #   9) Refuse rm -rf of production pin root; parse bytes_value via bpftool -j
@@ -33,6 +33,9 @@
 #   1 — failure during a proven run
 #   2 — F2 NOT PROVEN (missing LEGACY_AGENT_BIN / unclean host / bad pin root)
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PARSER="${PARSER:-$SCRIPT_DIR/pin_abi_verify_parsers.py}"
 
 PIN_ROOT="${NEUROMESH_BPF_PIN_ROOT:-/sys/fs/bpf/neuromesh-pin-abi-verify}"
 AGENT_BIN="${AGENT_BIN:-./target/release/agent-ebpf-sensor}"
@@ -135,6 +138,7 @@ log "== preflight =="
 test -x "$AGENT_BIN" || die "AGENT_BIN not executable: $AGENT_BIN"
 command -v bpftool >/dev/null || die "bpftool required"
 command -v python3 >/dev/null || die "python3 required"
+test -f "$PARSER" || die "parser helper missing: $PARSER"
 command -v jq >/dev/null || die "jq required (bpftool -j parsing)"
 command -v curl >/dev/null || die "curl required (healthz wait)"
 test -d /sys/fs/bpf || die "/sys/fs/bpf missing"
@@ -228,6 +232,17 @@ fi
 [[ ! -s "$PROBE_LOG" ]] || die "negative control failed: PROBE_LOG non-empty under legacy deny"
 log "negative control OK: probe denied under legacy attach"
 
+# F3 baseline: dump legacy LIST+COUNT (bpftool -j) before handoff.
+mkdir -p "$MAP_DUMP_DIR"
+bpftool -j map dump pinned "$PIN_ROOT/PATH_DENY_LIST" \
+  >"$MAP_DUMP_DIR/legacy_PATH_DENY_LIST.json"
+bpftool -j map dump pinned "$PIN_ROOT/PATH_DENY_COUNT" \
+  >"$MAP_DUMP_DIR/legacy_PATH_DENY_COUNT.json"
+LEGACY_COUNT0="$(python3 "$PARSER" count0 "$MAP_DUMP_DIR/legacy_PATH_DENY_COUNT.json")"
+[[ "$LEGACY_COUNT0" -gt 0 ]] \
+  || die "F3 baseline: legacy PATH_DENY_COUNT[0] empty/zero"
+log "F3 baseline: legacy dumps under $MAP_DUMP_DIR (COUNT[0]=$LEGACY_COUNT0)"
+
 # Background probe loop through migration (F2 window).
 log "== background /tmp probe loop (must stay denied; started after legacy attach) =="
 : >"$PROBE_LOG"
@@ -313,40 +328,23 @@ shopt -u nullglob
 [[ ${#PROC_LEFT[@]} -eq 0 ]] || die "proc_abi_* still present: ${PROC_LEFT[*]}"
 log "legacy_abi_* / proc_abi_* cleaned up"
 
-# (6) Dump maps for F3 evidence (entry carry / non-empty deny).
+# (6) F3: assert entry continuity (legacy dump vs post-migrate dump).
 mkdir -p "$MAP_DUMP_DIR"
-bpftool map dump pinned "$PIN_ROOT/PATH_DENY_LIST" >"$MAP_DUMP_DIR/PATH_DENY_LIST.dump"
-bpftool map dump pinned "$PIN_ROOT/PATH_DENY_COUNT" >"$MAP_DUMP_DIR/PATH_DENY_COUNT.dump"
-bpftool -j map show pinned "$PIN_ROOT/PATH_DENY_LIST" >"$MAP_DUMP_DIR/PATH_DENY_LIST.json"
-bpftool -j map show pinned "$PIN_ROOT/PATH_DENY_COUNT" >"$MAP_DUMP_DIR/PATH_DENY_COUNT.json"
+bpftool -j map dump pinned "$PIN_ROOT/PATH_DENY_LIST" \
+  >"$MAP_DUMP_DIR/new_PATH_DENY_LIST.json"
+bpftool -j map dump pinned "$PIN_ROOT/PATH_DENY_COUNT" \
+  >"$MAP_DUMP_DIR/new_PATH_DENY_COUNT.json"
+bpftool -j map show pinned "$PIN_ROOT/PATH_DENY_LIST" >"$MAP_DUMP_DIR/PATH_DENY_LIST.show.json"
+bpftool -j map show pinned "$PIN_ROOT/PATH_DENY_COUNT" >"$MAP_DUMP_DIR/PATH_DENY_COUNT.show.json"
 COUNT_BV="$(pinned_bytes_value "$PIN_ROOT/PATH_DENY_COUNT")"
 [[ "$COUNT_BV" -eq 4 ]] || die "expected PATH_DENY_COUNT bytes_value=4; got $COUNT_BV"
-# COUNT[0] must be non-zero (fail-open guard).
-python3 -c '
-import pathlib, re, sys
-text = pathlib.Path(sys.argv[1]).read_text()
-# bpftool dump text often contains "value:" lines; accept hex or decimal.
-nums = [int(x, 0) for x in re.findall(r"value:\s*(0x[0-9a-fA-F]+|\d+)", text)]
-if not nums:
-    # JSON-ish fallback
-    import json
-    try:
-        data = json.loads(text)
-        if isinstance(data, list) and data:
-            v = data[0].get("value")
-            if isinstance(v, list) and v:
-                nums = [int(v[0])]
-            elif isinstance(v, int):
-                nums = [v]
-    except Exception:
-        pass
-if not nums or nums[0] == 0:
-    sys.stderr.write("F3 dump: PATH_DENY_COUNT appears empty/zero\n")
-    sys.exit(1)
-print(nums[0])
-' "$MAP_DUMP_DIR/PATH_DENY_COUNT.dump" >/dev/null \
-  || die "F3: PATH_DENY_COUNT dump empty/zero (see $MAP_DUMP_DIR)"
-log "F3 map dump written under $MAP_DUMP_DIR"
+python3 "$PARSER" f3_continuity \
+  "$MAP_DUMP_DIR/legacy_PATH_DENY_LIST.json" \
+  "$MAP_DUMP_DIR/legacy_PATH_DENY_COUNT.json" \
+  "$MAP_DUMP_DIR/new_PATH_DENY_LIST.json" \
+  "$MAP_DUMP_DIR/new_PATH_DENY_COUNT.json" \
+  || die "F3: entry continuity / COUNT mismatch (see $MAP_DUMP_DIR)"
+log "F3 OK: legacy LIST identities == new LIST; COUNT matched (dumps under $MAP_DUMP_DIR)"
 
 # (7) No WARN-only /opt side-effect probe — /tmp deny is the sole F2 oracle.
 
@@ -360,6 +358,9 @@ AGENT_PID=$!
 wait_healthz || die "healthz not ready after resume"
 RESUME_BV="$(pinned_bytes_value "$PIN_ROOT/PATH_DENY_LIST")"
 [[ "$RESUME_BV" -eq 36 ]] || die "resume lost bytes_value=36 (got $RESUME_BV)"
+# Background loop may still be running — assert empty before truncating.
+[[ ! -s "$PROBE_LOG" ]] \
+  || die "PROBE_LOG non-empty before truncate ($(wc -l <"$PROBE_LOG") hits since migrated check)"
 : >"$PROBE_LOG"
 if "$PROBE_SCRIPT" 2>/dev/null; then
   die "/tmp probe succeeded after resume"
