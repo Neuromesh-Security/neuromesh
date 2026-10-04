@@ -2121,9 +2121,7 @@ mod tests {
         assert!(!io.exists(&root.join(PATH_DENY_LIST_MAP)));
         assert!(io.exists(&legacy.join(PATH_DENY_LIST_MAP)));
         assert_eq!(
-            io.payload(&legacy.join(PATH_DENY_LIST_MAP))
-                .unwrap()
-                .len(),
+            io.payload(&legacy.join(PATH_DENY_LIST_MAP)).unwrap().len(),
             PATH_DENY_ENTRY_SIZE_LEGACY
         );
 
@@ -2131,8 +2129,11 @@ mod tests {
         apply_seed_like_startup(&io, &root, &seed);
         let got = read_canonical_entries(&io, &root).unwrap();
         let expected = legacy_entries[0].widen().unwrap();
-        assert_eq!(got, vec![expected.clone()]);
-        assert_eq!(encode_path_deny_entry(&got[0]), encode_path_deny_entry(&expected));
+        assert_eq!(got, vec![expected]);
+        assert_eq!(
+            encode_path_deny_entry(&got[0]),
+            encode_path_deny_entry(&expected)
+        );
     }
 
     #[test]
