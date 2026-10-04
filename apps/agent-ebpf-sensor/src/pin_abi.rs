@@ -62,8 +62,11 @@ pub enum PinAbiState {
     Compatible,
     /// Pre-#134 deny-list pins present; migrate before load.
     LegacyMigratable,
-    /// Deny `legacy_abi_<n>` staging present without complete canonical pins —
-    /// resume interrupted migration. Process-only `proc_abi_*` is not this state.
+    /// Deny `legacy_abi_<n>` staging present and either:
+    /// - canonical LIST+COUNT incomplete (mid-stage rename), or
+    /// - current-ABI LIST+COUNT present with `PATH_DENY_COUNT[0] == 0` (post-load
+    ///   pre-seed poison / R1 — empty fresh maps coexist with readable staging).
+    /// Process-only `proc_abi_*` is not this state.
     MigrationInProgress { legacy_dir: PathBuf },
     /// Unknown / unsupported layout — refuse (F4).
     Incompatible { map: String, detail: String },
@@ -495,8 +498,16 @@ pub fn assess_pin_abi<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<PinAbiStat
         }
     }
 
-    // Compatible canonical maps + leftover deny/proc staging → Compatible;
-    // prepare/cleanup will remove staging after LSM handoff.
+    // Current-ABI canonical maps + deny staging:
+    // - count == 0 → MigrationInProgress (R1: post-load pre-seed poison; re-read staging)
+    // - count > 0  → Compatible / ResumePinned (seed already applied; cleanup after handoff)
+    if let Some(legacy_dir) = select_deny_legacy_dir(io, pin_root)? {
+        let active = io.read_deny_count(&count_path)?;
+        if active == 0 {
+            return Ok(PinAbiState::MigrationInProgress { legacy_dir });
+        }
+    }
+
     Ok(PinAbiState::Compatible)
 }
 
@@ -672,6 +683,18 @@ pub fn prepare_pin_root_for_load<I: PinAbiIo>(
                     // Data is now in memory. Free a canonical name only when a
                     // staging copy already exists — otherwise the canonical pin
                     // may be the sole unread source mid-stage (COUNT-first crash).
+                    // R1: when empty current-ABI maps coexist with staging, free
+                    // only after confirming canonical COUNT == 0.
+                    let canon_count = pin_root.join(PATH_DENY_COUNT_MAP);
+                    let staged_count = legacy_dir.join(PATH_DENY_COUNT_MAP);
+                    if io.exists(&canon_count) && io.exists(&staged_count) {
+                        let active = io.read_deny_count(&canon_count)?;
+                        if active != 0 {
+                            bail!(
+                                "MigrationInProgress with non-empty canonical                                  PATH_DENY_COUNT ({active}) while staging exists —                                  refusing to free pins (internal invariant)"
+                            );
+                        }
+                    }
                     for name in [PATH_DENY_LIST_MAP, PATH_DENY_COUNT_MAP] {
                         let canon = pin_root.join(name);
                         let staged = legacy_dir.join(name);
@@ -697,12 +720,29 @@ pub fn prepare_pin_root_for_load<I: PinAbiIo>(
                     // Do NOT delete a canonical pin that may still hold the only
                     // copy of unread deny data. Only free a canonical name when a
                     // staging copy already exists (so we are not destroying the
-                    // sole unread source).
+                    // sole unread source). R1: free empty current-ABI only after
+                    // confirming canonical COUNT == 0 when both copies exist.
+                    let canon_count = pin_root.join(PATH_DENY_COUNT_MAP);
+                    let staged_count = legacy_dir.join(PATH_DENY_COUNT_MAP);
+                    let canon_empty_ok = if io.exists(&canon_count) && io.exists(&staged_count)
+                    {
+                        io.read_deny_count(&canon_count)? == 0
+                    } else {
+                        true
+                    };
                     for name in [PATH_DENY_LIST_MAP, PATH_DENY_COUNT_MAP] {
                         let canon = pin_root.join(name);
                         let staged = legacy_dir.join(name);
                         if io.exists(&canon) && io.exists(&staged) {
-                            io.remove_file(&canon)?;
+                            if canon_empty_ok {
+                                io.remove_file(&canon)?;
+                            } else {
+                                tracing::warn!(
+                                    target: "neuromesh::pin_abi",
+                                    pin = %canon.display(),
+                                    "retaining non-empty canonical deny pin despite unreadable staging"
+                                );
+                            }
                         } else if io.exists(&canon) && !io.exists(&staged) {
                             tracing::warn!(
                                 target: "neuromesh::pin_abi",
@@ -785,11 +825,9 @@ mod tests {
         CountRename,
         ListRename,
         ProcessMapRename,
-        /// Post-load empty canonical + staging (R1 poison) — commit 2.
-        #[allow(dead_code)]
+        /// Post-load empty canonical + staging (R1 poison).
         FreshCanonicalEmpty,
-        /// Post-load: LIST slots written; COUNT still 0 (needs R1) — commit 2.
-        #[allow(dead_code)]
+        /// Post-load: LIST slots written; COUNT still 0 (R1 poison).
         ListPartiallyWritten,
         /// Post-load: LIST+COUNT fully seeded; crash before link replace.
         CountWritten,
@@ -1758,8 +1796,40 @@ mod tests {
                     "{err}"
                 );
             }
-            MigrationCrashAfter::FreshCanonicalEmpty | MigrationCrashAfter::ListPartiallyWritten => {
-                unreachable!("R1 poison steps deferred to commit 2");
+            MigrationCrashAfter::FreshCanonicalEmpty => {
+                let (_seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+                assert!(results.contains(&MigrationResult::Migrated));
+                simulate_load_empty_canonical(&io, &root);
+                // Crash after load, before seed — empty current-ABI + staging (R1).
+                assert!(!list_legacy_abi_dirs(&io, &root).unwrap().is_empty());
+                assert_eq!(
+                    io.read_deny_count(&root.join(PATH_DENY_COUNT_MAP)).unwrap(),
+                    0
+                );
+            }
+            MigrationCrashAfter::ListPartiallyWritten => {
+                let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+                assert!(results.contains(&MigrationResult::Migrated));
+                simulate_load_empty_canonical(&io, &root);
+                // LIST slots written from seed payload; COUNT left at 0 (R1 poison).
+                match &seed {
+                    DenySeedOverride::MigratedEntries { entries, .. } => {
+                        let list = root.join(PATH_DENY_LIST_MAP);
+                        let mut payload =
+                            Vec::with_capacity(entries.len() * PATH_DENY_ENTRY_SIZE);
+                        for e in entries {
+                            payload.extend_from_slice(&encode_path_deny_entry(e));
+                        }
+                        io.set_payload(&list, payload);
+                        // COUNT remains 0 from simulate_load_empty_canonical.
+                        assert_eq!(
+                            io.read_deny_count(&root.join(PATH_DENY_COUNT_MAP)).unwrap(),
+                            0
+                        );
+                    }
+                    other => panic!("expected MigratedEntries seed, got {other:?}"),
+                }
+                assert!(!list_legacy_abi_dirs(&io, &root).unwrap().is_empty());
             }
             MigrationCrashAfter::CountWritten => {
                 let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
@@ -1799,14 +1869,152 @@ mod tests {
     }
 
     #[test]
+    fn empty_current_abi_canonical_with_staging_is_migration_in_progress() {
+        // R1 poison: post-load empty current-ABI LIST+COUNT + readable staging.
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins_r1_assess");
+        let legacy = root.join("legacy_abi_0");
+        io.touch_dir(&root);
+        io.touch_dir(&legacy);
+        let legacy_entries = legacy_from_prefixes(&[b"/tmp/", b"/opt/nm/staging/"]);
+        install_legacy_deny(
+            &io,
+            &legacy.join(PATH_DENY_LIST_MAP),
+            &legacy.join(PATH_DENY_COUNT_MAP),
+            &legacy_entries,
+        );
+        simulate_load_empty_canonical(&io, &root);
+        assert_eq!(
+            io.read_deny_count(&root.join(PATH_DENY_COUNT_MAP)).unwrap(),
+            0
+        );
+        match assess_pin_abi(&io, &root).unwrap() {
+            PinAbiState::MigrationInProgress { legacy_dir } => {
+                assert_eq!(legacy_dir, legacy);
+            }
+            other => panic!(
+                "expected MigrationInProgress for empty canonical + staging, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn prepare_empty_canonical_plus_staging_resumes_from_legacy() {
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins_r1_resume");
+        let legacy = root.join("legacy_abi_0");
+        io.touch_dir(&root);
+        io.touch_dir(&legacy);
+        let legacy_entries = legacy_from_prefixes(&[b"/tmp/", b"/opt/nm/staging/"]);
+        install_legacy_deny(
+            &io,
+            &legacy.join(PATH_DENY_LIST_MAP),
+            &legacy.join(PATH_DENY_COUNT_MAP),
+            &legacy_entries,
+        );
+        simulate_load_empty_canonical(&io, &root);
+
+        let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+        assert!(
+            results.contains(&MigrationResult::ResumedMigration),
+            "results={results:?}"
+        );
+        assert!(!results.contains(&MigrationResult::Compatible));
+        assert!(!results.contains(&MigrationResult::BootstrapFallback));
+        // Empty canonical freed so load can recreate; staging retained until handoff.
+        assert!(!io.exists(&root.join(PATH_DENY_LIST_MAP)));
+        assert!(!io.exists(&root.join(PATH_DENY_COUNT_MAP)));
+        assert!(io.exists(&legacy.join(PATH_DENY_LIST_MAP)));
+        match seed {
+            DenySeedOverride::MigratedEntries {
+                entries,
+                from_legacy,
+            } => {
+                assert!(from_legacy);
+                assert_eq!(entries.len(), 2);
+                assert!(entries.iter().any(|e| e.matches(b"/opt/nm/staging/x")));
+            }
+            other => panic!("expected MigratedEntries from_legacy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_empty_canonical_plus_unreadable_staging_bootstrap_fallback() {
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins_r1_unreadable");
+        let legacy = root.join("legacy_abi_0");
+        io.touch_dir(&root);
+        io.touch_dir(&legacy);
+        // Staging present but COUNT==0 → unreadable / refuse empty.
+        io.set_info(&legacy.join(PATH_DENY_LIST_MAP), legacy_list_info());
+        io.set_info(&legacy.join(PATH_DENY_COUNT_MAP), count_info());
+        io.set_payload(&legacy.join(PATH_DENY_LIST_MAP), Vec::new());
+        io.set_payload(
+            &legacy.join(PATH_DENY_COUNT_MAP),
+            0u32.to_ne_bytes().to_vec(),
+        );
+        simulate_load_empty_canonical(&io, &root);
+
+        let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+        assert!(results.contains(&MigrationResult::BootstrapFallback));
+        match seed {
+            DenySeedOverride::MigratedEntries {
+                entries,
+                from_legacy,
+            } => {
+                assert!(!from_legacy);
+                assert!(!entries.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn count_nonzero_canonical_with_staging_stays_compatible_resume() {
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins_r1_seeded");
+        let legacy = root.join("legacy_abi_0");
+        io.touch_dir(&root);
+        io.touch_dir(&legacy);
+        let legacy_entries = legacy_from_prefixes(&[b"/tmp/"]);
+        install_legacy_deny(
+            &io,
+            &legacy.join(PATH_DENY_LIST_MAP),
+            &legacy.join(PATH_DENY_COUNT_MAP),
+            &legacy_entries,
+        );
+        let operator = PathDenyEntry::from_prefix(b"/opt/nm/staging/").unwrap();
+        write_canonical_entries(
+            &io,
+            &root.join(PATH_DENY_LIST_MAP),
+            &root.join(PATH_DENY_COUNT_MAP),
+            &[operator.clone()],
+        );
+        assert_eq!(assess_pin_abi(&io, &root).unwrap(), PinAbiState::Compatible);
+        let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+        assert!(results.contains(&MigrationResult::Compatible));
+        assert!(!results.contains(&MigrationResult::ResumedMigration));
+        assert_eq!(seed, DenySeedOverride::ResumePinned);
+        // Canonical pins retained (count>0).
+        assert!(io.exists(&root.join(PATH_DENY_LIST_MAP)));
+        assert_eq!(
+            io.read_deny_count(&root.join(PATH_DENY_COUNT_MAP)).unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn crash_after_each_migration_step_converges() {
-        // R2: explicit step machine; crash *after* each step; resume via prepare
+
+        // Explicit step machine; crash *after* each step; resume via prepare
         // + seed apply (startup.rs). No legacy_entries re-injection — payloads
-        // travel with rename. FreshCanonicalEmpty / ListPartiallyWritten deferred (R1).
+        // travel with rename. FreshCanonicalEmpty / ListPartiallyWritten are R1.
         let steps = [
             MigrationCrashAfter::CountRename,
             MigrationCrashAfter::ListRename,
             MigrationCrashAfter::ProcessMapRename,
+            MigrationCrashAfter::FreshCanonicalEmpty,
+            MigrationCrashAfter::ListPartiallyWritten,
             MigrationCrashAfter::CountWritten,
             MigrationCrashAfter::LinkReplaced,
             MigrationCrashAfter::CleanupPartial,
@@ -1817,6 +2025,15 @@ mod tests {
             let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
 
             match step {
+                MigrationCrashAfter::FreshCanonicalEmpty
+                | MigrationCrashAfter::ListPartiallyWritten => {
+                    assert!(
+                        results.contains(&MigrationResult::ResumedMigration),
+                        "R1 poison must resume migration, not Compatible/ResumePinned: step={step:?} results={results:?}"
+                    );
+                    assert!(!results.contains(&MigrationResult::BootstrapFallback));
+                    assert_seed_converged(&io, &root, &seed, &results, &operator, true);
+                }
                 MigrationCrashAfter::CountWritten
                 | MigrationCrashAfter::LinkReplaced
                 | MigrationCrashAfter::CleanupPartial => {

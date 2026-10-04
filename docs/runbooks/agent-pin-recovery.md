@@ -57,8 +57,32 @@ On agent start, before `EbpfLoader::load`:
 3. Unknown layouts → **refuse start** with an actionable error (never coerce).
 4. Process maps (`PROCESS_EVENTS`, `RLIMIT_BUCKET`) may be recreated on mismatch
    (non-enforcement state only).
+5. **Empty current-ABI + staging (R1 poison):** if canonical `PATH_DENY_LIST` /
+   `PATH_DENY_COUNT` already match the current ABI **and**
+   `PATH_DENY_COUNT[0] == 0` **and** a `legacy_abi_<n>/` staging dir still holds
+   readable LIST/COUNT, treat as `MigrationInProgress` — re-read staged entries,
+   free the empty canonical names, seed `MigratedEntries{from_legacy:true}`, and
+   resume (`ResumedMigration`). Unreadable staging → bootstrap fallback.
+   If `COUNT > 0` with leftover staging, resume pinned content (`Compatible`) and
+   delete staging only after the new LSM link is live.
 
 Live proof script: `scripts/manual_verify_pin_abi_migration.sh`.
+
+### Empty-canonical + staging recovery (automatic)
+
+**Shape:** `PATH_DENY_LIST`/`PATH_DENY_COUNT` present at the pin root with current
+ABI sizes (value 36B / count 4B), `PATH_DENY_COUNT[0] == 0`, and
+`legacy_abi_<n>/PATH_DENY_*` still present (crash between `EbpfLoader::load` and
+first seed after a legacy migrate).
+
+**Do not wipe pins.** Restarting a fixed agent (Issue #208) re-enters
+`prepare_pin_root_for_load`, classifies `MigrationInProgress`, reseeds from
+staging, and completes LSM handoff + `legacy_abi_*` cleanup. Manual
+`rm -rf` of the production pin root opens an enforcement gap — lab only.
+
+**Related cold-start gap (not auto-recovered here):** fresh current-ABI deny pair
+with `COUNT == 0`, **no** `legacy_abi_*`, failure between `load()` and first seed
+still refuse-forever via `deny_map_seed_plan` (tracked separately).
 
 ## Building LEGACY_AGENT_BIN (pre-#134) for F2 live proof
 
