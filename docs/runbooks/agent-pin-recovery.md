@@ -129,8 +129,11 @@ sudo -E bash scripts/manual_verify_pin_abi_migration.sh
 5. **Convergence:** wait `/healthz` (default `:9090`) + `legacy_abi_*` gone +
    legacy prog id gone; assert exactly **one new** `nm_lsm_bprm` id.
 6. **ABI sizes:** parse `bytes_value` from `bpftool -j map show` (20 → 36).
-7. **F3 dump:** writes map dumps under `/tmp/nm_pin_abi_map_dump` (or
-   `MAP_DUMP_DIR`).
+7. **F3 continuity:** dump legacy `PATH_DENY_LIST`/`PATH_DENY_COUNT` via
+   `bpftool -j map dump` after legacy attach (before handoff); after migration
+   assert every legacy entry identity (`u32` len + first `len` key bytes) is
+   present in the new LIST, the entry sets are equal, and `COUNT[0]` matches.
+   Dumps live under `/tmp/nm_pin_abi_map_dump` (or `MAP_DUMP_DIR`).
 8. **Exit codes:** `0` proven pass, `1` failure, `2` F2 not proven.
 
 
