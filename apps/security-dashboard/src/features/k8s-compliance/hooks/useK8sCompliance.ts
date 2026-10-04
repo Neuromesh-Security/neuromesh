@@ -17,15 +17,6 @@ export interface UseK8sComplianceResult {
 async function hydrateFromControlPlane(): Promise<void> {
   const posture = await fetchClusterPosture();
 
-  console.log("[DEV] K8S PANEL FETCHED DATA:", {
-    eventCount: posture.rawEvents.length,
-    violationCount: posture.violations.length,
-    insightCount: posture.insightCount,
-    health: posture.health,
-    events: posture.rawEvents,
-    violations: posture.violations,
-  });
-
   k8sAdmissionStore.setPosture(
     posture.health,
     posture.violations,
