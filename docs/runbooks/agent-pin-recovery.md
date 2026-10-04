@@ -111,12 +111,27 @@ an isolated pin root on a BPF-LSM host:
 ```bash
 export AGENT_BIN=/path/to/current/target/release/agent-ebpf-sensor
 export LEGACY_AGENT_BIN=/tmp/neuromesh-legacy-526389b/target/release/agent-ebpf-sensor
+# Optional: NEUROMESH_BPF_PIN_ROOT=/sys/fs/bpf/neuromesh-pin-abi-verify (default)
 sudo -E bash scripts/manual_verify_pin_abi_migration.sh
 ```
 
-The script starts the /tmp probe **only after** the legacy `nm_lsm_bprm` is
-attached, keeps the probe through migration, and asserts **exactly one**
-`nm_lsm_bprm` via `bpftool -j prog show` filtered on `"name": "nm_lsm_bprm"`.
+### F2 VM requirements (non-vacuous)
+
+`scripts/manual_verify_pin_abi_migration.sh` refuses to fake-pass:
+
+1. **Clean host:** zero `nm_lsm_bprm` programs before start (exit 2 otherwise).
+2. **Isolated pin root:** never `/sys/fs/bpf/neuromesh` (script refuses `rm -rf`
+   on the production pin root).
+3. **Positive then negative probe control:** `/tmp` probe must succeed before
+   legacy attach, then fail after attach (proves the probe is wired).
+4. **Attach via `prog_id` cross-ref:** `bpftool -j link show` → `prog_id` must
+   resolve to `name == "nm_lsm_bprm"`.
+5. **Convergence:** wait `/healthz` (default `:9090`) + `legacy_abi_*` gone +
+   legacy prog id gone; assert exactly **one new** `nm_lsm_bprm` id.
+6. **ABI sizes:** parse `bytes_value` from `bpftool -j map show` (20 → 36).
+7. **F3 dump:** writes map dumps under `/tmp/nm_pin_abi_map_dump` (or
+   `MAP_DUMP_DIR`).
+8. **Exit codes:** `0` proven pass, `1` failure, `2` F2 not proven.
 
 
 ## Manual recovery (production caution)
