@@ -217,7 +217,7 @@ pub async fn attest_and_load_enforcement(
         )
         .override_global("TASK_TGID_OFFSET", &resolved_offsets.task_tgid_offset, true);
     for map_name in PINNED_ENFORCEMENT_MAPS {
-        enforcement_loader.map_pin_path(*map_name, bpf_pin_root.join(map_name));
+        enforcement_loader.map_pin_path(map_name, bpf_pin_root.join(map_name));
     }
     let mut enforcement_bpf = enforcement_loader.load(enforcement_bpf_data).context(
         "failed to load enforcement eBPF object with BTF-resolved offsets injected — \

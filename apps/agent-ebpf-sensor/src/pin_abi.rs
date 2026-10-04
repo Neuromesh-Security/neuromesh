@@ -66,6 +66,7 @@ pub enum PinAbiState {
     /// - canonical LIST+COUNT incomplete (mid-stage rename), or
     /// - current-ABI LIST+COUNT present with `PATH_DENY_COUNT[0] == 0` (post-load
     ///   pre-seed poison / R1 — empty fresh maps coexist with readable staging).
+    ///
     /// Process-only `proc_abi_*` is not this state.
     MigrationInProgress { legacy_dir: PathBuf },
     /// Unknown / unsupported layout — refuse (F4).
@@ -724,8 +725,7 @@ pub fn prepare_pin_root_for_load<I: PinAbiIo>(
                     // confirming canonical COUNT == 0 when both copies exist.
                     let canon_count = pin_root.join(PATH_DENY_COUNT_MAP);
                     let staged_count = legacy_dir.join(PATH_DENY_COUNT_MAP);
-                    let canon_empty_ok = if io.exists(&canon_count) && io.exists(&staged_count)
-                    {
+                    let canon_empty_ok = if io.exists(&canon_count) && io.exists(&staged_count) {
                         io.read_deny_count(&canon_count)? == 0
                     } else {
                         true
@@ -870,7 +870,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .entry(p.to_path_buf())
-                .or_insert_with(Vec::new);
+                .or_default();
         }
         fn set_info(&self, p: &Path, info: ObservedMapInfo) {
             self.touch_file(p);
@@ -1129,9 +1129,9 @@ mod tests {
             let count_bytes = files.get(count_path).ok_or_else(|| {
                 anyhow::anyhow!("missing COUNT pin/payload at {}", count_path.display())
             })?;
-            let list_info = info.get(list_path).ok_or_else(|| {
-                anyhow::anyhow!("no map info for LIST {}", list_path.display())
-            })?;
+            let list_info = info
+                .get(list_path)
+                .ok_or_else(|| anyhow::anyhow!("no map info for LIST {}", list_path.display()))?;
             if count_bytes.len() < 4 {
                 bail!("COUNT payload truncated at {}", count_path.display());
             }
@@ -1626,12 +1626,8 @@ mod tests {
         let root = PathBuf::from("/pins");
         io.touch_dir(&root);
 
-        let legacy_entries = legacy_from_prefixes(&[
-            b"/tmp/",
-            b"/dev/shm/",
-            b"/var/tmp/",
-            b"/opt/nm/staging/",
-        ]);
+        let legacy_entries =
+            legacy_from_prefixes(&[b"/tmp/", b"/dev/shm/", b"/var/tmp/", b"/opt/nm/staging/"]);
         install_legacy_deny(
             &io,
             &root.join(PATH_DENY_LIST_MAP),
@@ -1647,7 +1643,10 @@ mod tests {
 
         let probe = b"/opt/nm/staging/x";
         assert!(legacy_starts_with_oracle(probe, &legacy_entries[3]));
-        assert!(!legacy_starts_with_oracle(b"/opt/other/", &legacy_entries[3]));
+        assert!(!legacy_starts_with_oracle(
+            b"/opt/other/",
+            &legacy_entries[3]
+        ));
 
         let expected_wide: Vec<PathDenyEntry> = legacy_entries
             .iter()
@@ -1693,12 +1692,8 @@ mod tests {
         let io = FakeIo::default();
         let root = PathBuf::from("/pins");
         io.touch_dir(&root);
-        let legacy_entries = legacy_from_prefixes(&[
-            b"/tmp/",
-            b"/dev/shm/",
-            b"/var/tmp/",
-            b"/opt/nm/staging/",
-        ]);
+        let legacy_entries =
+            legacy_from_prefixes(&[b"/tmp/", b"/dev/shm/", b"/var/tmp/", b"/opt/nm/staging/"]);
         install_legacy_deny(
             &io,
             &root.join(PATH_DENY_LIST_MAP),
@@ -1711,10 +1706,8 @@ mod tests {
                 .value_size,
             20
         );
-        let entries: Vec<PathDenyEntry> = legacy_entries
-            .iter()
-            .map(|e| e.widen().unwrap())
-            .collect();
+        let entries: Vec<PathDenyEntry> =
+            legacy_entries.iter().map(|e| e.widen().unwrap()).collect();
 
         let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
         assert!(results.contains(&MigrationResult::Migrated));
@@ -1735,9 +1728,7 @@ mod tests {
                     .iter()
                     .all(|e| e.bytes.len() == PATH_DENY_KEY_BYTES));
                 assert_eq!(PATH_DENY_ENTRY_SIZE, 36);
-                assert!(migrated
-                    .iter()
-                    .any(|e| e.matches(b"/opt/nm/staging/x")));
+                assert!(migrated.iter().any(|e| e.matches(b"/opt/nm/staging/x")));
                 assert!(
                     !migrated.is_empty(),
                     "deny list must never be empty after migrate"
@@ -1815,8 +1806,7 @@ mod tests {
                 match &seed {
                     DenySeedOverride::MigratedEntries { entries, .. } => {
                         let list = root.join(PATH_DENY_LIST_MAP);
-                        let mut payload =
-                            Vec::with_capacity(entries.len() * PATH_DENY_ENTRY_SIZE);
+                        let mut payload = Vec::with_capacity(entries.len() * PATH_DENY_ENTRY_SIZE);
                         for e in entries {
                             payload.extend_from_slice(&encode_path_deny_entry(e));
                         }
@@ -1892,9 +1882,9 @@ mod tests {
             PinAbiState::MigrationInProgress { legacy_dir } => {
                 assert_eq!(legacy_dir, legacy);
             }
-            other => panic!(
-                "expected MigrationInProgress for empty canonical + staging, got {other:?}"
-            ),
+            other => {
+                panic!("expected MigrationInProgress for empty canonical + staging, got {other:?}")
+            }
         }
     }
 
@@ -1988,7 +1978,7 @@ mod tests {
             &io,
             &root.join(PATH_DENY_LIST_MAP),
             &root.join(PATH_DENY_COUNT_MAP),
-            &[operator.clone()],
+            std::slice::from_ref(&operator),
         );
         assert_eq!(assess_pin_abi(&io, &root).unwrap(), PinAbiState::Compatible);
         let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
@@ -2005,7 +1995,6 @@ mod tests {
 
     #[test]
     fn crash_after_each_migration_step_converges() {
-
         // Explicit step machine; crash *after* each step; resume via prepare
         // + seed apply (startup.rs). No legacy_entries re-injection — payloads
         // travel with rename. FreshCanonicalEmpty / ListPartiallyWritten are R1.
