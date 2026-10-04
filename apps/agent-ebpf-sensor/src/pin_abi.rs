@@ -118,6 +118,9 @@ pub trait PinAbiIo {
         list_path: &Path,
         count_path: &Path,
     ) -> Result<Vec<PathDenyEntry>>;
+
+    /// Read `PATH_DENY_COUNT[0]` from a pinned count map.
+    fn read_deny_count(&self, count_pin: &Path) -> Result<u32>;
 }
 
 /// Production I/O backed by the real filesystem + aya `MapInfo` / map lookups.
@@ -238,6 +241,28 @@ impl PinAbiIo for RealPinAbiIo {
         {
             let _ = (list_path, count_path);
             bail!("legacy deny map reads require Linux + bpffs");
+        }
+    }
+
+    fn read_deny_count(&self, count_pin: &Path) -> Result<u32> {
+        #[cfg(target_os = "linux")]
+        {
+            use aya::maps::{Array, Map, MapData};
+            let count_map = Map::from_map_data(
+                MapData::from_pin(count_pin)
+                    .with_context(|| format!("open {}", count_pin.display()))?,
+            )
+            .with_context(|| format!("classify count map {}", count_pin.display()))?;
+            let count: Array<_, u32> =
+                Array::try_from(count_map).context("PATH_DENY_COUNT is not Array<u32>")?;
+            count
+                .get(&0, 0)
+                .with_context(|| format!("read PATH_DENY_COUNT[0] at {}", count_pin.display()))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = count_pin;
+            bail!("deny count reads require Linux + bpffs");
         }
     }
 }
@@ -370,19 +395,6 @@ pub fn resolve_deny_pin_locations<I: PinAbiIo>(
     };
 
     Ok(DenyPinLocations { list, count })
-}
-
-/// After a successful in-memory read, free canonical names so load can create
-/// fresh ABI-sized maps. Never call this before entries are safely in memory —
-/// a canonical pin may still hold the only copy of unread deny data (F3).
-fn free_canonical_deny_pins_after_read<I: PinAbiIo>(io: &I, pin_root: &Path) -> Result<()> {
-    for name in [PATH_DENY_LIST_MAP, PATH_DENY_COUNT_MAP] {
-        let p = pin_root.join(name);
-        if io.exists(&p) {
-            io.remove_file(&p)?;
-        }
-    }
-    Ok(())
 }
 
 fn expected_abi(name: &str) -> Option<&'static PinnedMapAbi> {
@@ -657,9 +669,16 @@ pub fn prepare_pin_root_for_load<I: PinAbiIo>(
             let locs = resolve_deny_pin_locations(io, pin_root, &legacy_dir)?;
             let entries = match io.read_legacy_deny_entries_at(&locs.list, &locs.count) {
                 Ok(e) => {
-                    // Data is now in memory — safe to free any remaining canonical
-                    // names so load can create fresh ABI-sized maps (F3 preserved).
-                    free_canonical_deny_pins_after_read(io, pin_root)?;
+                    // Data is now in memory. Free a canonical name only when a
+                    // staging copy already exists — otherwise the canonical pin
+                    // may be the sole unread source mid-stage (COUNT-first crash).
+                    for name in [PATH_DENY_LIST_MAP, PATH_DENY_COUNT_MAP] {
+                        let canon = pin_root.join(name);
+                        let staged = legacy_dir.join(name);
+                        if io.exists(&canon) && io.exists(&staged) {
+                            io.remove_file(&canon)?;
+                        }
+                    }
                     results.push(MigrationResult::ResumedMigration);
                     DenySeedOverride::MigratedEntries {
                         entries: e,
@@ -688,7 +707,7 @@ pub fn prepare_pin_root_for_load<I: PinAbiIo>(
                             tracing::warn!(
                                 target: "neuromesh::pin_abi",
                                 pin = %canon.display(),
-                                "retaining unread canonical deny pin (sole copy);                                  load may fail closed rather than destroy F3 data"
+                                "retaining unread canonical deny pin (sole copy); load may fail closed rather than destroy F3 data"
                             );
                         }
                     }
@@ -760,13 +779,34 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    /// Test double with optional fail-after-N rename crash injection (D4).
+    /// Explicit migration / handoff steps. Crash is injected *after* the named step.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum MigrationCrashAfter {
+        CountRename,
+        ListRename,
+        ProcessMapRename,
+        /// Post-load empty canonical + staging (R1 poison) — commit 2.
+        #[allow(dead_code)]
+        FreshCanonicalEmpty,
+        /// Post-load: LIST slots written; COUNT still 0 (needs R1) — commit 2.
+        #[allow(dead_code)]
+        ListPartiallyWritten,
+        /// Post-load: LIST+COUNT fully seeded; crash before link replace.
+        CountWritten,
+        /// New LSM link live; staging not yet cleaned.
+        LinkReplaced,
+        /// Cleanup started; deny staging still present.
+        CleanupPartial,
+    }
+
+    /// Test double: map pin path → payload bytes + ObservedMapInfo.
+    /// `rename` moves both; `read_legacy_deny_entries_at` parses LIST+COUNT payloads.
     struct FakeIo {
         files: Mutex<HashMap<PathBuf, Vec<u8>>>,
         dirs: Mutex<Vec<PathBuf>>,
         info: Mutex<HashMap<PathBuf, ObservedMapInfo>>,
-        legacy_entries: Mutex<HashMap<PathBuf, Vec<PathDenyEntry>>>,
-        /// When `Some(n)`, the n-th `rename` call (1-based) returns an error.
+        /// When `Some(n)`, the n-th `rename` call (1-based) errors *after* prior
+        /// renames applied — the Nth rename itself does not mutate (crash after step).
         fail_after_renames: Mutex<Option<usize>>,
         rename_count: Mutex<usize>,
     }
@@ -777,7 +817,6 @@ mod tests {
                 files: Mutex::new(HashMap::new()),
                 dirs: Mutex::new(Vec::new()),
                 info: Mutex::new(HashMap::new()),
-                legacy_entries: Mutex::new(HashMap::new()),
                 fail_after_renames: Mutex::new(None),
                 rename_count: Mutex::new(0),
             }
@@ -792,11 +831,19 @@ mod tests {
             self.files
                 .lock()
                 .unwrap()
-                .insert(p.to_path_buf(), Vec::new());
+                .entry(p.to_path_buf())
+                .or_insert_with(Vec::new);
         }
         fn set_info(&self, p: &Path, info: ObservedMapInfo) {
             self.touch_file(p);
             self.info.lock().unwrap().insert(p.to_path_buf(), info);
+        }
+        fn set_payload(&self, p: &Path, bytes: Vec<u8>) {
+            self.touch_file(p);
+            self.files.lock().unwrap().insert(p.to_path_buf(), bytes);
+        }
+        fn payload(&self, p: &Path) -> Option<Vec<u8>> {
+            self.files.lock().unwrap().get(p).cloned()
         }
         fn arm_fail_after_renames(&self, n: usize) {
             *self.fail_after_renames.lock().unwrap() = Some(n);
@@ -805,6 +852,147 @@ mod tests {
         fn disarm_crash(&self) {
             *self.fail_after_renames.lock().unwrap() = None;
         }
+    }
+
+    fn encode_legacy_entry(e: &LegacyPathDenyEntry) -> [u8; PATH_DENY_ENTRY_SIZE_LEGACY] {
+        let mut out = [0u8; PATH_DENY_ENTRY_SIZE_LEGACY];
+        out[..4].copy_from_slice(&e.len.to_ne_bytes());
+        out[4..].copy_from_slice(&e.bytes);
+        out
+    }
+
+    fn encode_path_deny_entry(e: &PathDenyEntry) -> [u8; PATH_DENY_ENTRY_SIZE] {
+        let mut out = [0u8; PATH_DENY_ENTRY_SIZE];
+        out[..4].copy_from_slice(&e.len.to_ne_bytes());
+        out[4..].copy_from_slice(&e.bytes);
+        out
+    }
+
+    fn decode_legacy_entry(bytes: &[u8]) -> Result<LegacyPathDenyEntry> {
+        if bytes.len() < PATH_DENY_ENTRY_SIZE_LEGACY {
+            bail!("legacy entry truncated ({} bytes)", bytes.len());
+        }
+        let len = u32::from_ne_bytes(bytes[..4].try_into().unwrap());
+        let mut b = [0u8; LEGACY_KEY];
+        b.copy_from_slice(&bytes[4..4 + LEGACY_KEY]);
+        Ok(LegacyPathDenyEntry { len, bytes: b })
+    }
+
+    fn decode_path_deny_entry(bytes: &[u8]) -> Result<PathDenyEntry> {
+        if bytes.len() < PATH_DENY_ENTRY_SIZE {
+            bail!("path deny entry truncated ({} bytes)", bytes.len());
+        }
+        let len = u32::from_ne_bytes(bytes[..4].try_into().unwrap());
+        let mut b = [0u8; PATH_DENY_KEY_BYTES];
+        b.copy_from_slice(&bytes[4..4 + PATH_DENY_KEY_BYTES]);
+        Ok(PathDenyEntry { len, bytes: b })
+    }
+
+    /// Install legacy 20B LIST + COUNT payloads at the given pin paths.
+    fn install_legacy_deny(io: &FakeIo, list: &Path, count: &Path, legacy: &[LegacyPathDenyEntry]) {
+        io.set_info(list, legacy_list_info());
+        io.set_info(count, count_info());
+        let mut payload = Vec::with_capacity(legacy.len() * PATH_DENY_ENTRY_SIZE_LEGACY);
+        for e in legacy {
+            payload.extend_from_slice(&encode_legacy_entry(e));
+        }
+        io.set_payload(list, payload);
+        io.set_payload(count, (legacy.len() as u32).to_ne_bytes().to_vec());
+    }
+
+    fn legacy_from_prefixes(prefixes: &[&[u8]]) -> Vec<LegacyPathDenyEntry> {
+        prefixes
+            .iter()
+            .map(|p| {
+                assert!(!p.is_empty() && p.len() <= LEGACY_KEY);
+                let mut bytes = [0u8; LEGACY_KEY];
+                bytes[..p.len()].copy_from_slice(p);
+                LegacyPathDenyEntry {
+                    len: p.len() as u32,
+                    bytes,
+                }
+            })
+            .collect()
+    }
+
+    /// Independent starts_with oracle on legacy significant bytes — does NOT call widen.
+    fn legacy_starts_with_oracle(path: &[u8], legacy: &LegacyPathDenyEntry) -> bool {
+        let len = legacy.len as usize;
+        if len == 0 || len > LEGACY_KEY || path.len() < len {
+            return false;
+        }
+        path[..len] == legacy.bytes[..len]
+    }
+
+    /// Simulate `EbpfLoader::load` creating empty current-ABI deny maps when absent.
+    fn simulate_load_empty_canonical(io: &FakeIo, root: &Path) {
+        let list = root.join(PATH_DENY_LIST_MAP);
+        let count = root.join(PATH_DENY_COUNT_MAP);
+        if !io.exists(&list) {
+            io.set_info(&list, current_list_info());
+            io.set_payload(&list, Vec::new());
+        }
+        if !io.exists(&count) {
+            io.set_info(&count, count_info());
+            io.set_payload(&count, 0u32.to_ne_bytes().to_vec());
+        }
+    }
+
+    /// Apply seed the way `startup.rs` does after load (write LIST+COUNT payloads).
+    fn apply_seed_like_startup(io: &FakeIo, root: &Path, seed: &DenySeedOverride) {
+        let list = root.join(PATH_DENY_LIST_MAP);
+        let count = root.join(PATH_DENY_COUNT_MAP);
+        match seed {
+            DenySeedOverride::Bootstrap => {
+                let mut entries = Vec::new();
+                for prefix in BOOTSTRAP_PATH_DENY_PREFIXES {
+                    entries.push(PathDenyEntry::from_prefix(prefix).unwrap());
+                }
+                write_canonical_entries(io, &list, &count, &entries);
+            }
+            DenySeedOverride::ResumePinned => {}
+            DenySeedOverride::MigratedEntries { entries, .. } => {
+                write_canonical_entries(io, &list, &count, entries);
+            }
+        }
+    }
+
+    fn write_canonical_entries(io: &FakeIo, list: &Path, count: &Path, entries: &[PathDenyEntry]) {
+        io.set_info(list, current_list_info());
+        io.set_info(count, count_info());
+        let mut payload = Vec::with_capacity(entries.len() * PATH_DENY_ENTRY_SIZE);
+        for e in entries {
+            payload.extend_from_slice(&encode_path_deny_entry(e));
+        }
+        io.set_payload(list, payload);
+        io.set_payload(count, (entries.len() as u32).to_ne_bytes().to_vec());
+    }
+
+    fn read_canonical_entries(io: &FakeIo, root: &Path) -> Result<Vec<PathDenyEntry>> {
+        let list = root.join(PATH_DENY_LIST_MAP);
+        let count = root.join(PATH_DENY_COUNT_MAP);
+        let n = io.read_deny_count(&count)?;
+        if n == 0 {
+            bail!("canonical PATH_DENY_COUNT[0] == 0");
+        }
+        let bytes = io
+            .payload(&list)
+            .ok_or_else(|| anyhow::anyhow!("missing LIST payload"))?;
+        let need = n as usize * PATH_DENY_ENTRY_SIZE;
+        if bytes.len() < need {
+            bail!(
+                "canonical LIST/COUNT mismatch: count={n} payload_len={}",
+                bytes.len()
+            );
+        }
+        let mut out = Vec::with_capacity(n as usize);
+        for i in 0..n as usize {
+            let start = i * PATH_DENY_ENTRY_SIZE;
+            out.push(decode_path_deny_entry(
+                &bytes[start..start + PATH_DENY_ENTRY_SIZE],
+            )?);
+        }
+        Ok(out)
     }
 
     impl PinAbiIo for FakeIo {
@@ -820,19 +1008,8 @@ mod tests {
             Ok(())
         }
         fn rename(&self, from: &Path, to: &Path) -> Result<()> {
-            {
-                let mut count = self.rename_count.lock().unwrap();
-                *count = count.saturating_add(1);
-                if let Some(limit) = *self.fail_after_renames.lock().unwrap() {
-                    if *count >= limit {
-                        bail!(
-                            "injected crash after rename #{count} ({} → {})",
-                            from.display(),
-                            to.display()
-                        );
-                    }
-                }
-            }
+            // Apply the rename first, then inject crash *after* the step so
+            // COUNT-first staging leaves a recoverable mid-crash shape.
             let mut files = self.files.lock().unwrap();
             let mut info = self.info.lock().unwrap();
             let bytes = files
@@ -841,6 +1018,19 @@ mod tests {
             files.insert(to.to_path_buf(), bytes);
             if let Some(i) = info.remove(from) {
                 info.insert(to.to_path_buf(), i);
+            }
+            drop(files);
+            drop(info);
+            let mut count = self.rename_count.lock().unwrap();
+            *count = count.saturating_add(1);
+            if let Some(limit) = *self.fail_after_renames.lock().unwrap() {
+                if *count >= limit {
+                    bail!(
+                        "injected crash after rename #{count} ({} → {})",
+                        from.display(),
+                        to.display()
+                    );
+                }
             }
             Ok(())
         }
@@ -893,27 +1083,62 @@ mod tests {
             list_path: &Path,
             count_path: &Path,
         ) -> Result<Vec<PathDenyEntry>> {
-            let entries = self.legacy_entries.lock().unwrap();
-            // Look up by either parent (split staging: LIST/COUNT in different dirs)
-            // or by the pin root / legacy dir keys tests insert.
-            for parent in [list_path.parent(), count_path.parent()]
-                .into_iter()
-                .flatten()
-            {
-                if let Some(e) = entries.get(parent) {
-                    if e.is_empty() {
-                        bail!(
-                            "legacy PATH_DENY_COUNT[0] == 0 — refuse empty deny list (fail-open)"
-                        );
-                    }
-                    return Ok(e.clone());
-                }
+            let files = self.files.lock().unwrap();
+            let info = self.info.lock().unwrap();
+            let list_bytes = files.get(list_path).ok_or_else(|| {
+                anyhow::anyhow!("missing LIST pin/payload at {}", list_path.display())
+            })?;
+            let count_bytes = files.get(count_path).ok_or_else(|| {
+                anyhow::anyhow!("missing COUNT pin/payload at {}", count_path.display())
+            })?;
+            let list_info = info.get(list_path).ok_or_else(|| {
+                anyhow::anyhow!("no map info for LIST {}", list_path.display())
+            })?;
+            if count_bytes.len() < 4 {
+                bail!("COUNT payload truncated at {}", count_path.display());
             }
-            bail!(
-                "no legacy entries for list={} count={}",
-                list_path.display(),
-                count_path.display()
-            )
+            let active = u32::from_ne_bytes(count_bytes[..4].try_into().unwrap());
+            if active == 0 {
+                bail!("legacy PATH_DENY_COUNT[0] == 0 — refuse empty deny list (fail-open)");
+            }
+            let entry_size = list_info.value_size as usize;
+            if entry_size != PATH_DENY_ENTRY_SIZE_LEGACY {
+                bail!(
+                    "LIST value_size={entry_size} is not legacy {} — refuse",
+                    PATH_DENY_ENTRY_SIZE_LEGACY
+                );
+            }
+            let need = active as usize * entry_size;
+            if list_bytes.len() < need {
+                bail!(
+                    "legacy LIST/COUNT mismatch: count={active} payload_len={} need={need}",
+                    list_bytes.len()
+                );
+            }
+            let n = active.min(PATH_DENY_MAX_ENTRIES) as usize;
+            let mut out = Vec::with_capacity(n);
+            for i in 0..n {
+                let start = i * entry_size;
+                let legacy = decode_legacy_entry(&list_bytes[start..start + entry_size])?;
+                let wide = legacy.widen().with_context(|| {
+                    format!("legacy PATH_DENY_LIST[{i}] has invalid len={}", legacy.len)
+                })?;
+                out.push(wide);
+            }
+            if out.is_empty() {
+                bail!("legacy deny list produced zero widened entries");
+            }
+            Ok(out)
+        }
+        fn read_deny_count(&self, count_pin: &Path) -> Result<u32> {
+            let files = self.files.lock().unwrap();
+            let bytes = files.get(count_pin).ok_or_else(|| {
+                anyhow::anyhow!("missing COUNT pin/payload at {}", count_pin.display())
+            })?;
+            if bytes.len() < 4 {
+                bail!("COUNT payload truncated at {}", count_pin.display());
+            }
+            Ok(u32::from_ne_bytes(bytes[..4].try_into().unwrap()))
         }
     }
 
@@ -941,6 +1166,41 @@ mod tests {
             key_size: 4,
             value_size: 4,
             max_entries: 1,
+        }
+    }
+
+    fn assert_seed_converged(
+        io: &FakeIo,
+        root: &Path,
+        seed: &DenySeedOverride,
+        results: &[MigrationResult],
+        expected_operator: &PathDenyEntry,
+        expect_staging_present: bool,
+    ) {
+        assert!(
+            !results.contains(&MigrationResult::BootstrapFallback),
+            "BootstrapFallback when staging readable: results={results:?}"
+        );
+        assert!(
+            results.contains(&MigrationResult::Migrated)
+                || results.contains(&MigrationResult::ResumedMigration)
+                || results.contains(&MigrationResult::Compatible),
+            "results={results:?}"
+        );
+        simulate_load_empty_canonical(io, root);
+        apply_seed_like_startup(io, root, seed);
+        let got = read_canonical_entries(io, root).unwrap();
+        assert!(!got.is_empty(), "deny list empty after converge");
+        assert!(
+            got.iter().any(|e| e == expected_operator),
+            "operator PathDenyEntry payload inequality: got={got:?} expected={expected_operator:?}"
+        );
+        let staging = list_legacy_abi_dirs(io, root).unwrap();
+        if expect_staging_present {
+            assert!(
+                !staging.is_empty(),
+                "staging should remain until final cleanup step"
+            );
         }
     }
 
@@ -1018,13 +1278,13 @@ mod tests {
         let io = FakeIo::default();
         let root = PathBuf::from("/pins");
         io.touch_dir(&root);
-        io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
-        io.set_info(&root.join(PATH_DENY_COUNT_MAP), count_info());
-        let entry = PathDenyEntry::from_prefix(b"/tmp/").unwrap();
-        io.legacy_entries
-            .lock()
-            .unwrap()
-            .insert(root.clone(), vec![entry]);
+        let legacy_entries = legacy_from_prefixes(&[b"/tmp/"]);
+        install_legacy_deny(
+            &io,
+            &root.join(PATH_DENY_LIST_MAP),
+            &root.join(PATH_DENY_COUNT_MAP),
+            &legacy_entries,
+        );
 
         let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
         assert!(results.contains(&MigrationResult::Migrated));
@@ -1070,23 +1330,22 @@ mod tests {
         let legacy = root.join("legacy_abi_0");
         io.touch_dir(&root);
         io.touch_dir(&legacy);
-        let entry = PathDenyEntry::from_prefix(b"/opt/neuromesh/staging/").unwrap();
-        io.legacy_entries
-            .lock()
-            .unwrap()
-            .insert(legacy.clone(), vec![entry]);
-        io.touch_file(&legacy.join(PATH_DENY_LIST_MAP));
-        io.touch_file(&legacy.join(PATH_DENY_COUNT_MAP));
+        let legacy_entries = legacy_from_prefixes(&[b"/opt/nm/staging/"]);
+        install_legacy_deny(
+            &io,
+            &legacy.join(PATH_DENY_LIST_MAP),
+            &legacy.join(PATH_DENY_COUNT_MAP),
+            &legacy_entries,
+        );
 
         let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
         assert!(results.contains(&MigrationResult::ResumedMigration));
         match &seed {
             DenySeedOverride::MigratedEntries { entries, .. } => {
-                assert!(entries[0].matches(b"/opt/neuromesh/staging/x"));
+                assert!(entries[0].matches(b"/opt/nm/staging/x"));
             }
             other => panic!("{other:?}"),
         }
-        // Second run converges the same way.
         let (seed2, _) = prepare_pin_root_for_load(&io, &root).unwrap();
         assert_eq!(seed, seed2);
     }
@@ -1104,7 +1363,6 @@ mod tests {
         io.touch_file(&proc.join(PROCESS_EVENTS_MAP));
         cleanup_legacy_abi_dirs(&io, &root).unwrap();
         assert!(!io.exists(&legacy));
-        // Deny cleanup must not touch proc staging.
         assert!(io.exists(&proc));
         cleanup_proc_abi_dirs(&io, &root).unwrap();
         assert!(!io.exists(&proc));
@@ -1112,8 +1370,6 @@ mod tests {
 
     #[test]
     fn process_only_staging_cold_stays_cold() {
-        // D2: leftover proc_abi_* on a cold pin root must NOT look like migration
-        // (would falsely BootstrapFallback / MigrationInProgress).
         let io = FakeIo::default();
         let root = PathBuf::from("/pins");
         let proc = root.join(format!("{PROC_ABI_DIR_PREFIX}{PROCESS_EVENTS_MAP}"));
@@ -1128,7 +1384,6 @@ mod tests {
 
     #[test]
     fn both_proc_and_deny_staging_still_migrates() {
-        // D2: proc_abi_* coexisting with legacy_abi_<n> must not hide deny migration.
         let io = FakeIo::default();
         let root = PathBuf::from("/pins");
         let legacy = root.join("legacy_abi_0");
@@ -1136,14 +1391,14 @@ mod tests {
         io.touch_dir(&root);
         io.touch_dir(&legacy);
         io.touch_dir(&proc);
-        io.touch_file(&legacy.join(PATH_DENY_LIST_MAP));
-        io.touch_file(&legacy.join(PATH_DENY_COUNT_MAP));
         io.touch_file(&proc.join(PROCESS_EVENTS_MAP));
-        let entry = PathDenyEntry::from_prefix(b"/tmp/").unwrap();
-        io.legacy_entries
-            .lock()
-            .unwrap()
-            .insert(legacy.clone(), vec![entry]);
+        let legacy_entries = legacy_from_prefixes(&[b"/tmp/"]);
+        install_legacy_deny(
+            &io,
+            &legacy.join(PATH_DENY_LIST_MAP),
+            &legacy.join(PATH_DENY_COUNT_MAP),
+            &legacy_entries,
+        );
 
         match assess_pin_abi(&io, &root).unwrap() {
             PinAbiState::MigrationInProgress { legacy_dir } => {
@@ -1168,8 +1423,6 @@ mod tests {
 
     #[test]
     fn select_deny_legacy_dir_prefers_numeric_highest_with_list() {
-        // D2: string sort would order legacy_abi_10 before legacy_abi_2; we must
-        // pick by content + numeric suffix, not dirs[0] from lexicographic sort.
         let io = FakeIo::default();
         let root = PathBuf::from("/pins");
         let d2 = root.join("legacy_abi_2");
@@ -1177,7 +1430,6 @@ mod tests {
         io.touch_dir(&root);
         io.touch_dir(&d2);
         io.touch_dir(&d10);
-        // Only legacy_abi_2 holds LIST (string-sort dirs[0] would be legacy_abi_10).
         io.touch_file(&d2.join(PATH_DENY_LIST_MAP));
         io.touch_file(&d2.join(PATH_DENY_COUNT_MAP));
 
@@ -1187,7 +1439,6 @@ mod tests {
         let selected = select_deny_legacy_dir(&io, &root).unwrap().unwrap();
         assert_eq!(selected, d2);
 
-        // When both have LIST/COUNT, highest numeric n wins.
         io.touch_file(&d10.join(PATH_DENY_LIST_MAP));
         io.touch_file(&d10.join(PATH_DENY_COUNT_MAP));
         let selected = select_deny_legacy_dir(&io, &root).unwrap().unwrap();
@@ -1221,7 +1472,6 @@ mod tests {
         assert!(io.exists(&staging.join(PROCESS_EVENTS_MAP)));
         assert!(list_legacy_abi_dirs(&io, &root).unwrap().is_empty());
         assert_eq!(list_proc_abi_dirs(&io, &root).unwrap(), vec![staging]);
-        // Cold with only proc staging.
         assert_eq!(assess_pin_abi(&io, &root).unwrap(), PinAbiState::Cold);
     }
 
@@ -1246,29 +1496,24 @@ mod tests {
 
     #[test]
     fn crash_between_count_and_list_rename_converges() {
-        // D3: stage renames COUNT then LIST. Simulate crash after COUNT rename:
-        // COUNT in legacy_abi_0/, LIST still canonical. Resume must read both
-        // and preserve entries (never BootstrapFallback / empty deny).
+        // COUNT in legacy_abi_0/, LIST still canonical. Payloads travel with paths.
         let io = FakeIo::default();
         let root = PathBuf::from("/pins");
         let legacy = root.join("legacy_abi_0");
         io.touch_dir(&root);
         io.touch_dir(&legacy);
 
-        // Partial stage: COUNT moved, LIST still canonical (post-COUNT, pre-LIST).
-        io.set_info(&legacy.join(PATH_DENY_COUNT_MAP), count_info());
+        let legacy_entries = legacy_from_prefixes(&[b"/opt/nm/staging/"]);
+        // Split: LIST canonical, COUNT staged — payloads on each pin path.
+        let mut list_payload = Vec::new();
+        list_payload.extend_from_slice(&encode_legacy_entry(&legacy_entries[0]));
         io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
-
-        let entry = PathDenyEntry::from_prefix(b"/opt/neuromesh/staging/").unwrap();
-        // Entries discoverable via either parent (resolve reads split paths).
-        io.legacy_entries
-            .lock()
-            .unwrap()
-            .insert(root.clone(), vec![entry]);
-        io.legacy_entries
-            .lock()
-            .unwrap()
-            .insert(legacy.clone(), vec![entry]);
+        io.set_payload(&root.join(PATH_DENY_LIST_MAP), list_payload);
+        io.set_info(&legacy.join(PATH_DENY_COUNT_MAP), count_info());
+        io.set_payload(
+            &legacy.join(PATH_DENY_COUNT_MAP),
+            1u32.to_ne_bytes().to_vec(),
+        );
 
         let locs = resolve_deny_pin_locations(&io, &root, &legacy).unwrap();
         assert_eq!(locs.list, root.join(PATH_DENY_LIST_MAP));
@@ -1284,23 +1529,22 @@ mod tests {
         let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
         assert!(results.contains(&MigrationResult::ResumedMigration));
         assert!(!results.contains(&MigrationResult::BootstrapFallback));
-        match seed {
+        match &seed {
             DenySeedOverride::MigratedEntries {
                 entries,
                 from_legacy,
             } => {
-                assert!(from_legacy);
+                assert!(*from_legacy);
                 assert!(!entries.is_empty());
-                assert!(entries[0].matches(b"/opt/neuromesh/staging/x"));
+                assert!(entries[0].matches(b"/opt/nm/staging/x"));
             }
             other => panic!("unexpected seed {other:?}"),
         }
-        // Canonical names freed after successful read.
-        assert!(!io.exists(&root.join(PATH_DENY_LIST_MAP)));
+        // Canonical LIST retained (sole copy — not yet under staging); COUNT was staged.
+        assert!(io.exists(&root.join(PATH_DENY_LIST_MAP)));
         assert!(!io.exists(&root.join(PATH_DENY_COUNT_MAP)));
 
-        // Re-run converges (still MigrationInProgress with LIST+COUNT in legacy).
-        io.touch_file(&legacy.join(PATH_DENY_LIST_MAP));
+        // Second resume still converges (LIST still readable at canonical).
         let (seed2, results2) = prepare_pin_root_for_load(&io, &root).unwrap();
         assert!(results2.contains(&MigrationResult::ResumedMigration));
         match seed2 {
@@ -1316,53 +1560,123 @@ mod tests {
         let io = FakeIo::default();
         let root = PathBuf::from("/pins");
         io.touch_dir(&root);
-        io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
-        io.set_info(&root.join(PATH_DENY_COUNT_MAP), count_info());
-        // Instrument order via a wrapper would be ideal; here we assert final
-        // stage layout and that an interrupted COUNT-first shape is the
-        // documented recoverable form (see crash_between_count_and_list_rename).
+        let legacy_entries = legacy_from_prefixes(&[b"/tmp/"]);
+        install_legacy_deny(
+            &io,
+            &root.join(PATH_DENY_LIST_MAP),
+            &root.join(PATH_DENY_COUNT_MAP),
+            &legacy_entries,
+        );
         let dest = stage_legacy_deny_pins(&io, &root).unwrap();
         assert!(io.exists(&dest.join(PATH_DENY_LIST_MAP)));
         assert!(io.exists(&dest.join(PATH_DENY_COUNT_MAP)));
         assert!(!io.exists(&root.join(PATH_DENY_LIST_MAP)));
         assert!(!io.exists(&root.join(PATH_DENY_COUNT_MAP)));
+        let staged_list = io.payload(&dest.join(PATH_DENY_LIST_MAP)).unwrap();
+        assert_eq!(staged_list.len(), PATH_DENY_ENTRY_SIZE_LEGACY);
+        assert_eq!(
+            io.read_deny_count(&dest.join(PATH_DENY_COUNT_MAP)).unwrap(),
+            1
+        );
     }
 
     #[test]
-    fn incident_208_regression_name() {
-        // Named after the incident for git-blame / CI grep discoverability.
-        let info = legacy_list_info();
-        assert!(info.is_legacy_path_deny_list());
-        assert_eq!(info.value_size, 20);
-        assert_eq!(PATH_DENY_ENTRY_SIZE, 36);
-    }
-
-    #[test]
-    fn incident_208_prepare_legacy_20b_to_canonical_36b_preserves_entries() {
-        // D4 regression: drive legacy 20B layout through prepare_pin_root_for_load
-        // and assert migrated seed carries operator + bootstrap-shaped entries
-        // (canonical names freed for fresh 36B maps).
+    fn incident_208_legacy_20b_prepare_seed_byte_exact_36b() {
+        // Real #208 regression: legacy 20B → prepare → seed applied → 36B byte-exact.
+        // Independent starts_with oracle on legacy bytes does NOT call widen.
         let io = FakeIo::default();
         let root = PathBuf::from("/pins");
         io.touch_dir(&root);
-        io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
-        io.set_info(&root.join(PATH_DENY_COUNT_MAP), count_info());
+
+        let legacy_entries = legacy_from_prefixes(&[
+            b"/tmp/",
+            b"/dev/shm/",
+            b"/var/tmp/",
+            b"/opt/nm/staging/",
+        ]);
+        install_legacy_deny(
+            &io,
+            &root.join(PATH_DENY_LIST_MAP),
+            &root.join(PATH_DENY_COUNT_MAP),
+            &legacy_entries,
+        );
         assert_eq!(
             io.map_info(&root.join(PATH_DENY_LIST_MAP))
                 .unwrap()
                 .value_size,
             20
         );
-        let entries = vec![
-            PathDenyEntry::from_prefix(b"/tmp/").unwrap(),
-            PathDenyEntry::from_prefix(b"/dev/shm/").unwrap(),
-            PathDenyEntry::from_prefix(b"/var/tmp/").unwrap(),
-            PathDenyEntry::from_prefix(b"/opt/neuromesh/staging/").unwrap(),
-        ];
-        io.legacy_entries
-            .lock()
-            .unwrap()
-            .insert(root.clone(), entries.clone());
+
+        let probe = b"/opt/nm/staging/x";
+        assert!(legacy_starts_with_oracle(probe, &legacy_entries[3]));
+        assert!(!legacy_starts_with_oracle(b"/opt/other/", &legacy_entries[3]));
+
+        let expected_wide: Vec<PathDenyEntry> = legacy_entries
+            .iter()
+            .map(|e| e.widen().expect("legacy must widen"))
+            .collect();
+        for e in &legacy_entries {
+            let wide = e.widen().unwrap();
+            for path in [
+                b"/tmp/x".as_slice(),
+                b"/dev/shm/y".as_slice(),
+                b"/var/tmp/z".as_slice(),
+                b"/opt/nm/staging/x".as_slice(),
+                b"/usr/bin/true".as_slice(),
+            ] {
+                assert_eq!(legacy_starts_with_oracle(path, e), wide.matches(path));
+            }
+        }
+
+        let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+        assert!(results.contains(&MigrationResult::Migrated));
+        assert!(!io.exists(&root.join(PATH_DENY_LIST_MAP)));
+        assert!(!io.exists(&root.join(PATH_DENY_COUNT_MAP)));
+
+        simulate_load_empty_canonical(&io, &root);
+        apply_seed_like_startup(&io, &root, &seed);
+        let got = read_canonical_entries(&io, &root).unwrap();
+        assert_eq!(got.len(), expected_wide.len());
+        for (a, b) in got.iter().zip(expected_wide.iter()) {
+            assert_eq!(a, b, "36B PathDenyEntry payload must be byte-exact");
+            assert_eq!(encode_path_deny_entry(a), encode_path_deny_entry(b));
+        }
+        assert_eq!(PATH_DENY_ENTRY_SIZE, 36);
+        let list_payload = io.payload(&root.join(PATH_DENY_LIST_MAP)).unwrap();
+        let mut expected_bytes = Vec::new();
+        for e in &expected_wide {
+            expected_bytes.extend_from_slice(&encode_path_deny_entry(e));
+        }
+        assert_eq!(list_payload, expected_bytes);
+    }
+
+    #[test]
+    fn incident_208_prepare_legacy_20b_to_canonical_36b_preserves_entries() {
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins");
+        io.touch_dir(&root);
+        let legacy_entries = legacy_from_prefixes(&[
+            b"/tmp/",
+            b"/dev/shm/",
+            b"/var/tmp/",
+            b"/opt/nm/staging/",
+        ]);
+        install_legacy_deny(
+            &io,
+            &root.join(PATH_DENY_LIST_MAP),
+            &root.join(PATH_DENY_COUNT_MAP),
+            &legacy_entries,
+        );
+        assert_eq!(
+            io.map_info(&root.join(PATH_DENY_LIST_MAP))
+                .unwrap()
+                .value_size,
+            20
+        );
+        let entries: Vec<PathDenyEntry> = legacy_entries
+            .iter()
+            .map(|e| e.widen().unwrap())
+            .collect();
 
         let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
         assert!(results.contains(&MigrationResult::Migrated));
@@ -1379,14 +1693,13 @@ mod tests {
                     assert_eq!(a.len, b.len);
                     assert_eq!(a.bytes, b.bytes);
                 }
-                // Widened entries use the current 36B ABI key width.
                 assert!(migrated
                     .iter()
                     .all(|e| e.bytes.len() == PATH_DENY_KEY_BYTES));
                 assert_eq!(PATH_DENY_ENTRY_SIZE, 36);
                 assert!(migrated
                     .iter()
-                    .any(|e| e.matches(b"/opt/neuromesh/staging/x")));
+                    .any(|e| e.matches(b"/opt/nm/staging/x")));
                 assert!(
                     !migrated.is_empty(),
                     "deny list must never be empty after migrate"
@@ -1396,80 +1709,159 @@ mod tests {
         }
     }
 
-    #[test]
-    fn crash_injection_every_rename_step_converges() {
-        // D4: inject a crash at every rename step of migration; disarm and
-        // re-run — must converge with non-empty deny seed; unknown layouts still refused.
-        let entry = PathDenyEntry::from_prefix(b"/tmp/").unwrap();
-        for fail_at in 1usize..=4 {
-            let io = FakeIo::default();
-            let root = PathBuf::from(format!("/pins_crash_{fail_at}"));
-            io.touch_dir(&root);
-            io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
-            io.set_info(&root.join(PATH_DENY_COUNT_MAP), count_info());
-            // Mismatched process map adds extra renames into the crash surface.
-            io.set_info(
-                &root.join(PROCESS_EVENTS_MAP),
-                ObservedMapInfo {
-                    map_type: neuromesh_common::BPF_MAP_TYPE_RINGBUF,
-                    key_size: 0,
-                    value_size: 0,
-                    max_entries: 1, // expected is 1MiB — forces recreate rename
-                },
-            );
-            io.legacy_entries
-                .lock()
-                .unwrap()
-                .insert(root.clone(), vec![entry]);
-            io.arm_fail_after_renames(fail_at);
+    /// Drive migration to a crash point *after* `step`, then return state for resume.
+    fn run_until_crash_after(step: MigrationCrashAfter) -> (FakeIo, PathBuf, PathDenyEntry) {
+        let io = FakeIo::default();
+        let root = PathBuf::from(format!("/pins_step_{step:?}"));
+        io.touch_dir(&root);
 
-            let first = prepare_pin_root_for_load(&io, &root);
-            if let Ok(ok) = first {
-                // No further rename steps exist at this fail_at — migration already
-                // completed without hitting the armed crash point.
-                match ok {
-                    (DenySeedOverride::MigratedEntries { entries, .. }, results) => {
-                        assert!(!entries.is_empty());
-                        assert!(
-                            results.contains(&MigrationResult::Migrated)
-                                || results.contains(&MigrationResult::ResumedMigration)
-                        );
-                    }
-                    other => panic!("fail_at={fail_at}: unexpected ok {other:?}"),
-                }
-                continue;
+        let legacy_src = legacy_from_prefixes(&[b"/tmp/", b"/opt/nm/staging/"]);
+        let operator = legacy_src[1].widen().unwrap();
+        install_legacy_deny(
+            &io,
+            &root.join(PATH_DENY_LIST_MAP),
+            &root.join(PATH_DENY_COUNT_MAP),
+            &legacy_src,
+        );
+        io.set_info(
+            &root.join(PROCESS_EVENTS_MAP),
+            ObservedMapInfo {
+                map_type: neuromesh_common::BPF_MAP_TYPE_RINGBUF,
+                key_size: 0,
+                value_size: 0,
+                max_entries: 1,
+            },
+        );
+
+        match step {
+            MigrationCrashAfter::CountRename => {
+                io.arm_fail_after_renames(1);
+                let err = prepare_pin_root_for_load(&io, &root).unwrap_err();
+                assert!(
+                    err.to_string().contains("injected crash after rename"),
+                    "{err}"
+                );
             }
-
-            // Resume: disarm crash injection; seed entries under every possible
-            // parent resolve may consult (root and any legacy_abi_*).
-            io.disarm_crash();
-            for dir in list_legacy_abi_dirs(&io, &root).unwrap() {
-                io.legacy_entries.lock().unwrap().insert(dir, vec![entry]);
+            MigrationCrashAfter::ListRename => {
+                io.arm_fail_after_renames(2);
+                let err = prepare_pin_root_for_load(&io, &root).unwrap_err();
+                assert!(
+                    err.to_string().contains("injected crash after rename"),
+                    "{err}"
+                );
             }
-            // If COUNT moved but LIST remains, also keep root key.
-            io.legacy_entries
-                .lock()
-                .unwrap()
-                .insert(root.clone(), vec![entry]);
-
-            let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
-            assert!(
-                results.contains(&MigrationResult::Migrated)
-                    || results.contains(&MigrationResult::ResumedMigration),
-                "fail_at={fail_at}: results={results:?}"
-            );
-            assert!(!results.contains(&MigrationResult::BootstrapFallback));
-            match seed {
-                DenySeedOverride::MigratedEntries { entries, .. } => {
-                    assert!(
-                        !entries.is_empty(),
-                        "fail_at={fail_at}: deny list empty after converge"
-                    );
-                    assert!(entries[0].matches(b"/tmp/x"));
-                }
-                other => panic!("fail_at={fail_at}: unexpected seed {other:?}"),
+            MigrationCrashAfter::ProcessMapRename => {
+                io.arm_fail_after_renames(3);
+                let err = prepare_pin_root_for_load(&io, &root).unwrap_err();
+                assert!(
+                    err.to_string().contains("injected crash after rename"),
+                    "{err}"
+                );
+            }
+            MigrationCrashAfter::FreshCanonicalEmpty | MigrationCrashAfter::ListPartiallyWritten => {
+                unreachable!("R1 poison steps deferred to commit 2");
+            }
+            MigrationCrashAfter::CountWritten => {
+                let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+                assert!(results.contains(&MigrationResult::Migrated));
+                simulate_load_empty_canonical(&io, &root);
+                apply_seed_like_startup(&io, &root, &seed);
+                assert!(!list_legacy_abi_dirs(&io, &root).unwrap().is_empty());
+                assert_eq!(
+                    io.read_deny_count(&root.join(PATH_DENY_COUNT_MAP)).unwrap(),
+                    2
+                );
+            }
+            MigrationCrashAfter::LinkReplaced => {
+                let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+                assert!(results.contains(&MigrationResult::Migrated));
+                simulate_load_empty_canonical(&io, &root);
+                apply_seed_like_startup(&io, &root, &seed);
+                io.touch_file(&root.join("neuromesh_lsm_exec_guard_link"));
+                assert!(!list_legacy_abi_dirs(&io, &root).unwrap().is_empty());
+            }
+            MigrationCrashAfter::CleanupPartial => {
+                let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+                assert!(results.contains(&MigrationResult::Migrated));
+                simulate_load_empty_canonical(&io, &root);
+                apply_seed_like_startup(&io, &root, &seed);
+                io.touch_file(&root.join("neuromesh_lsm_exec_guard_link"));
+                let _ = cleanup_proc_abi_dirs(&io, &root);
+                assert!(
+                    !list_legacy_abi_dirs(&io, &root).unwrap().is_empty(),
+                    "deny staging must remain after partial cleanup"
+                );
             }
         }
+
+        io.disarm_crash();
+        (io, root, operator)
+    }
+
+    #[test]
+    fn crash_after_each_migration_step_converges() {
+        // R2: explicit step machine; crash *after* each step; resume via prepare
+        // + seed apply (startup.rs). No legacy_entries re-injection — payloads
+        // travel with rename. FreshCanonicalEmpty / ListPartiallyWritten deferred (R1).
+        let steps = [
+            MigrationCrashAfter::CountRename,
+            MigrationCrashAfter::ListRename,
+            MigrationCrashAfter::ProcessMapRename,
+            MigrationCrashAfter::CountWritten,
+            MigrationCrashAfter::LinkReplaced,
+            MigrationCrashAfter::CleanupPartial,
+        ];
+
+        for step in steps {
+            let (io, root, operator) = run_until_crash_after(step);
+            let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+
+            match step {
+                MigrationCrashAfter::CountWritten
+                | MigrationCrashAfter::LinkReplaced
+                | MigrationCrashAfter::CleanupPartial => {
+                    assert!(
+                        results.contains(&MigrationResult::Compatible)
+                            || results.contains(&MigrationResult::ResumedMigration)
+                            || results.contains(&MigrationResult::Migrated),
+                        "step={step:?} results={results:?}"
+                    );
+                    assert!(!results.contains(&MigrationResult::BootstrapFallback));
+                    simulate_load_empty_canonical(&io, &root);
+                    apply_seed_like_startup(&io, &root, &seed);
+                    let got = read_canonical_entries(&io, &root).unwrap();
+                    assert!(!got.is_empty());
+                    assert!(
+                        got.iter().any(|e| e == &operator),
+                        "step={step:?}: operator payload mismatch got={got:?}"
+                    );
+                    if matches!(
+                        step,
+                        MigrationCrashAfter::CountWritten | MigrationCrashAfter::LinkReplaced
+                    ) {
+                        assert!(
+                            !list_legacy_abi_dirs(&io, &root).unwrap().is_empty(),
+                            "staging deleted only in final cleanup step; step={step:?}"
+                        );
+                    }
+                }
+                _ => {
+                    assert_seed_converged(&io, &root, &seed, &results, &operator, true);
+                }
+            }
+        }
+
+        // Final cleanup deletes staging only at the end.
+        let (io, root, operator) = run_until_crash_after(MigrationCrashAfter::LinkReplaced);
+        let (seed, _results) = prepare_pin_root_for_load(&io, &root).unwrap();
+        simulate_load_empty_canonical(&io, &root);
+        apply_seed_like_startup(&io, &root, &seed);
+        assert!(got_has_operator(&io, &root, &operator));
+        cleanup_legacy_abi_dirs(&io, &root).unwrap();
+        cleanup_proc_abi_dirs(&io, &root).unwrap();
+        assert!(list_legacy_abi_dirs(&io, &root).unwrap().is_empty());
+        assert!(list_proc_abi_dirs(&io, &root).unwrap().is_empty());
+        assert!(got_has_operator(&io, &root, &operator));
 
         // Unknown layouts still refused (assertion not weakened).
         let io = FakeIo::default();
@@ -1489,19 +1881,21 @@ mod tests {
         assert!(err.to_string().contains("incompatible"), "{err}");
     }
 
+    fn got_has_operator(io: &FakeIo, root: &Path, operator: &PathDenyEntry) -> bool {
+        read_canonical_entries(io, root)
+            .map(|got| got.iter().any(|e| e == operator))
+            .unwrap_or(false)
+    }
+
     #[test]
     fn count_zero_via_trait_errors_then_bootstrap_fallback() {
-        // D4: empty deny (count==0 / empty entries) through the trait must error;
-        // prepare LegacyMigratable path falls back to BootstrapFallback (non-empty).
         let io = FakeIo::default();
         let root = PathBuf::from("/pins");
         io.touch_dir(&root);
         io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
         io.set_info(&root.join(PATH_DENY_COUNT_MAP), count_info());
-        io.legacy_entries
-            .lock()
-            .unwrap()
-            .insert(root.clone(), Vec::new());
+        io.set_payload(&root.join(PATH_DENY_LIST_MAP), Vec::new());
+        io.set_payload(&root.join(PATH_DENY_COUNT_MAP), 0u32.to_ne_bytes().to_vec());
 
         let err = io.read_legacy_deny_entries(&root).unwrap_err();
         assert!(
@@ -1524,13 +1918,20 @@ mod tests {
     }
 
     #[test]
+    fn read_deny_count_reads_payload() {
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins");
+        io.touch_dir(&root);
+        let count = root.join(PATH_DENY_COUNT_MAP);
+        io.set_info(&count, count_info());
+        io.set_payload(&count, 7u32.to_ne_bytes().to_vec());
+        assert_eq!(io.read_deny_count(&count).unwrap(), 7);
+    }
+
+    #[test]
     fn property_widen_oracle_all_prefix_and_path_lengths() {
-        // D4: seeded exhaustive property — prefix lens 1..=16, path lens 0..=40,
-        // with mutations; independent oracle via legacy hardcoded / 16B window
-        // matcher cross-checked with widen + map-backed matches.
         let mut seed: u64 = 0x0002_08c0_ffee_u64;
         let mut next = || {
-            // xorshift64*
             seed ^= seed << 13;
             seed ^= seed >> 7;
             seed ^= seed << 17;
@@ -1547,7 +1948,6 @@ mod tests {
                     for byte in &mut legacy.bytes[..prefix_len] {
                         *byte = (next() as u8).wrapping_add(b'a');
                     }
-                    // Ensure printable-ish and stable for starts_with.
                     if legacy.bytes[0] == 0 {
                         legacy.bytes[0] = b'/';
                     }
@@ -1556,9 +1956,6 @@ mod tests {
                     for byte in path.iter_mut() {
                         *byte = (next() as u8).wrapping_add(b'a');
                     }
-                    // Mutation 0: path starts with prefix (when long enough)
-                    // Mutation 1: diverge at last prefix byte
-                    // Mutation 2: random (already filled)
                     if mutation == 0 && path_len >= prefix_len {
                         path[..prefix_len].copy_from_slice(&legacy.bytes[..prefix_len]);
                     } else if mutation == 1 && path_len >= prefix_len {
@@ -1569,14 +1966,11 @@ mod tests {
                     let legacy_hit = path.len() >= prefix_len
                         && path[..prefix_len] == legacy.bytes[..prefix_len];
 
-                    // 16-byte window matcher (capture head) cross-check.
                     let mut window = [0u8; LEGACY_KEY];
                     let wlen = path.len().min(LEGACY_KEY);
                     window[..wlen].copy_from_slice(&path[..wlen]);
                     let window_hit =
                         wlen >= prefix_len && window[..prefix_len] == legacy.bytes[..prefix_len];
-                    // For paths shorter than prefix, both miss; for longer paths
-                    // window head matches legacy_hit on the significant prefix.
                     if path_len <= LEGACY_KEY {
                         assert_eq!(
                             window_hit, legacy_hit,
@@ -1592,13 +1986,9 @@ mod tests {
                     let wide = legacy.widen().expect("valid legacy must widen");
                     assert_eq!(wide.matches(&path), legacy_hit);
 
-                    // Bootstrap hardcoded oracle: only meaningful for exact
-                    // bootstrap prefixes, but map-backed must agree with widen.
                     let map_hit = map_backed_is_blacklisted(&path, &[wide]);
                     assert_eq!(map_hit, legacy_hit);
 
-                    // When the legacy prefix equals a bootstrap prefix, hardcoded
-                    // oracle must agree on matching paths.
                     for boot in neuromesh_common::BOOTSTRAP_PATH_DENY_PREFIXES {
                         if prefix_len == boot.len() && legacy.bytes[..prefix_len] == boot[..] {
                             assert_eq!(
@@ -1609,13 +1999,18 @@ mod tests {
                             );
                         }
                     }
+
+                    assert_eq!(
+                        legacy_starts_with_oracle(&path, &legacy),
+                        legacy_hit,
+                        "independent oracle diverged"
+                    );
                 }
             }
         }
     }
 
     /// Privileged stub: real aya `read_legacy_deny_entries` against bpffs.
-    /// Requires root + mounted bpffs; ignored in default CI.
     #[test]
     #[ignore = "requires root + bpffs; run manually on a BPF-LSM host"]
     fn privileged_aya_read_legacy_deny_entries_stub() {
