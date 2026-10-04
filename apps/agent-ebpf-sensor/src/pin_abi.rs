@@ -843,8 +843,8 @@ mod tests {
         files: Mutex<HashMap<PathBuf, Vec<u8>>>,
         dirs: Mutex<Vec<PathBuf>>,
         info: Mutex<HashMap<PathBuf, ObservedMapInfo>>,
-        /// When `Some(n)`, the n-th `rename` call (1-based) errors *after* prior
-        /// renames applied — the Nth rename itself does not mutate (crash after step).
+        /// When `Some(n)`, the n-th `rename` call (1-based) applies first, then
+        /// errors — models a crash *after* that rename step (sole-copy mid-stage).
         fail_after_renames: Mutex<Option<usize>>,
         rename_count: Mutex<usize>,
     }
@@ -962,8 +962,11 @@ mod tests {
         path[..len] == legacy.bytes[..len]
     }
 
-    /// Simulate `EbpfLoader::load` creating empty current-ABI deny maps when absent.
-    fn simulate_load_empty_canonical(io: &FakeIo, root: &Path) {
+    /// Model aya `create_pinned_by_name`: reuse an existing canonical pin as-is
+    /// with **no** ABI validation; create a fresh current-ABI map only when absent.
+    /// After load, assert both canonical deny maps match [`PINNED_MAP_ABI`] — a
+    /// stale 20B LIST must fail exactly as the verifier would (`EACCES`).
+    fn fake_load(io: &FakeIo, root: &Path) -> Result<()> {
         let list = root.join(PATH_DENY_LIST_MAP);
         let count = root.join(PATH_DENY_COUNT_MAP);
         if !io.exists(&list) {
@@ -974,6 +977,27 @@ mod tests {
             io.set_info(&count, count_info());
             io.set_payload(&count, 0u32.to_ne_bytes().to_vec());
         }
+        for (path, name) in [
+            (list.as_path(), PATH_DENY_LIST_MAP),
+            (count.as_path(), PATH_DENY_COUNT_MAP),
+        ] {
+            let info = io.map_info(path)?;
+            let exp = expected_abi(name).expect("PINNED_MAP_ABI row");
+            if !info.matches_expected(exp) {
+                bail!(
+                    "verifier would reject: value_size mismatch (pin {name} value_size={} expected={})",
+                    info.value_size,
+                    exp.value_size
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Fixture helper: ensure empty current-ABI canonical deny maps exist (R1 setup).
+    /// Prefer [`fake_load`] on the post-prepare / seed path.
+    fn simulate_load_empty_canonical(io: &FakeIo, root: &Path) {
+        fake_load(io, root).expect("fixture fake_load for empty current-ABI");
     }
 
     /// Apply seed the way `startup.rs` does after load (write LIST+COUNT payloads).
@@ -996,8 +1020,23 @@ mod tests {
     }
 
     fn write_canonical_entries(io: &FakeIo, list: &Path, count: &Path, entries: &[PathDenyEntry]) {
-        io.set_info(list, current_list_info());
-        io.set_info(count, count_info());
+        // Seed writes payloads only — never rewrite ObservedMapInfo (aya reuse keeps ABI).
+        let list_info = io
+            .map_info(list)
+            .expect("LIST map info must exist before seed write");
+        let count_info = io
+            .map_info(count)
+            .expect("COUNT map info must exist before seed write");
+        assert!(
+            list_info.matches_expected(expected_abi(PATH_DENY_LIST_MAP).expect("table")),
+            "write_canonical_entries: LIST ABI not current (value_size={})",
+            list_info.value_size
+        );
+        assert!(
+            count_info.matches_expected(expected_abi(PATH_DENY_COUNT_MAP).expect("table")),
+            "write_canonical_entries: COUNT ABI not current (value_size={})",
+            count_info.value_size
+        );
         let mut payload = Vec::with_capacity(entries.len() * PATH_DENY_ENTRY_SIZE);
         for e in entries {
             payload.extend_from_slice(&encode_path_deny_entry(e));
@@ -1225,7 +1264,7 @@ mod tests {
                 || results.contains(&MigrationResult::Compatible),
             "results={results:?}"
         );
-        simulate_load_empty_canonical(io, root);
+        fake_load(io, root).expect("fake_load after prepare");
         apply_seed_like_startup(io, root, seed);
         let got = read_canonical_entries(io, root).unwrap();
         assert!(!got.is_empty(), "deny list empty after converge");
@@ -1578,11 +1617,43 @@ mod tests {
             }
             other => panic!("unexpected seed {other:?}"),
         }
-        // Canonical LIST retained (sole copy — not yet under staging); COUNT was staged.
-        assert!(io.exists(&root.join(PATH_DENY_LIST_MAP)));
+        // Canonical names freed after successful read (sole-copy LIST must be
+        // staged/renamed — never left at the canonical name for aya reuse).
+        assert!(
+            !io.exists(&root.join(PATH_DENY_LIST_MAP)),
+            "stale canonical LIST pin survives; map_info={:?}",
+            io.map_info(&root.join(PATH_DENY_LIST_MAP)).ok()
+        );
         assert!(!io.exists(&root.join(PATH_DENY_COUNT_MAP)));
+        // Staged LIST must hold the legacy payload (sole copy preserved via rename).
+        assert!(io.exists(&legacy.join(PATH_DENY_LIST_MAP)));
+        assert!(io.exists(&legacy.join(PATH_DENY_COUNT_MAP)));
+        let staged_list = io.payload(&legacy.join(PATH_DENY_LIST_MAP)).unwrap();
+        assert_eq!(staged_list.len(), PATH_DENY_ENTRY_SIZE_LEGACY);
+        assert_eq!(
+            io.map_info(&legacy.join(PATH_DENY_LIST_MAP))
+                .unwrap()
+                .value_size,
+            20
+        );
 
-        // Second resume still converges (LIST still readable at canonical).
+        // fake_load + seed must produce current-ABI canonicals with operator byte-exact.
+        fake_load(&io, &root).expect("fake_load after mid-stage resume");
+        apply_seed_like_startup(&io, &root, &seed);
+        let got = read_canonical_entries(&io, &root).unwrap();
+        let expected = legacy_entries[0].widen().unwrap();
+        assert_eq!(got, vec![expected]);
+        assert_eq!(
+            io.map_info(&root.join(PATH_DENY_LIST_MAP))
+                .unwrap()
+                .value_size,
+            PATH_DENY_ENTRY_SIZE as u32
+        );
+
+        // Second resume still converges (both pins under staging).
+        // Reset canonicals so prepare sees MigrationInProgress again.
+        io.remove_file(&root.join(PATH_DENY_LIST_MAP)).unwrap();
+        io.remove_file(&root.join(PATH_DENY_COUNT_MAP)).unwrap();
         let (seed2, results2) = prepare_pin_root_for_load(&io, &root).unwrap();
         assert!(results2.contains(&MigrationResult::ResumedMigration));
         match seed2 {
@@ -1670,7 +1741,7 @@ mod tests {
         assert!(!io.exists(&root.join(PATH_DENY_LIST_MAP)));
         assert!(!io.exists(&root.join(PATH_DENY_COUNT_MAP)));
 
-        simulate_load_empty_canonical(&io, &root);
+        fake_load(&io, &root).expect("fake_load");
         apply_seed_like_startup(&io, &root, &seed);
         let got = read_canonical_entries(&io, &root).unwrap();
         assert_eq!(got.len(), expected_wide.len());
@@ -1974,6 +2045,7 @@ mod tests {
             &legacy_entries,
         );
         let operator = PathDenyEntry::from_prefix(b"/opt/nm/staging/").unwrap();
+        fake_load(&io, &root).expect("create current-ABI canonicals before seed write");
         write_canonical_entries(
             &io,
             &root.join(PATH_DENY_LIST_MAP),
@@ -1991,6 +2063,86 @@ mod tests {
             io.read_deny_count(&root.join(PATH_DENY_COUNT_MAP)).unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn mid_stage_resume_stages_sole_list_then_fake_load_seeds_current_abi() {
+        // COUNT staged, LIST still canonical (20B). Resume must rename LIST into
+        // staging (free canonical name) before load; fake_load + seed → 36B.
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins_q1_mid");
+        let legacy = root.join("legacy_abi_0");
+        io.touch_dir(&root);
+        io.touch_dir(&legacy);
+        let legacy_entries = legacy_from_prefixes(&[b"/opt/nm/staging/"]);
+        let mut list_payload = Vec::new();
+        list_payload.extend_from_slice(&encode_legacy_entry(&legacy_entries[0]));
+        io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
+        io.set_payload(&root.join(PATH_DENY_LIST_MAP), list_payload);
+        io.set_info(&legacy.join(PATH_DENY_COUNT_MAP), count_info());
+        io.set_payload(
+            &legacy.join(PATH_DENY_COUNT_MAP),
+            1u32.to_ne_bytes().to_vec(),
+        );
+
+        let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+        assert!(results.contains(&MigrationResult::ResumedMigration));
+        assert!(!io.exists(&root.join(PATH_DENY_LIST_MAP)));
+        assert!(io.exists(&legacy.join(PATH_DENY_LIST_MAP)));
+        assert_eq!(
+            io.payload(&legacy.join(PATH_DENY_LIST_MAP))
+                .unwrap()
+                .len(),
+            PATH_DENY_ENTRY_SIZE_LEGACY
+        );
+
+        fake_load(&io, &root).expect("fake_load");
+        apply_seed_like_startup(&io, &root, &seed);
+        let got = read_canonical_entries(&io, &root).unwrap();
+        let expected = legacy_entries[0].widen().unwrap();
+        assert_eq!(got, vec![expected.clone()]);
+        assert_eq!(encode_path_deny_entry(&got[0]), encode_path_deny_entry(&expected));
+    }
+
+    #[test]
+    fn crash_after_completing_rename_before_seed_still_converges() {
+        // Resume performs completing rename (canonical LIST → staged), then crash
+        // before seed. Next resume must still preserve entries.
+        let io = FakeIo::default();
+        let root = PathBuf::from("/pins_q1_complete_crash");
+        let legacy = root.join("legacy_abi_0");
+        io.touch_dir(&root);
+        io.touch_dir(&legacy);
+        let legacy_entries = legacy_from_prefixes(&[b"/opt/nm/staging/"]);
+        let mut list_payload = Vec::new();
+        list_payload.extend_from_slice(&encode_legacy_entry(&legacy_entries[0]));
+        io.set_info(&root.join(PATH_DENY_LIST_MAP), legacy_list_info());
+        io.set_payload(&root.join(PATH_DENY_LIST_MAP), list_payload);
+        io.set_info(&legacy.join(PATH_DENY_COUNT_MAP), count_info());
+        io.set_payload(
+            &legacy.join(PATH_DENY_COUNT_MAP),
+            1u32.to_ne_bytes().to_vec(),
+        );
+
+        // Completing rename is the first rename on resume — crash after it.
+        io.arm_fail_after_renames(1);
+        let err = prepare_pin_root_for_load(&io, &root).unwrap_err();
+        assert!(
+            err.to_string().contains("injected crash after rename"),
+            "{err}"
+        );
+        io.disarm_crash();
+        // After completing rename: both under staging, canonicals free.
+        assert!(!io.exists(&root.join(PATH_DENY_LIST_MAP)));
+        assert!(io.exists(&legacy.join(PATH_DENY_LIST_MAP)));
+        assert!(io.exists(&legacy.join(PATH_DENY_COUNT_MAP)));
+
+        let (seed, results) = prepare_pin_root_for_load(&io, &root).unwrap();
+        assert!(results.contains(&MigrationResult::ResumedMigration));
+        fake_load(&io, &root).expect("fake_load");
+        apply_seed_like_startup(&io, &root, &seed);
+        let got = read_canonical_entries(&io, &root).unwrap();
+        assert_eq!(got, vec![legacy_entries[0].widen().unwrap()]);
     }
 
     #[test]
@@ -2033,7 +2185,7 @@ mod tests {
                         "step={step:?} results={results:?}"
                     );
                     assert!(!results.contains(&MigrationResult::BootstrapFallback));
-                    simulate_load_empty_canonical(&io, &root);
+                    fake_load(&io, &root).expect("fake_load");
                     apply_seed_like_startup(&io, &root, &seed);
                     let got = read_canonical_entries(&io, &root).unwrap();
                     assert!(!got.is_empty());
@@ -2060,7 +2212,7 @@ mod tests {
         // Final cleanup deletes staging only at the end.
         let (io, root, operator) = run_until_crash_after(MigrationCrashAfter::LinkReplaced);
         let (seed, _results) = prepare_pin_root_for_load(&io, &root).unwrap();
-        simulate_load_empty_canonical(&io, &root);
+        fake_load(&io, &root).expect("fake_load");
         apply_seed_like_startup(&io, &root, &seed);
         assert!(got_has_operator(&io, &root, &operator));
         cleanup_legacy_abi_dirs(&io, &root).unwrap();
