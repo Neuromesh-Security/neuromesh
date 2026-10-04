@@ -105,6 +105,7 @@ pub fn side_entry_for_container(
 
 /// Idempotent reconcile for one pod (Linux: resolves inodes + writes BPF).
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)] // metrics arg is cfg(orchestrator)-gated
 pub async fn reconcile_pod(
     pod: &PodView,
     trust_domain: &str,

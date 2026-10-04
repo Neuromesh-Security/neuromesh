@@ -416,6 +416,7 @@ fn inotify_worker_loop(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)] // metrics arg is cfg(orchestrator)-gated
 async fn run_correlator(
     config: IdentityCorrelatorConfig,
     maps: Arc<Mutex<IdentityAllowMaps>>,

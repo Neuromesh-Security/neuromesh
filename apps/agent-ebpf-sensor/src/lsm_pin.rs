@@ -59,7 +59,7 @@ pub enum DenyMapSeedPlan {
 }
 
 /// Startup consistency for enforcement pins.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnforcementPinState {
     /// Neither link nor deny maps pinned — cold start.
     Cold,
@@ -67,6 +67,10 @@ pub enum EnforcementPinState {
     MapsReady { link_pinned: bool },
     /// Link pin without both deny maps — refuse (would be split-brain).
     InconsistentLinkWithoutMaps,
+    /// Deny-only `legacy_abi_<n>` staging present without canonical deny maps — resume
+    /// migration (Issue #208 / ADR-002). Process-only `proc_abi_*` is not this state.
+    /// Must not be mistaken for [`Self::InconsistentLinkWithoutMaps`].
+    MigrationInProgress,
 }
 
 /// Classify pin directory state before `EbpfLoader::load`.
@@ -76,6 +80,19 @@ pub fn classify_enforcement_pins(pin_root: &Path) -> EnforcementPinState {
     let link = pin_root.join(LSM_LINK_PIN_NAME);
     let maps_ok = list.is_file() && count.is_file();
     let link_ok = link.is_file();
+
+    // ADR-002: interrupted ABI migration leaves the LSM link + deny legacy_abi_<n> maps.
+    // Use deny-only select (not proc_abi_* / non-numeric legacy names) so process-map
+    // staging alone cannot look like MigrationInProgress. Check before
+    // InconsistentLinkWithoutMaps so kill -9 mid-migrate is recoverable.
+    if crate::pin_abi::select_deny_legacy_dir(&crate::pin_abi::RealPinAbiIo, pin_root)
+        .ok()
+        .flatten()
+        .is_some()
+        && !maps_ok
+    {
+        return EnforcementPinState::MigrationInProgress;
+    }
 
     if link_ok && !maps_ok {
         return EnforcementPinState::InconsistentLinkWithoutMaps;
@@ -245,6 +262,20 @@ mod tests {
         assert_eq!(
             classify_enforcement_pins(&dir),
             EnforcementPinState::InconsistentLinkWithoutMaps
+        );
+    }
+
+    #[test]
+    fn classify_migration_in_progress_not_inconsistent() {
+        let dir = tempfile_dir();
+        touch(&dir.join(LSM_LINK_PIN_NAME));
+        let legacy = dir.join("legacy_abi_0");
+        fs::create_dir_all(&legacy).unwrap();
+        touch(&legacy.join(PATH_DENY_LIST_MAP));
+        touch(&legacy.join(PATH_DENY_COUNT_MAP));
+        assert_eq!(
+            classify_enforcement_pins(&dir),
+            EnforcementPinState::MigrationInProgress
         );
     }
 
