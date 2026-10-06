@@ -573,6 +573,12 @@ jobs:
         id: buildmeta
         run: echo "timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> "$GITHUB_OUTPUT"
 
+      # Daily stamp for agent runtime apt layer only (Dockerfile ARG APT_REFRESH).
+      # Harmless unused build-arg for zt-policy-engine / webhook matrix rows.
+      - name: Compute daily APT_REFRESH stamp
+        id: apt-refresh
+        run: echo "stamp=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
       # Multiline Cosign PEM keys MUST NOT be passed through build-push-action's
       # line-oriented `secrets: key=${{ secrets.PEM }}` form — each PEM line is
       # parsed as a separate invalid secret entry, the mounted key becomes
@@ -596,6 +602,7 @@ jobs:
             GIT_SHA=${{ github.sha }}
             BUILD_TIMESTAMP=${{ steps.buildmeta.outputs.timestamp }}
             REQUIRE_BYTECODE_SIGNATURE=${{ steps.publish.outputs.should_publish == 'true' && matrix.needs_ebpf == true }}
+            APT_REFRESH=${{ steps.apt-refresh.outputs.stamp }}
           # SAME Cosign static key as image signing (PR #47). Consumed only by
           # apps/agent-ebpf-sensor/Dockerfile attestation stage via
           # `cosign sign-blob` over bytecode-manifest.json. When the env is

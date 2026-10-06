@@ -193,10 +193,18 @@ FROM debian:bookworm-slim AS runtime
 # libelf1: required by the agent for BPF object loading.
 # libpcre2-8-0: pulled transitively by the bookworm-slim base (e.g. grep). The
 # Rust agent never calls PCRE2 APIs — no attacker-influenced regex path — but we
-# still pin/upgrade the Debian security package so Trivy Notes (#135/#137/#140)
-# clear on rebuild. 32-bit-only PCRE2 CVEs (#138/#139) are N/A: we publish
-# x86_64/amd64 only (see README verified architecture scope).
-RUN apt-get update \
+# still upgrade the Debian security package so Trivy findings (#135/#137/#140 /
+# #160 CVE-2026-103111, #155 tzdata) clear when this layer rebuilds. 32-bit-only
+# PCRE2 CVEs (#138/#139) are N/A: we publish x86_64/amd64 only.
+#
+# APT_REFRESH: declared in this stage only. CI passes a daily UTC YYYYMMDD so
+# BuildKit cache-from (type=gha) does not forever reuse a stale apt-upgrade
+# layer with identical instruction text + base digest. Expensive Rust builder
+# stages stay cached.
+ARG APT_REFRESH=0
+# Reference APT_REFRESH so BuildKit invalidates this layer when the stamp changes.
+RUN echo "apt-refresh=${APT_REFRESH}" >/dev/null \
+    && apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends libelf1 libpcre2-8-0 \
     && rm -rf /var/lib/apt/lists/*

@@ -443,6 +443,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Daily stamp invalidates only the runtime apt layer (Dockerfile ARG
+      # APT_REFRESH). Keeps GHA cache for Rust builder stages.
+      - name: Compute daily APT_REFRESH stamp
+        id: apt-refresh
+        run: echo "stamp=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
       - name: Build Docker image
         id: docker-build
         continue-on-error: true
@@ -452,6 +458,8 @@ jobs:
           file: apps/agent-ebpf-sensor/Dockerfile
           tags: neuromesh-agent-ebpf-sensor:ci
           load: true
+          build-args: |
+            APT_REFRESH=${{ steps.apt-refresh.outputs.stamp }}
           cache-from: type=gha,scope=neuromesh-agent-ebpf-sensor
           cache-to: type=gha,mode=max,scope=neuromesh-agent-ebpf-sensor
 
@@ -464,6 +472,8 @@ jobs:
           file: apps/agent-ebpf-sensor/Dockerfile
           tags: neuromesh-agent-ebpf-sensor:ci
           load: true
+          build-args: |
+            APT_REFRESH=${{ steps.apt-refresh.outputs.stamp }}
           cache-from: type=gha,scope=neuromesh-agent-ebpf-sensor
           cache-to: type=gha,mode=max,scope=neuromesh-agent-ebpf-sensor
 
