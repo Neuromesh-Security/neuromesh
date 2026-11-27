@@ -247,7 +247,7 @@ mod tests {
             "start_network_monitor(",
             ".take_map(TELEMETRY_STATS_MAP)",
             ".take_map(TELEMETRY_RINGBUF_MAP)",
-            "AsyncFd::new(",
+            "AsyncFd::register(",
             "TelemetryPipeline::new()",
             "telemetry_stream::spawn_from_env().await",
             "WasmPolicyEngine::new()",
