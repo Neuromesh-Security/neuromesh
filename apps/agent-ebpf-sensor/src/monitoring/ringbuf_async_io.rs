@@ -80,8 +80,12 @@ mod tests {
             .expect("writer nonblocking");
         // Wrap the *std* fd — Tokio UnixStream is already reactor-registered and
         // cannot be nested under AsyncFd (EEXIST / AlreadyExists).
+        // SAFETY: `std_reader` is an owned, open `UnixStream`; `as_raw_fd()` always
+        // returns its single descriptor, which stays open because the `AsyncFd` owns
+        // the stream until it is dropped and the inner value is never swapped out.
         let mut async_fd =
-            AsyncFd::with_interest(std_reader, Interest::READABLE).expect("AsyncFd::with_interest");
+            unsafe { AsyncFd::register_with_interest(std_reader, Interest::READABLE) }
+                .expect("AsyncFd::register_with_interest");
 
         let received: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let received_task = Arc::clone(&received);
@@ -146,8 +150,12 @@ mod tests {
         std_reader
             .set_nonblocking(true)
             .expect("reader nonblocking");
+        // SAFETY: `std_reader` is an owned, open `UnixStream`; `as_raw_fd()` always
+        // returns its single descriptor, which stays open because the `AsyncFd` owns
+        // the stream until it is dropped and the inner value is never swapped out.
         let mut async_fd =
-            AsyncFd::with_interest(std_reader, Interest::READABLE).expect("AsyncFd::with_interest");
+            unsafe { AsyncFd::register_with_interest(std_reader, Interest::READABLE) }
+                .expect("AsyncFd::register_with_interest");
 
         let mut buf = [0u8; 8];
         let poll_once = async_fd.async_io_mut(Interest::READABLE, |stream| {
