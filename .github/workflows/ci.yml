@@ -426,6 +426,14 @@ jobs:
             .
             apps/agent-ebpf-sensor
 
+      # agent-ebpf-sensor/build.rs strips .BTF.ext with llvm-objcopy and fails the
+      # build ("llvm-objcopy is required ... install llvm and retry") when it is
+      # absent. The ubuntu-latest image no longer guarantees it, so install it the
+      # same way every other job that builds the sensor does.
+      - name: Install native build deps (C BPF objects, llvm-objcopy)
+        timeout-minutes: 10
+        run: bash scripts/ci_apt_install.sh clang llvm cmake g++ gcc build-essential pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
+
       - name: Run events/sec regression gate
         run: bash scripts/benchmarks/events_per_second.sh
 
