@@ -1,0 +1,22 @@
+# cargo-deny configuration (discovered automatically at .cargo/deny.toml).
+#
+# Scope: ADVISORIES ONLY. The Security Scan Pipeline runs
+# `cargo deny check advisories` when no root deny.toml exists; this file keeps
+# that behaviour and adds one narrow, reviewed exception. It deliberately does
+# not configure bans/licenses/sources, so those checks stay out of scope exactly
+# as before. Every other advisory still fails the check.
+#
+# Keep in sync with .cargo/audit.toml (same exception, same rationale).
+#
+# RUSTSEC-2026-0543 - `chrono` is unmaintained (informational: no known
+# vulnerability); affects all versions, no patched version exists. It is a
+# direct dependency of agent-ebpf-sensor and splunk-hec-forwarder and a
+# transitive dependency of rskafka 0.6.0 (latest release, 2025-03-20), so
+# removing it needs a replacement for rskafka as well as for our own usage.
+# Alternatives named by the advisory: jiff, time.
+# Advisory: https://rustsec.org/advisories/RUSTSEC-2026-0543
+# Review by 2027-02-27, or earlier if rskafka/chrono publish a change.
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (no known vulnerability, all versions affected, no patched version). Pulled in by rskafka 0.6.0 (latest) as well as by our own code; removal requires replacing rskafka. Reviewed; revisit by 2027-02-27." },
+]
