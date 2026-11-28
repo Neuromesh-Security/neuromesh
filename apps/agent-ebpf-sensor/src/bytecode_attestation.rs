@@ -56,6 +56,7 @@ use ed25519_dalek::pkcs8::DecodePublicKey as Ed25519DecodePublicKey;
 use ed25519_dalek::VerifyingKey as Ed25519VerifyingKey;
 use p256::ecdsa::signature::Verifier as EcdsaVerifier;
 use p256::ecdsa::{Signature as EcdsaSignature, VerifyingKey as P256VerifyingKey};
+use p256::pkcs8::DecodePublicKey as P256DecodePublicKey;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -522,12 +523,14 @@ pub fn verify_startup(artifacts: &[EmbeddedArtifact<'_>]) -> Result<(), Attestat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding as Ed25519LineEnding;
     use ed25519_dalek::pkcs8::EncodePublicKey as Ed25519EncodePublicKey;
     use ed25519_dalek::{Signer as Ed25519Signer, SigningKey as Ed25519SigningKey};
     use p256::ecdsa::signature::Signer as P256EcdsaSigner;
     use p256::ecdsa::SigningKey as P256SigningKey;
-    use p256::pkcs8::LineEnding;
-    use rand_core::OsRng;
+    use p256::pkcs8::EncodePublicKey as P256EncodePublicKey;
+    use p256::pkcs8::LineEnding as P256LineEnding;
+    use rand_core::{OsRng, RngCore};
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -595,6 +598,57 @@ mod tests {
         }
     }
 
+    /// Random P-256 signing key from the same `OsRng` the Ed25519 tests use.
+    ///
+    /// `ecdsa` 0.17 deprecates `SigningKey::random` and expects `rand_core` 0.10, while
+    /// `ed25519-dalek` 2.x still needs `rand_core` 0.6, so a valid non-zero scalar below the
+    /// group order is drawn from the existing RNG (rejection sampling, negligible retries).
+    fn random_p256_signing_key() -> P256SigningKey {
+        loop {
+            let mut scalar = [0u8; 32];
+            OsRng.fill_bytes(&mut scalar);
+            if let Ok(key) = P256SigningKey::from_slice(&scalar) {
+                return key;
+            }
+        }
+    }
+
+    /// NIST P-256 group order n, big-endian.
+    const P256_ORDER_BE: [u8; 32] = [
+        0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63,
+        0x25, 0x51,
+    ];
+
+    /// Returns the same ECDSA signature with `s` replaced by `n - s`.
+    ///
+    /// `(r, s)` and `(r, n - s)` verify identically; exactly one of them is "high-S". Cosign
+    /// signs with Go's `ecdsa.SignASN1`, which does not normalise `s`, so roughly half of all
+    /// real Cosign signatures are high-S and must stay acceptable.
+    fn mirror_s(sig: &EcdsaSignature) -> EcdsaSignature {
+        let bytes = sig.to_bytes();
+        let raw: &[u8] = bytes.as_ref();
+        assert_eq!(raw.len(), 64, "P-256 raw signature is r || s, 64 bytes");
+        let (r, s) = raw.split_at(32);
+        let mut mirrored_s = [0u8; 32];
+        let mut borrow = 0i16;
+        for i in (0..32).rev() {
+            let diff = i16::from(P256_ORDER_BE[i]) - i16::from(s[i]) - borrow;
+            if diff < 0 {
+                mirrored_s[i] = (diff + 256) as u8;
+                borrow = 1;
+            } else {
+                mirrored_s[i] = diff as u8;
+                borrow = 0;
+            }
+        }
+        assert_eq!(borrow, 0, "s must be below the group order");
+        let mut out = [0u8; 64];
+        out[..32].copy_from_slice(r);
+        out[32..].copy_from_slice(&mirrored_s);
+        EcdsaSignature::from_slice(&out).expect("mirrored signature is a valid (r, s) pair")
+    }
+
     struct Fixture {
         dir: PathBuf,
         manifest: PathBuf,
@@ -607,10 +661,10 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let dir = tmp_dir();
-            let signing_key = P256SigningKey::random(&mut OsRng);
+            let signing_key = random_p256_signing_key();
             let pem = signing_key
                 .verifying_key()
-                .to_public_key_pem(LineEnding::LF)
+                .to_public_key_pem(P256LineEnding::LF)
                 .expect("pem");
             let public_key = dir.join("cosign.pub");
             write(&public_key, pem.as_bytes());
@@ -688,6 +742,24 @@ mod tests {
     fn valid_manifest_signature_and_digests_succeeds() {
         let f = Fixture::new();
         f.verify().expect("valid attestation must succeed");
+    }
+
+    /// Cosign signs with Go's `ecdsa.SignASN1`, which does not normalise `s`. A verifier that
+    /// rejected "high-S" signatures would refuse roughly half of all genuine Cosign signatures
+    /// and the agent would fail closed at startup. Pin that both halves are accepted.
+    #[test]
+    fn high_s_and_low_s_ecdsa_signatures_both_verify() {
+        let f = Fixture::new();
+        let json = f.manifest_json();
+        let sig: EcdsaSignature = P256EcdsaSigner::sign(&f.signing_key, json.as_bytes());
+        let mirrored = mirror_s(&sig);
+        assert_ne!(sig, mirrored, "mirroring s must change the signature");
+        for candidate in [&sig, &mirrored] {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(candidate.to_der());
+            write(&f.signature, b64.as_bytes());
+            f.verify()
+                .expect("ECDSA P-256 signature must verify whichever half s is in");
+        }
     }
 
     #[test]
@@ -804,7 +876,7 @@ mod tests {
         let sk = Ed25519SigningKey::generate(&mut OsRng);
         let pem = sk
             .verifying_key()
-            .to_public_key_pem(LineEnding::LF)
+            .to_public_key_pem(Ed25519LineEnding::LF)
             .expect("ed25519 pem");
         let pub_path = dir.join("cosign.pub");
         write(&pub_path, pem.as_bytes());
@@ -1000,10 +1072,10 @@ mod tests {
     fn verify_startup_pubkey_env_wrong_valid_file_fails_closed() {
         let f = Fixture::new();
         // Different valid Cosign-style P-256 PEM (not the signing key).
-        let other_key = P256SigningKey::random(&mut OsRng);
+        let other_key = random_p256_signing_key();
         let wrong_pem = other_key
             .verifying_key()
-            .to_public_key_pem(LineEnding::LF)
+            .to_public_key_pem(P256LineEnding::LF)
             .expect("pem");
         let wrong = f.dir.join("wrong-but-valid.pub");
         write(&wrong, wrong_pem.as_bytes());

@@ -750,9 +750,9 @@ pub fn spawn_policy_sync(
 mod tests {
     use super::*;
     use base64::Engine;
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
     use ed25519_dalek::pkcs8::EncodePublicKey as Ed25519EncodePublicKey;
     use ed25519_dalek::{Signer as Ed25519Signer, SigningKey as Ed25519SigningKey};
-    use p256::pkcs8::LineEnding;
     use rand_core::OsRng;
     use std::io::{Read, Write};
     use std::net::TcpListener;

@@ -40,7 +40,13 @@ pub async fn start_network_monitor(
             format!("BPF map `{NETWORK_EVENTS_MAP}` missing from object file")
         })?)?;
 
-    let mut async_ring = AsyncFd::new(ring_buf)?;
+    // SAFETY: `ring_buf` is an aya `RingBuf<MapData>` that owns the BPF map file
+    // descriptor, so `as_raw_fd()` returns the same open descriptor for the whole
+    // lifetime of the `AsyncFd` that takes ownership of it here. Nothing duplicates
+    // and closes that descriptor, and the inner value is never swapped or taken
+    // back out (no `get_mut` / `into_inner` on this handle), which is the contract
+    // Tokio's I/O-safety registration requires (RUSTSEC-2026-0386).
+    let mut async_ring = unsafe { AsyncFd::register(ring_buf) }.map_err(std::io::Error::from)?;
 
     tokio::spawn(async move {
         let mut handler = NetworkEventHandler::default();

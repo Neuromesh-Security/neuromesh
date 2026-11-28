@@ -118,7 +118,13 @@ pub async fn arm_visibility_and_observability(
                 anyhow::anyhow!("{TELEMETRY_RINGBUF_MAP} map missing from eBPF object")
             })?,
     )?;
-    let async_ring = AsyncFd::new(telemetry_map)?;
+    // SAFETY: `telemetry_map` is an aya `RingBuf<MapData>` that owns the BPF map file
+    // descriptor, so `as_raw_fd()` returns the same open descriptor for the whole
+    // lifetime of the `AsyncFd` that takes ownership of it here. Nothing duplicates
+    // and closes that descriptor, and the inner value is never swapped or taken
+    // back out (no `get_mut` / `into_inner` on this handle), which is the contract
+    // Tokio's I/O-safety registration requires (RUSTSEC-2026-0386).
+    let async_ring = unsafe { AsyncFd::register(telemetry_map) }.map_err(std::io::Error::from)?;
     let pipeline = TelemetryPipeline::new();
     let telemetry_stream = telemetry_stream::spawn_from_env().await;
     let _wasm_policy = WasmPolicyEngine::new();

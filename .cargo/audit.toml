@@ -1,0 +1,24 @@
+# cargo-audit configuration (read automatically from .cargo/audit.toml).
+#
+# This file records ONE narrow, reviewed exception. Every other advisory,
+# including every other "unmaintained" / "unsound" warning, still fails
+# `cargo audit --deny warnings` in the Security Scan Pipeline.
+#
+# RUSTSEC-2026-0543 - `chrono` is unmaintained (informational: no known
+# vulnerability).
+#   - Affects ALL chrono versions; the advisory lists no patched version, so a
+#     `cargo update` cannot clear it. Recommended alternatives: jiff, time.
+#   - chrono is a direct dependency of agent-ebpf-sensor and
+#     splunk-hec-forwarder (timestamps: Utc::now(), RFC 3339 format/parse) and a
+#     transitive dependency of rskafka 0.6.0, which both Kafka forwarders and
+#     the sensor's slow path use. rskafka 0.6.0 (2025-03-20) is its latest
+#     release, so migrating only our own code would not remove chrono from the
+#     dependency graph.
+#   - Exposure: no vulnerability is attached to the advisory; the risk is that
+#     future defects will not be fixed upstream.
+#   - Removal path: replace chrono in our code with `time` or `jiff` AND replace
+#     or fork rskafka (or move to a client that no longer depends on chrono).
+#   - Advisory: https://rustsec.org/advisories/RUSTSEC-2026-0543
+#   - Review by 2027-02-27, or earlier if rskafka/chrono publish a change.
+[advisories]
+ignore = ["RUSTSEC-2026-0543"]
